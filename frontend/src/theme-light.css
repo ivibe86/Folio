@@ -1,0 +1,302 @@
+/* ═══════════════════════════════════════════
+   Folio — LIGHT THEME
+   Cool Slate Design System v11
+   "Dark Stage Islands" Edition
+   ═══════════════════════════════════════════ */
+
+:root {
+    /* ── Steel Blue Palette ── */
+    --steel-50:  #f0f4f8;
+    --steel-100: #d9e2ec;
+    --steel-200: #bcccdc;
+    --steel-300: #9fb3c8;
+    --steel-400: #829ab1;
+    --steel-500: #627d98;
+    --steel-600: #486581;
+    --steel-700: #334e68;
+    --steel-800: #243b53;
+    --steel-900: #102a43;
+    --steel-950: #0a1929;
+
+    /* ── Cool Slate Foundation (CHANGED: neutralized) ── */
+    --bg-base:      #F5F5F5;
+    --bg-card:      #FFFFFF;
+    --bg-recessed:  #EFEFEF;
+    --bg-hero:      #1E293B;
+    --border-focus:  #B0B0B0;
+
+    /* ── Mesh Gradient Canvas (CHANGED: disabled for clean white) ── */
+    --mesh-canvas: none;
+
+    --mesh-pos-1: 15% 20%;
+    --mesh-pos-2: 85% 30%;
+    --mesh-pos-3: 50% 80%;
+    --mesh-pos-4: 30% 60%;
+
+    /* ── Accent ── */
+    --accent:        #2563EB;
+    --accent-hover:  #1D4ED8;
+    --accent-soft:   rgba(37, 99, 235, 0.10);
+    --accent-glow:   rgba(37, 99, 235, 0.08);
+    --accent-border: rgba(37, 99, 235, 0.22);
+
+    /* ── Surfaces — Clean White (CHANGED: removed blue tints) ── */
+    --body-bg:      #FAFAFA;
+    --surface:      rgba(255, 255, 255, 0.92);
+    --surface-alt:  rgba(248, 248, 248, 0.90);
+    --surface-100:  rgba(245, 245, 245, 0.92);
+    --surface-200:  rgba(235, 235, 235, 0.68);
+    --surface-300:  rgba(220, 220, 220, 0.58);
+    --surface-elevated: rgba(255, 255, 255, 0.97);
+
+    /* ── Glass tokens (CHANGED: neutral white glass) ── */
+    --glass-blur:       16px;
+    --glass-blur-heavy: 40px;
+    --glass-bg:         rgba(255, 255, 255, 0.85);
+    --glass-bg-strong:  rgba(255, 255, 255, 0.94);
+    --glass-bg-subtle:  rgba(245, 245, 245, 0.58);
+    --glass-border:     rgba(0, 0, 0, 0.08);
+    --glass-shine:      linear-gradient(135deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.05) 45%, rgba(255,255,255,0.18) 100%);
+
+    /* ── Frosted Glass Hero (Layer 1) — used by NON-island cards (CHANGED: neutral) ── */
+    --frost-bg:         rgba(255, 255, 255, 0.70);
+    --frost-bg-strong:  rgba(255, 255, 255, 0.80);
+    --frost-blur:       40px;
+    --frost-saturate:   1.2;
+    --frost-border:     rgba(0, 0, 0, 0.08);
+    --frost-shadow:
+        0 1px 3px rgba(0, 0, 0, 0.05),
+        0 4px 16px rgba(0, 0, 0, 0.06),
+        0 10px 38px rgba(0, 0, 0, 0.04),
+        0 0 0 1px rgba(0, 0, 0, 0.03),
+        inset 0 1px 0 rgba(255, 255, 255, 0.90);
+    --frost-shadow-hover:
+        0 2px 5px rgba(0, 0, 0, 0.06),
+        0 8px 28px rgba(0, 0, 0, 0.08),
+        0 20px 56px rgba(0, 0, 0, 0.06),
+        0 0 0 1px rgba(0, 0, 0, 0.04),
+        inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    --frost-inner-glow: radial-gradient(ellipse at 30% 20%, rgba(20, 184, 166, 0.04), transparent 70%);
+
+    /* ── Frost Edge Highlight ── */
+    --frost-edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85),
+                            inset 0 -1px 0 rgba(0, 0, 0, 0.02);
+
+    /* ── Borders (CHANGED: neutral) ── */
+    --card-border:       rgba(0, 0, 0, 0.08);
+    --card-border-hover: rgba(37, 99, 235, 0.25);
+    --border-subtle:     rgba(0, 0, 0, 0.05);
+
+    /* ── Text — Cool Slate ── */
+    --text-primary:   #1A1F2B;
+    --text-secondary: #475569;
+    --text-muted:     #8C95A6;
+    --text-on-dark:   #F1F5F9;
+
+    /* ── Semantic ── */
+    --positive:       #059669;
+    --positive-light: rgba(5, 150, 105, 0.08);
+    --negative:       #E11D48;
+    --negative-light: rgba(225, 29, 72, 0.08);
+    --warning:        #D97706;
+    --warning-light:  rgba(217, 119, 6, 0.08);
+
+    /* ── Flow Colors (Sankey) – luminous for dark island surface ── */
+    --flow-income:          #2EE8A0;
+    --flow-income-glow:     rgba(46, 232, 160, 0.22);
+    --flow-expenses:        #38BDF8;
+    --flow-expenses-glow:   rgba(56, 189, 248, 0.22);
+    --flow-savings:         #22D3EE;
+    --flow-savings-glow:    rgba(34, 211, 238, 0.20);
+    --flow-transfer:        #A78BFA;
+    --flow-transfer-glow:   rgba(167, 139, 250, 0.20);
+    --flow-default:         #94A3B8;
+    --flow-default-glow:    rgba(148, 163, 184, 0.16);
+    --flow-from-balance:    #FBBF24;
+    --flow-from-balance-glow: rgba(251, 191, 36, 0.22);
+    --flow-to-balance:      #22D3EE;
+    --flow-to-balance-glow: rgba(34, 211, 238, 0.20);
+    --flow-tax:             #FBBF24;
+    --flow-rose:            #FB7185;
+
+    /* ── Card System (CHANGED: clean white) ── */
+    --card-bg:        #FFFFFF;
+    --ribbon-bg:      rgba(255, 255, 255, 0.85);
+    --card-bg-flat:   #F8F8F8;
+    --card-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.04),
+        0 3px 10px rgba(0, 0, 0, 0.04),
+        0 8px 26px rgba(0, 0, 0, 0.03),
+        0 0 0 1px rgba(0, 0, 0, 0.04),
+        inset 0 1px 0 rgba(255, 255, 255, 0.90);
+    --card-shadow-hover:
+        0 2px 4px rgba(0, 0, 0, 0.05),
+        0 8px 24px rgba(0, 0, 0, 0.06),
+        0 22px 52px rgba(0, 0, 0, 0.04),
+        0 0 0 1px rgba(0, 0, 0, 0.05),
+        inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    --card-radius: 20px;
+
+    /* ── Sidebar — Premium Frosted (CHANGED: neutral white) ── */
+    --sidebar-bg:          rgba(255, 255, 255, 0.92);
+    --sidebar-border:      rgba(0, 0, 0, 0.06);
+    --sidebar-text:        #5A6478;
+    --sidebar-text-active: #1A1F2B;
+    --sidebar-hover:       rgba(37, 99, 235, 0.06);
+    --sidebar-active-bg:   rgba(37, 99, 235, 0.08);
+    --sidebar-logo-shadow: 0 4px 16px rgba(37, 99, 235, 0.25);
+
+    /* ── Glass Rail (CHANGED: neutral white) ── */
+    --rail-bg:                   rgba(255, 255, 255, 0.75);
+    --rail-blur:                 40px;
+    --rail-saturate:             1.2;
+    --rail-border:               rgba(0, 0, 0, 0.04);
+    --rail-shadow:
+        1px 0 0 rgba(0, 0, 0, 0.04),
+        0 0 0 0 transparent;
+    --rail-link-hover:           rgba(37, 99, 235, 0.07);
+    --rail-link-active-bg:       rgba(37, 99, 235, 0.12);
+    --rail-link-active-shadow:   0 1px 4px rgba(37, 99, 235, 0.10), 0 0 0 1px rgba(37, 99, 235, 0.06);
+    --rail-sync-bg:              rgba(59, 130, 246, 0.06);
+    --rail-sync-bg-hover:        rgba(59, 130, 246, 0.12);
+
+    /* ── Glass Rail — Separator Glow (CHANGED: neutral) ── */
+    --rail-separator-glow:       rgba(0, 0, 0, 0.12);
+    --rail-separator-glow-center: rgba(0, 0, 0, 0.25);
+
+    /* ── Glass Rail — Copilot ── */
+    --rail-copilot-bg:             rgba(37, 99, 235, 0.03);
+    --rail-copilot-bg-hover:       rgba(37, 99, 235, 0.06);
+    --rail-copilot-bg-active:      rgba(37, 99, 235, 0.10);
+    --rail-copilot-border:         rgba(37, 99, 235, 0.10);
+    --rail-copilot-border-hover:   rgba(37, 99, 235, 0.22);
+    --rail-copilot-border-active:  rgba(37, 99, 235, 0.25);
+    --rail-copilot-glow-hover:     0 0 20px rgba(37, 99, 235, 0.06);
+    --rail-copilot-glow-active:    0 0 16px rgba(37, 99, 235, 0.10);
+
+    /* ── Topbar (CHANGED: neutral) ── */
+    --topbar-bg:     rgba(255, 255, 255, 0.80);
+    --topbar-border: rgba(0, 0, 0, 0.06);
+
+    /* ═══════════════════════════════════════════
+       DARK STAGE ISLANDS — Light Mode
+       Deep Slate surfaces for hero + sankey
+       (UNCHANGED — these should stay dark)
+       ═══════════════════════════════════════════ */
+
+    --island-bg: rgba(27, 31, 42, 0.94);
+    --island-bg-solid: #1B1F2A;
+    --island-bg-gradient:
+        linear-gradient(
+            135deg,
+            rgba(27, 31, 42, 0.96) 0%,
+            rgba(22, 26, 36, 0.97) 50%,
+            rgba(18, 21, 30, 0.98) 100%
+        );
+
+    /* Island text (light-on-dark) */
+    --island-text-primary:   #F1F5F9;
+    --island-text-secondary: #94A3B8;
+    --island-text-muted:     #64748B;
+
+    /* Island borders — subtle luminous edge */
+    --island-border:       rgba(56, 189, 248, 0.12);
+        
+    --island-border-hover: rgba(56, 189, 248, 0.20);
+
+    /* Island glow ring (outer box-shadow) */
+    --island-glow: none;
+    --island-glow-hover:
+        0 2px 5px rgba(0, 0, 0, 0.14),
+        0 8px 28px rgba(0, 0, 0, 0.12),
+        0 20px 56px rgba(0, 0, 0, 0.10),
+        0 0 0 1px rgba(56, 189, 248, 0.32),
+        0 0 28px rgba(56, 189, 248, 0.22),
+        0 0 60px rgba(56, 189, 248, 0.12),
+        inset 0 1px 0 rgba(100, 140, 180, 0.08);
+
+    /* Island inner border subtlety */
+    --island-border-subtle: rgba(148, 163, 184, 0.08);
+
+    /* Island semantic colors — brighter versions for dark surface */
+    --island-positive:       #34D399;
+    --island-negative:       #FB7185;
+    --island-warning:        #FBBF24;
+    --island-accent:         #38BDF8;
+
+    /* ═══════════════════════════════════════════
+       SANKEY THEATER — DARK ISLAND
+       (UNCHANGED)
+       ═══════════════════════════════════════════ */
+
+    --sankey-theater-bg: var(--island-bg-gradient);
+    --sankey-theater-border: var(--island-border);
+    --sankey-theater-shadow: var(--island-glow);
+    --sankey-zone: rgba(255, 255, 255, 0.04);
+
+    /* Theater glow border — active in light mode now */
+    --theater-glow-border: none;
+
+    /* Sankey ambient wash – luminous washes on dark island */
+    --sankey-ambient:
+        radial-gradient(ellipse at 12% 40%, rgba(46, 232, 160, 0.10), transparent 45%),
+        radial-gradient(ellipse at 50% 50%, rgba(56, 189, 248, 0.08), transparent 40%),
+        radial-gradient(ellipse at 88% 55%, rgba(251, 113, 133, 0.07), transparent 45%),
+        radial-gradient(ellipse at 50% 90%, rgba(167, 139, 250, 0.07), transparent 45%);
+
+    /* Sankey label colors — light text on dark island */
+    --sankey-label-primary:    #F1F5F9;
+    --sankey-label-secondary:  #CBD5E1;
+    --sankey-label-muted:      #94A3B8;
+
+    /* ── Net Worth chart container (now on dark island) ── */
+    --nw-container-border:     none;
+    --nw-container-shadow:     none;
+
+    /* ── Category Pill Card — Light surface (no dark island) ── */
+    --pill-card-bg:          rgba(255, 255, 255, 0.92);
+    --pill-card-border:      rgba(0, 0, 0, 0.08);
+    --pill-card-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.04),
+        0 3px 10px rgba(0, 0, 0, 0.04),
+        0 0 0 1px rgba(0, 0, 0, 0.04),
+        inset 0 1px 0 rgba(255, 255, 255, 0.90);
+    --pill-bg:               rgba(0, 0, 0, 0.03);
+    --pill-border:           rgba(0, 0, 0, 0.08);
+    --pill-bg-active:        12%;
+    --pill-border-active:    25%;
+    --pill-glow:             none;
+    --pill-glow-active:      none;
+
+    /* ── Insight ── */
+    --insight-gradient: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(59, 130, 246, 0.01) 100%);
+
+    /* ── Tinted card surfaces (CHANGED: reduced blue tint intensity) ── */
+    --surface-accounts:  linear-gradient(135deg, rgba(16, 185, 129, 0.04) 0%, rgba(16, 185, 129, 0.01) 100%);
+    --surface-credit:    linear-gradient(135deg, rgba(244, 63, 94, 0.04) 0%, rgba(244, 63, 94, 0.01) 100%);
+    --surface-metric:    linear-gradient(180deg, rgba(255, 255, 255, 0.20) 0%, rgba(37, 99, 235, 0.02) 60%, rgba(37, 99, 235, 0.005) 100%);
+    --surface-insight:   linear-gradient(135deg, rgba(37, 99, 235, 0.03) 0%, rgba(37, 99, 235, 0.005) 100%);
+    --surface-category:  linear-gradient(135deg, rgba(37, 99, 235, 0.02) 0%, transparent 100%);
+    --surface-trend:     linear-gradient(135deg, rgba(37, 99, 235, 0.02) 0%, transparent 100%);
+    --surface-forecast:  linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(37, 99, 235, 0.02) 50%, rgba(16, 185, 129, 0.015) 100%);
+    --surface-upcoming:  linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(245, 158, 11, 0.02) 50%, rgba(244, 63, 94, 0.015) 100%);
+
+    /* ── Interactive (mouse-driven) ── */
+    --mx: 50%;
+    --my: 50%;
+
+    /* ── Typography ── */
+    --font-sans:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-display: 'Inter', -apple-system, system-ui, sans-serif;
+    --font-mono:    'DM Mono', 'Cascadia Code', 'SF Mono', monospace;
+
+    /* ── Transitions ── */
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast:   150ms;
+    --duration-normal: 280ms;
+    --duration-slow:   500ms;
+
+    /* ── Analytics Waterfall ── */
+    --wf-bar-glow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    color-scheme: light;
+}

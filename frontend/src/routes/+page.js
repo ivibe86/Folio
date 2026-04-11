@@ -1,0 +1,38 @@
+export const ssr = false;
+
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('prefetch_timeout')), ms))
+    ]);
+}
+
+export async function load({ fetch }) {
+    let bundle;
+
+    // Use the pre-fired fetch from app.html if available, but don't block forever
+    if (typeof window !== 'undefined' && window.__dashboardData) {
+        try {
+            bundle = await withTimeout(window.__dashboardData, 4000);
+        } catch (_) {
+            bundle = null;
+        }
+        // Clear it so it's not reused on client-side navigation
+        window.__dashboardData = null;
+    }
+
+    // Fallback if prefetch failed or timed out
+    if (!bundle) {
+        const { createApi } = await import('$lib/api.js');
+        const loadApi = createApi(fetch);
+        bundle = await loadApi.getDashboardBundle('biweekly');
+    }
+
+    return {
+        summary: bundle.summary || {},
+        accounts: bundle.accounts || [],
+        monthly: bundle.monthly || [],
+        categories: bundle.categories || [],
+        netWorthSeries: Array.isArray(bundle.netWorthSeries) ? bundle.netWorthSeries : [],
+    };
+}

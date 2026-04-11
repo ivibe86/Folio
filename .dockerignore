@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Environment files (injected via docker-compose env_file, not baked in)
+**/.env
+**/.env_bkp
+**/.env.local
+
+# Data (mounted as volume)
+data/
+
+# Node modules (rebuilt inside container)
+**/node_modules
+
+# Python virtual environments
+**/.venv
+**/__pycache__
+**/*.pyc
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+
+# Build artifacts
+**/build
+**/.svelte-kit

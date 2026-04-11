@@ -1,0 +1,1173 @@
+<script>
+    import '../app.css';
+    import { page } from '$app/stores';
+    import { beforeNavigate, afterNavigate } from '$app/navigation';    
+    import { darkMode, syncing } from '$lib/stores.js';
+    import { api } from '$lib/api.js';
+    import { relativeTime } from '$lib/utils.js';
+    import { onMount } from 'svelte';
+    import { loadProfiles } from '$lib/stores/profileStore.js';
+
+    export let params = {};
+
+    let lastSynced = null;
+
+    /* —— Navigation —— */
+    const navPrimary = [
+        { path: '/',             icon: 'dashboard',              label: 'Dashboard' },
+        { path: '/transactions', icon: 'receipt_long',           label: 'Transactions' },
+    ];
+
+    const navSecondary = [
+        { path: '/analytics',    icon: 'monitoring',             label: 'Analytics' },
+        { path: '/budget',       icon: 'account_balance_wallet', label: 'Budgets' },
+    ];
+
+    const copilotItem = { path: '/copilot', icon: 'auto_awesome', label: 'Copilot' };
+
+    /* —— Sync —— */
+    async function handleSync() {
+        $syncing = true;
+        try {
+            const result = await api.sync();
+            lastSynced = result.last_updated;
+            loadProfiles();
+        } catch (e) {
+            console.error('Sync failed:', e);
+        } finally {
+            $syncing = false;
+        }
+    }
+
+    /* —— Mouse tracking —— */
+    let mouseX = '50%';
+    let mouseY = '50%';
+
+    let glowRafId = null;
+
+    function handleMouseMove(e) {
+        mouseX = e.clientX + 'px';
+        mouseY = e.clientY + 'px';
+
+        if (glowRafId) return;
+        glowRafId = requestAnimationFrame(() => {
+            document.documentElement.style.setProperty('--mx', mouseX);
+            document.documentElement.style.setProperty('--my', mouseY);
+            glowRafId = null;
+        });
+    }
+
+    let cardRafId = null;
+    let lastCardMouseX = 0;
+    let lastCardMouseY = 0;
+
+    function handleCardMouseMove(e) {
+        lastCardMouseX = e.clientX;
+        lastCardMouseY = e.clientY;
+
+        if (cardRafId) return;
+        cardRafId = requestAnimationFrame(() => {
+            const cards = document.querySelectorAll(
+                '.card, .card-hero, .card-accounts, .card-credit, .metric-ribbon, .card-insight, .card-forecast, .card-upcoming'
+            );
+            for (let i = 0; i < cards.length; i++) {
+                const rect = cards[i].getBoundingClientRect();
+                cards[i].style.setProperty('--card-mx', (lastCardMouseX - rect.left) + 'px');
+                cards[i].style.setProperty('--card-my', (lastCardMouseY - rect.top) + 'px');
+            }
+
+            /* ââ Rail glow tracking ââ */
+            const rail = document.querySelector('.glass-rail');
+            if (rail) {
+                const rect = rail.getBoundingClientRect();
+                rail.style.setProperty('--rail-mx', (lastCardMouseX - rect.left) + 'px');
+                rail.style.setProperty('--rail-my', (lastCardMouseY - rect.top) + 'px');
+            }
+
+            cardRafId = null;
+        });
+    }
+
+    onMount(async () => {
+        loadProfiles();
+        setTimeout(async () => {
+            try {
+                const summary = await api.getSummary();
+                lastSynced = summary.last_updated;
+            } catch (_) {}
+        }, 100);
+        window.addEventListener('mousemove', handleCardMouseMove, { passive: true });
+        return () => window.removeEventListener('mousemove', handleCardMouseMove);
+    });
+
+    /* ââ Suppress backdrop-filter during navigation ââ */
+    beforeNavigate(() => {
+        document.documentElement.classList.add('theme-switching');
+    });
+
+    afterNavigate(() => {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                document.documentElement.classList.remove('theme-switching');
+            });
+        });
+    });
+
+    let mobileMenuOpen = false;
+
+    /* —— Keyboard shortcut —— */
+    function handleKeyboard(e) {
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+        if (e.key === 't' && !e.ctrlKey && !e.metaKey) darkMode.toggle();
+    }
+
+    /* —— Route matching —— */
+    $: currentPath = $page.url.pathname;
+
+    function isActive(path, current) {
+        if (path === '/') return current === '/';
+        return current.startsWith(path);
+    }
+</script>
+
+<svelte:window on:keydown={handleKeyboard} on:mousemove={handleMouseMove} />
+
+<!-- Background layers -->
+<div class="page-glow"></div>
+<div class="mesh-canvas-layer" aria-hidden="true"></div>
+
+<!-- ———————————————————————————————————————————
+     GLASS RAIL v3 — Desktop Sidebar
+     ——————————————————————————————————————————— -->
+<aside
+  class="glass-rail hidden md:flex flex-col h-screen fixed left-0 top-0 z-50 rail-glow-edge"
+  style="width: var(--rail-w, 260px);"
+>
+
+    <!-- Glass effect layers (positioned container) -->
+    <div class="rail-effects-layer" aria-hidden="true">
+        <span class="rail-shine"></span>
+        <span class="rail-glow"></span>
+        <span class="rail-inner-glow"></span>
+    </div>
+
+    <!-- Brand -->
+    <div class="rail-brand">
+        <div class="rail-brand-mark">
+            {#if $darkMode}
+                <img src="/folio-mark-dark-mode.png" alt="Folio" class="folio-mark" draggable="false" />
+            {:else}
+                <img src="/folio-mark-light-mode.png" alt="Folio" class="folio-mark" draggable="false" />
+            {/if}
+        </div>
+        <div class="rail-brand-text">
+            <span class="rail-brand-name">Folio</span>
+            <span class="rail-brand-sub">Personal Finance Studio</span>
+        </div>
+    </div>
+
+    <!-- ✅ CHANGED: Glowing separator after brand -->
+    <div class="rail-glow-separator" aria-hidden="true"></div>
+
+    <!-- Navigation -->
+    <nav class="rail-nav">
+
+        <!-- Primary group -->
+        <div class="rail-nav-group">
+            {#each navPrimary as item}
+                {@const active = isActive(item.path, currentPath)}
+                <a href={item.path}
+                   class="rail-link"
+                   class:rail-link--active={active}
+                   aria-current={active ? 'page' : undefined}>
+                    {#if active}<span class="rail-active-bar" aria-hidden="true"></span>{/if}
+                    <span class="rail-link-icon material-symbols-outlined"
+                          style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                        {item.icon}
+                    </span>
+                    <span class="rail-link-label">{item.label}</span>
+                </a>
+            {/each}
+        </div>
+
+        <!-- ✅ CHANGED: Glowing separator between primary and secondary -->
+        <div class="rail-glow-separator" aria-hidden="true"></div>
+
+        <!-- Secondary group -->
+        <div class="rail-nav-group rail-nav-group--secondary">
+            {#each navSecondary as item}
+                {@const active = isActive(item.path, currentPath)}
+                <a href={item.path}
+                   class="rail-link rail-link--sm"
+                   class:rail-link--active={active}
+                   aria-current={active ? 'page' : undefined}>
+                    {#if active}<span class="rail-active-bar" aria-hidden="true"></span>{/if}
+                    <span class="rail-link-icon material-symbols-outlined"
+                          style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                        {item.icon}
+                    </span>
+                    <span class="rail-link-label">{item.label}</span>
+                </a>
+            {/each}
+        </div>
+
+        <!-- ✅ CHANGED: Glowing separator before Copilot -->
+        <div class="rail-glow-separator" aria-hidden="true"></div>
+
+        <!-- Copilot — now a regular nav link in its own group, directly below Budgets -->
+        <div class="rail-nav-group rail-nav-group--copilot">
+            <a href={copilotItem.path}
+               class="rail-link rail-link--copilot"
+               class:rail-link--active={isActive(copilotItem.path, currentPath)}
+               class:rail-link--copilot-active={isActive(copilotItem.path, currentPath)}
+               aria-current={isActive(copilotItem.path, currentPath) ? 'page' : undefined}>
+                {#if isActive(copilotItem.path, currentPath)}<span class="rail-active-bar rail-active-bar--copilot" aria-hidden="true"></span>{/if}
+                <span class="rail-link-icon rail-copilot-icon-inline material-symbols-outlined"
+                      style={isActive(copilotItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                    {copilotItem.icon}
+                </span>
+                <span class="rail-link-label">{copilotItem.label}</span>
+                {#if !isActive(copilotItem.path, currentPath)}
+                    <span class="rail-copilot-badge-inline">AI</span>
+                {/if}
+            </a>
+        </div>
+
+        <!-- ✅ CHANGED: Spacer pushes footer down (Copilot no longer at bottom) -->
+        <div class="flex-1 min-h-[24px]"></div>
+
+    </nav>
+
+    <div class="rail-divider" aria-hidden="true"></div>
+
+    <!-- Footer — Status Bar -->
+    <div class="rail-footer">
+        <button on:click={handleSync} disabled={$syncing}
+                class="rail-footer-row rail-footer-row--interactive">
+            <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing}></span>
+            <span class="rail-footer-label">
+                {#if $syncing}
+                    Syncing…
+                {:else if lastSynced}
+                    <span class="rail-footer-accent">Synced</span> · {relativeTime(lastSynced)}
+                {:else}
+                    Sync now
+                {/if}
+            </span>
+            <span class="material-symbols-outlined rail-footer-action"
+                  class:animate-spin={$syncing}>
+                {$syncing ? 'progress_activity' : 'sync'}
+            </span>
+        </button>
+
+        <button on:click={() => darkMode.toggle()}
+                class="rail-footer-row rail-footer-row--interactive"
+                title="Toggle theme (T)">
+            <span class="material-symbols-outlined rail-footer-icon">
+                {$darkMode ? 'dark_mode' : 'light_mode'}
+            </span>
+            <span class="rail-footer-label">
+                {$darkMode ? 'Dark' : 'Light'} mode
+            </span>
+            <span class="rail-toggle-track" class:rail-toggle-track--on={$darkMode}>
+                <span class="rail-toggle-thumb"></span>
+            </span>
+        </button>
+    </div>
+</aside>
+
+
+<!-- ———————————————————————————————————————————
+     MOBILE NAV
+     ——————————————————————————————————————————— -->
+{#if mobileMenuOpen}
+    <div class="md:hidden fixed inset-0 z-[60]" on:click={() => mobileMenuOpen = false}>
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+        <nav class="glass-rail absolute left-0 top-0 bottom-0 w-[260px] flex flex-col"
+             on:click|stopPropagation>
+
+            <div class="rail-effects-layer" aria-hidden="true">
+                <span class="rail-shine"></span>
+                <span class="rail-inner-glow"></span>
+            </div>
+
+            <div class="rail-brand">
+                <div class="rail-brand-mark">
+                    <svg class="rail-brand-svg" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <use href="#folio-mark" />
+                    </svg>
+                </div>
+                <div class="rail-brand-text">
+                    <span class="rail-brand-name">Folio</span>
+                </div>
+            </div>
+
+            <!-- ✅ CHANGED: Mobile — glowing separators -->
+            <div class="rail-glow-separator" aria-hidden="true"></div>
+
+            <div class="rail-nav">
+                <div class="rail-nav-group">
+                    {#each navPrimary as item}
+                        {@const active = isActive(item.path, currentPath)}
+                        <a href={item.path} on:click={() => mobileMenuOpen = false}
+                           class="rail-link"
+                           class:rail-link--active={active}
+                           aria-current={active ? 'page' : undefined}>
+                            {#if active}<span class="rail-active-bar"></span>{/if}
+                            <span class="rail-link-icon material-symbols-outlined"
+                                  style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                                {item.icon}
+                            </span>
+                            <span class="rail-link-label">{item.label}</span>
+                        </a>
+                    {/each}
+                </div>
+
+                <!-- ✅ CHANGED: Mobile glowing separator -->
+                <div class="rail-glow-separator" aria-hidden="true"></div>
+
+                <div class="rail-nav-group rail-nav-group--secondary">
+                    {#each navSecondary as item}
+                        {@const active = isActive(item.path, currentPath)}
+                        <a href={item.path} on:click={() => mobileMenuOpen = false}
+                           class="rail-link rail-link--sm"
+                           class:rail-link--active={active}
+                           aria-current={active ? 'page' : undefined}>
+                            {#if active}<span class="rail-active-bar"></span>{/if}
+                            <span class="rail-link-icon material-symbols-outlined"
+                                  style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                                {item.icon}
+                            </span>
+                            <span class="rail-link-label">{item.label}</span>
+                        </a>
+                    {/each}
+                </div>
+
+                <!-- ✅ CHANGED: Mobile glowing separator before Copilot -->
+                <div class="rail-glow-separator" aria-hidden="true"></div>
+
+                <!-- Mobile Copilot — now inline nav link -->
+                <div class="rail-nav-group rail-nav-group--copilot">
+                    <a href={copilotItem.path} on:click={() => mobileMenuOpen = false}
+                       class="rail-link rail-link--copilot"
+                       class:rail-link--active={isActive(copilotItem.path, currentPath)}
+                       class:rail-link--copilot-active={isActive(copilotItem.path, currentPath)}
+                       aria-current={isActive(copilotItem.path, currentPath) ? 'page' : undefined}>
+                        {#if isActive(copilotItem.path, currentPath)}<span class="rail-active-bar rail-active-bar--copilot"></span>{/if}
+                        <span class="rail-link-icon rail-copilot-icon-inline material-symbols-outlined"
+                              style={isActive(copilotItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                            {copilotItem.icon}
+                        </span>
+                        <span class="rail-link-label">{copilotItem.label}</span>
+                        {#if !isActive(copilotItem.path, currentPath)}
+                            <span class="rail-copilot-badge-inline">AI</span>
+                        {/if}
+                    </a>
+                </div>
+
+                <div class="flex-1"></div>
+            </div>
+
+            <div class="rail-divider"></div>
+
+            <div class="rail-footer">
+                <button on:click={handleSync} disabled={$syncing}
+                        class="rail-footer-row rail-footer-row--interactive">
+                    <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing}></span>
+                    <span class="rail-footer-label">
+                        {$syncing ? 'Syncing…' : 'Sync'}
+                    </span>
+                </button>
+                <button on:click={() => darkMode.toggle()}
+                        class="rail-footer-row rail-footer-row--interactive">
+                    <span class="material-symbols-outlined rail-footer-icon">
+                        {$darkMode ? 'dark_mode' : 'light_mode'}
+                    </span>
+                    <span class="rail-footer-label">{$darkMode ? 'Dark' : 'Light'}</span>
+                    <span class="rail-toggle-track" class:rail-toggle-track--on={$darkMode}>
+                        <span class="rail-toggle-thumb"></span>
+                    </span>
+                </button>
+            </div>
+        </nav>
+    </div>
+{/if}
+
+<!-- Mobile top bar -->
+<div class="md:hidden fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14"
+     style="background: var(--sidebar-bg); backdrop-filter: blur(20px); border-bottom: 1px solid var(--sidebar-border);">
+    <button on:click={() => mobileMenuOpen = !mobileMenuOpen} class="p-1.5 rounded-lg"
+            style="color: var(--sidebar-text-active)">
+        <span class="material-symbols-outlined">{mobileMenuOpen ? 'close' : 'menu'}</span>
+    </button>
+    <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
+        Folio
+    </span>
+    <button on:click={handleSync} disabled={$syncing} class="p-1.5 rounded-lg"
+            style="color: var(--sidebar-text-active)">
+        <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing}>sync</span>
+    </button>
+</div>
+
+<!-- Main content -->
+<main class="md:ml-[var(--rail-width)] pt-14 md:pt-0 min-h-screen transition-all duration-300 relative z-[1]">
+    <div class="max-w-[1800px] mx-auto px-4 md:px-8 py-8">
+        <slot />
+    </div>
+</main>
+
+<style>
+
+    .rail-brand-svg {
+        width: 20px;
+        height: 20px;
+    }
+
+    .folio-shimmer-path {
+        animation: folio-foil-sweep 4s ease-in-out infinite;
+    }
+
+    @keyframes folio-foil-sweep {
+        0%   { opacity: 0; transform: translateX(-120%); }
+        15%  { opacity: 1; }
+        30%  { opacity: 0; transform: translateX(120%); }
+        100% { opacity: 0; transform: translateX(120%); }
+    }
+    
+    /* ———————————————————————————————————————————
+       GLASS RAIL v3 — Unified Glass Navigation
+       ——————————————————————————————————————————— */
+
+    /* —— Surface: Glass container with inner glow —— */
+    .glass-rail {
+        width: var(--rail-width);
+        background: var(--rail-bg);
+        backdrop-filter: blur(var(--rail-blur)) saturate(var(--rail-saturate));
+        -webkit-backdrop-filter: blur(var(--rail-blur)) saturate(var(--rail-saturate));
+        border-right: 1px solid var(--rail-border);
+        box-shadow:
+            var(--rail-shadow),
+            inset 0 0 30px rgba(90, 159, 212, 0.03),
+            inset 0 1px 0 rgba(255, 255, 255, 0.04),
+            inset -1px 0 0 rgba(255, 255, 255, 0.02);
+        overflow: hidden;
+        will-change: transform;
+        transform: translateZ(0);
+        -webkit-backface-visibility: hidden;
+        backface-visibility: hidden;
+        transition:
+            background var(--rail-transition),
+            border-color var(--rail-transition),
+            box-shadow 0.35s var(--ease-out-expo);
+    }
+
+    /* —— Effects container —— */
+    .rail-effects-layer {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        border-radius: inherit;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    /* ✅ CHANGED: Dark mode — neutral charcoal inner glow instead of blue */
+    :global(.dark) .glass-rail {
+        box-shadow:
+            var(--rail-shadow),
+            0 0 0 1px rgba(148, 163, 184, 0.04),
+            0 0 30px rgba(0, 0, 0, 0.15),
+            inset 0 0 40px rgba(148, 163, 184, 0.02),
+            inset 0 1px 0 rgba(255, 255, 255, 0.04),
+            inset -1px 0 0 rgba(255, 255, 255, 0.02);
+    }
+
+    .glass-rail:hover {
+        box-shadow:
+            var(--rail-shadow),
+            inset 0 1px 0 rgba(255, 255, 255, 0.06),
+            inset -1px 0 0 rgba(255, 255, 255, 0.03);
+    }
+
+    /* ✅ CHANGED: Dark mode hover — neutral glow */
+    :global(.dark) .glass-rail:hover {
+        box-shadow:
+            var(--rail-shadow),
+            0 0 0 1px rgba(148, 163, 184, 0.06),
+            0 0 40px rgba(0, 0, 0, 0.18),
+            inset 0 0 50px rgba(148, 163, 184, 0.03),
+            inset 0 1px 0 rgba(255, 255, 255, 0.05),
+            inset -1px 0 0 rgba(255, 255, 255, 0.03);
+    }
+
+    :global(.theme-switching) .glass-rail {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+
+    /* —— Glass shine overlay —— */
+    .rail-shine {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: linear-gradient(
+            160deg,
+            rgba(255, 255, 255, 0.03) 0%,
+            rgba(255, 255, 255, 0.01) 40%,
+            transparent 100%
+        );
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    :global(.dark) .rail-shine {
+        background: var(--glass-shine);
+        opacity: 0.5;
+    }
+
+    :root:not(.dark) .rail-shine {
+        background: linear-gradient(
+            160deg,
+            rgba(255, 255, 255, 0.45) 0%,
+            rgba(255, 255, 255, 0.06) 40%,
+            rgba(255, 255, 255, 0.03) 100%
+        );
+        opacity: 0.5;
+    }
+
+    /* ✅ CHANGED: Mouse-tracking glow — neutral silver instead of blue */
+    .rail-glow {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        opacity: 0;
+        transition: opacity var(--duration-normal) ease;
+        background:
+            radial-gradient(
+                400px circle at var(--rail-mx, 50%) var(--rail-my, 50%),
+                rgba(90, 159, 212, 0.06) 0%,
+                transparent 55%
+            );
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    /* ✅ CHANGED: Dark mode rail glow — neutral */
+    :global(.dark) .rail-glow {
+        background:
+            radial-gradient(
+                400px circle at var(--rail-mx, 50%) var(--rail-my, 50%),
+                rgba(148, 163, 184, 0.06) 0%,
+                transparent 50%
+            );
+    }
+
+    :global(.dark) .glass-rail:hover .rail-glow {
+        opacity: 1;
+    }
+
+    /* —— Inner border glow —— */
+    .rail-inner-glow {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    /* ✅ CHANGED: Dark mode inner glow — neutral edges */
+    :global(.dark) .rail-inner-glow {
+        box-shadow:
+            inset 1px 0 0 rgba(148, 163, 184, 0.04),
+            inset -1px 0 0 rgba(148, 163, 184, 0.03),
+            inset 0 1px 0 rgba(148, 163, 184, 0.05),
+            inset 0 -1px 0 rgba(148, 163, 184, 0.03);
+    }
+
+    :root:not(.dark) .rail-inner-glow {
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.85),
+            inset 0 -1px 0 rgba(0, 0, 0, 0.02),
+            inset -1px 0 0 rgba(255, 255, 255, 0.40);
+    }
+
+    /* —— Brand —— */
+    .rail-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 26px 22px 22px;
+        position: relative;
+        z-index: 1;
+    }
+
+    .rail-brand-mark {
+        width: 50px;
+        height: 50px;
+        flex-shrink: 0;
+        position: relative;
+        border-radius: 12px;
+        /* NO overflow:hidden — let the image glow breathe */
+        transition: transform 0.35s ease, filter 0.35s ease;
+    }
+
+    .rail-brand-mark:hover {
+        transform: scale(1.08);
+        filter: brightness(1.15);
+    }
+
+    .rail-brand-mark .folio-mark {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        border-radius: inherit;
+        /* Subtle ambient glow that matches the neon edges in f1.png */
+        filter: drop-shadow(0 0 6px rgba(90, 159, 212, 0.35))
+                drop-shadow(0 0 14px rgba(90, 159, 212, 0.12));
+    }
+
+    .rail-brand-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+    }
+
+    .rail-brand-name {
+        font-family: var(--font-display);
+        font-size: 17px;
+        font-weight: 780;
+        letter-spacing: -0.04em;
+        line-height: 1.15;
+        color: var(--sidebar-text-active);
+        /* Light mode: solid text with subtle shadow */
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+
+    :global(.dark) .rail-brand-name {
+        background: linear-gradient(
+            135deg,
+            #e0e7ff 0%,      /* brighter start — near-white lavender */
+            #a5b4fc 35%,     /* indigo mid */
+            #c4b5fd 60%,     /* violet */
+            #93c5fd 100%     /* sky blue finish */
+        );
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        filter: drop-shadow(0 0 8px rgba(165, 180, 252, 0.3));
+    }
+
+    .rail-brand-sub {
+        font-size: 9.5px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--sidebar-text);
+        opacity: 0.45;
+        line-height: 1;
+    }
+
+    :global(.dark) .rail-brand-sub {
+        opacity: 0.4;
+        background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(148, 163, 184, 0.4));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
+    /* —— Old Divider (kept for footer separator) —— */
+    .rail-divider {
+        height: 1px;
+        margin: 0 18px;
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            var(--rail-border) 5%,
+            var(--rail-border) 95%,
+            transparent 100%
+        );
+        position: relative;
+        z-index: 1;
+    }
+
+    :global(.dark) .rail-divider {
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(56, 189, 248, 0.14) 5%,
+            rgba(56, 189, 248, 0.30) 30%,
+            rgba(56, 189, 248, 0.42) 50%,
+            rgba(56, 189, 248, 0.30) 70%,
+            rgba(56, 189, 248, 0.14) 95%,
+            transparent 100%
+        );
+        box-shadow:
+            0 0 24px rgba(56, 189, 248, 0.20),
+            0 0 56px rgba(56, 189, 248, 0.12);
+    }
+
+    /* ✅ NEW: Glowing Separator — premium luminous line matching dashboard glow language */
+    .rail-glow-separator {
+        height: 1px;
+        width: 190px;
+        margin: 12px auto;
+        align-self: center;
+        position: relative;
+        z-index: 1;
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            var(--rail-separator-glow, rgba(185, 200, 220, 0.25)) 5%,
+            var(--rail-separator-glow-center, rgba(185, 200, 220, 0.50)) 50%,
+            var(--rail-separator-glow, rgba(185, 200, 220, 0.25)) 95%,
+            transparent 100%
+        );
+    }
+
+
+
+    /* ✅ NEW: Glowing separator — dark mode glow halo */
+    :global(.dark) .rail-glow-separator {
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(56, 189, 248, 0.14) 5%,
+            rgba(56, 189, 248, 0.30) 30%,
+            rgba(56, 189, 248, 0.42) 50%,
+            rgba(56, 189, 248, 0.30) 70%,
+            rgba(56, 189, 248, 0.14) 95%,
+            transparent 100%
+        );
+        box-shadow:
+            0 0 24px rgba(56, 189, 248, 0.20),
+            0 0 56px rgba(56, 189, 248, 0.12);
+    }
+
+    /* —— Nav —— */
+    .rail-nav {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        padding: 12px 10px 8px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        position: relative;
+        z-index: 1;
+    }
+
+    .rail-nav-group {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .rail-nav-group--secondary .rail-link {
+        font-size: 13px;
+    }
+    .rail-nav-group--secondary .rail-link-icon {
+        font-size: 19px;
+    }
+
+    /* ✅ NEW: Copilot nav group — no extra padding needed, inherits from rail-nav-group */
+    .rail-nav-group--copilot {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    /* —— Nav Link —— */
+    .rail-link {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-radius: 11px;
+        text-decoration: none;
+        color: var(--sidebar-text);
+        font-size: 13.5px;
+        font-weight: 480;
+        letter-spacing: -0.005em;
+        cursor: pointer;
+        overflow: hidden;
+        border: 1px solid transparent;
+        transition:
+            background var(--rail-transition),
+            color var(--rail-transition),
+            border-color var(--rail-transition),
+            box-shadow 0.28s var(--ease-out-expo),
+            transform var(--rail-transition);
+    }
+
+    .rail-link:hover {
+        background: var(--rail-link-hover);
+        color: var(--sidebar-text-active);
+        transform: translateX(2px);
+    }
+
+    /* ✅ CHANGED: Dark mode link hover — neutral glow */
+    :global(.dark) .rail-link:hover {
+        box-shadow:
+            0 0 12px rgba(148, 163, 184, 0.03),
+            inset 0 0 12px rgba(148, 163, 184, 0.02);
+    }
+
+    /* —— Nav Link — Active —— */
+    .rail-link--active {
+        background: var(--rail-link-active-bg) !important;
+        color: var(--sidebar-text-active) !important;
+        font-weight: 600;
+        border-color: var(--rail-active-border, transparent);
+        box-shadow: var(--rail-link-active-shadow);
+        transform: none !important;
+    }
+
+    /* ✅ CHANGED: Dark mode active — neutral glow */
+    :global(.dark) .rail-link--active {
+        box-shadow:
+            var(--rail-link-active-shadow),
+            0 0 16px rgba(148, 163, 184, 0.04),
+            inset 0 0 16px rgba(148, 163, 184, 0.03);
+        border-color: rgba(148, 163, 184, 0.12);
+    }
+
+    .rail-link--active:hover {
+        background: var(--rail-link-active-bg) !important;
+    }
+
+    /* —— Active Accent Bar —— */
+    .rail-active-bar {
+        position: absolute;
+        left: 0;
+        top: 50%;
+        width: 3px;
+        border-radius: 0 4px 4px 0;
+        background: linear-gradient(to bottom, rgba(99, 102, 241, 0.8), rgba(79, 70, 229, 0.6));
+        box-shadow:
+            0 0 8px rgba(99, 102, 241, 0.30),
+            0 0 20px rgba(99, 102, 241, 0.15);
+        animation: rail-bar-enter 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    }
+
+    :global(.dark) .rail-active-bar {
+        background: var(--accent);
+        box-shadow:
+            0 0 8px var(--accent-glow),
+            0 0 20px var(--accent-glow);
+    }
+
+    /* ✅ NEW: Copilot active bar — purple tint */
+    .rail-active-bar--copilot {
+        background: linear-gradient(to bottom, rgba(139, 92, 246, 0.85), rgba(109, 62, 216, 0.65));
+        box-shadow:
+            0 0 8px rgba(139, 92, 246, 0.35),
+            0 0 20px rgba(139, 92, 246, 0.18);
+    }
+
+    :global(.dark) .rail-active-bar--copilot {
+        background: linear-gradient(to bottom, rgba(139, 92, 246, 0.9), rgba(168, 85, 247, 0.7));
+        box-shadow:
+            0 0 10px rgba(139, 92, 246, 0.30),
+            0 0 24px rgba(139, 92, 246, 0.15);
+    }
+
+    @keyframes rail-bar-enter {
+        from { height: 0; margin-top: 0; opacity: 0; }
+        to   { height: 18px; margin-top: -9px; opacity: 1; }
+    }
+
+    /* —— Icon —— */
+    .rail-link-icon {
+        font-size: 20px;
+        line-height: 1;
+        flex-shrink: 0;
+        width: 22px;
+        text-align: center;
+        color: var(--sidebar-text);
+        transition: color var(--rail-transition), filter 0.2s ease;
+    }
+
+    .rail-link:hover .rail-link-icon {
+        color: var(--sidebar-text-active);
+    }
+
+    /* ✅ CHANGED: Dark hover icon glow — neutral */
+    :global(.dark) .rail-link:hover .rail-link-icon {
+        filter: drop-shadow(0 0 4px rgba(148, 163, 184, 0.25));
+    }
+
+    .rail-link--active .rail-link-icon {
+        color: var(--accent);
+    }
+
+    :global(.dark) .rail-link--active .rail-link-icon {
+        filter: drop-shadow(0 0 6px rgba(90, 159, 212, 0.4));
+    }
+
+    .rail-link-label {
+        line-height: 1.1;
+    }
+
+    .rail-link--sm {
+        padding: 9px 14px;
+    }
+
+    /* ✅ NEW: Copilot as inline nav link — gradient icon in default state */
+    .rail-copilot-icon-inline {
+        background: linear-gradient(135deg, var(--accent), #a855f7);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        color: transparent;
+    }
+
+    /* ✅ NEW: Copilot hover — purple-tinted background */
+    .rail-link--copilot:hover {
+        background: var(--rail-copilot-bg-hover) !important;
+    }
+
+    :global(.dark) .rail-link--copilot:hover {
+        box-shadow:
+            0 0 14px rgba(139, 92, 246, 0.06),
+            inset 0 0 14px rgba(139, 92, 246, 0.04);
+    }
+
+    /* ✅ NEW: Copilot active state — subtle purple glow box */
+    .rail-link--copilot-active {
+        background: var(--rail-copilot-bg-active) !important;
+        border-color: var(--rail-copilot-border-active) !important;
+        box-shadow: var(--rail-copilot-glow-active) !important;
+    }
+
+    :global(.dark) .rail-link--copilot-active {
+        box-shadow:
+            var(--rail-copilot-glow-active),
+            inset 0 0 18px rgba(139, 92, 246, 0.04) !important;
+        border-color: rgba(139, 92, 246, 0.16) !important;
+    }
+
+    /* ✅ NEW: Copilot active icon — solid accent, no gradient */
+    .rail-link--copilot-active .rail-copilot-icon-inline {
+        -webkit-text-fill-color: var(--accent);
+        background: none;
+        filter: drop-shadow(0 0 6px rgba(139, 92, 246, 0.4));
+    }
+
+    /* ✅ NEW: Inline AI badge (replaces the old card-style badge) */
+    .rail-copilot-badge-inline {
+        margin-left: auto;
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: linear-gradient(135deg, var(--accent), #8b5cf6);
+        color: #fff;
+        line-height: 1.4;
+        box-shadow:
+            0 2px 6px rgba(139, 92, 246, 0.30),
+            0 0 12px rgba(168, 85, 247, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        flex-shrink: 0;
+    }
+
+    /* ————————————————————————————————————————
+       REMOVED: Old Copilot Portal card styles
+       The following classes are no longer used:
+       .rail-copilot-container
+       .rail-copilot
+       .rail-copilot--active
+       .rail-copilot-border-gradient
+       .rail-copilot-glow
+       .rail-copilot-header
+       .rail-copilot-icon
+       .rail-copilot-title
+       .rail-copilot-badge
+       .rail-copilot-desc
+       Keeping them commented out for rollback safety.
+       ———————————————————————————————————————— */
+
+    /* —— Footer (Status Bar) —— */
+    .rail-footer {
+        padding: 6px 10px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        position: relative;
+        z-index: 1;
+    }
+
+    .rail-footer-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 12px;
+        border-radius: 9px;
+        border: none;
+        background: transparent;
+        color: var(--sidebar-text);
+        font-size: 11.5px;
+        font-weight: 450;
+        cursor: default;
+        transition:
+            background var(--rail-transition),
+            color var(--rail-transition),
+            box-shadow 0.22s ease;
+    }
+
+    .rail-footer-row--interactive {
+        cursor: pointer;
+    }
+
+    .rail-footer-row--interactive:hover {
+        background: var(--rail-link-hover);
+        color: var(--sidebar-text-active);
+    }
+
+    /* ✅ CHANGED: Dark footer hover — neutral */
+    :global(.dark) .rail-footer-row--interactive:hover {
+        box-shadow: 0 0 8px rgba(148, 163, 184, 0.03);
+    }
+
+    .rail-footer-row--interactive:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .rail-footer-label {
+        flex: 1;
+        text-align: left;
+        line-height: 1.2;
+    }
+
+    .rail-footer-accent {
+        color: var(--positive);
+        font-weight: 550;
+    }
+
+    .rail-footer-icon {
+        font-size: 16px;
+        opacity: 0.6;
+    }
+
+    .rail-footer-action {
+        font-size: 15px;
+        opacity: 0.45;
+        margin-left: auto;
+    }
+
+    /* —— Sync Dot —— */
+    .rail-sync-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--positive);
+        box-shadow: 0 0 6px var(--positive);
+        flex-shrink: 0;
+        animation: syncPulse 3s ease-in-out infinite;
+    }
+
+    .rail-sync-dot--spinning {
+        background: var(--warning);
+        box-shadow: 0 0 6px var(--warning);
+        animation: syncPulse 1s ease-in-out infinite;
+    }
+
+    @keyframes syncPulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+    }
+
+    /* —— Theme Toggle Track —— */
+    .rail-toggle-track {
+        position: relative;
+        width: 32px;
+        height: 17px;
+        border-radius: 9px;
+        background: var(--rail-border);
+        flex-shrink: 0;
+        margin-left: auto;
+        transition: background 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .rail-toggle-track--on {
+        background: var(--accent);
+        box-shadow: 0 0 8px rgba(90, 159, 212, 0.3);
+    }
+
+    .rail-toggle-thumb {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    .rail-toggle-track--on .rail-toggle-thumb {
+        transform: translateX(15px);
+    }
+
+    /* —— Mesh Canvas Layer —— */
+    .mesh-canvas-layer {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background-image: var(--mesh-canvas, none);
+        background-size: 100% 100%;
+        transition: opacity 0.5s ease;
+    }
+
+    :global(.dark) .mesh-canvas-layer {
+        opacity: 0;
+    }
+
+    :global(.theme-switching) .mesh-canvas-layer {
+        opacity: 0;
+        transition: none;
+    }
+
+    /* —— Spin —— */
+    .animate-spin {
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    /* ✅ CHANGED: Rail Right-Edge Glow — neutral in dark mode */
+    .rail-glow-edge::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 1px;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.06);
+        opacity: 1;
+        pointer-events: none;
+        z-index: 1;
+        mask-image: none;
+        -webkit-mask-image: none;
+    }
+
+    /* ✅ CHANGED: Dark mode edge glow — neutral silver instead of cyan */
+    :global(.dark) .rail-glow-edge::after {
+        opacity: 0.20;
+        background: linear-gradient(
+            to left,
+            rgba(148, 163, 184, 0.18) 0%,
+            rgba(148, 163, 184, 0.05) 40%,
+            transparent 100%
+        );
+    }
+
+</style>

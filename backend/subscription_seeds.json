@@ -1,0 +1,2270 @@
+[
+  {
+    "name": "Netflix",
+    "patterns": ["NETFLIX", "NETFLIX.COM", "NETFLIX INC", "NETFLIX DIGITAL"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Hulu",
+    "patterns": ["HULU", "HULU.COM", "HULU LLC", "HULU DIGITAL"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Disney+",
+    "patterns": ["DISNEY PLUS", "DISNEYPLUS", "DISNEY+", "DISNEYPLUS.COM", "WALT DISNEY STREAMING"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "HBO Max",
+    "patterns": ["HBO MAX", "MAX.COM", "HBO DIGITAL", "HBOMAX", "MAX STREAMING"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Amazon Prime Video",
+    "patterns": ["PRIME VIDEO", "AMZN PRIME VIDEO", "AMAZON PRIME VIDEO"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Paramount+",
+    "patterns": ["PARAMOUNT PLUS", "PARAMOUNT+", "PARAMOUNTPLUS", "PARAMNT PLUS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Peacock",
+    "patterns": ["PEACOCK", "PEACOCKTV", "PEACOCK TV", "NBCU PEACOCK"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Apple TV+",
+    "patterns": ["APPLE TV", "APPLE.COM/BILL"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "YouTube Premium",
+    "patterns": ["YOUTUBE PREMIUM", "GOOGLE YOUTUBE PREMIUM", "YOUTUBE PREM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "YouTube TV",
+    "patterns": ["YOUTUBE TV", "GOOGLE YOUTUBE TV", "YOUTUBETV"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "ESPN+",
+    "patterns": ["ESPN PLUS", "ESPN+", "ESPNPLUS", "ESPN DIGITAL"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Discovery+",
+    "patterns": ["DISCOVERY PLUS", "DISCOVERY+", "DISCOVERYPLUS"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Crunchyroll",
+    "patterns": ["CRUNCHYROLL", "CRUNCHYROLL.COM", "CRUNCHY ROLL"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "DAZN",
+    "patterns": ["DAZN", "DAZN.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "FuboTV",
+    "patterns": ["FUBO", "FUBOTV", "FUBO.TV"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Sling TV",
+    "patterns": ["SLING TV", "SLING.COM", "SLINGTV", "SLING DIGITAL"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Philo",
+    "patterns": ["PHILO", "PHILO.COM", "PHILO TV"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "AMC+",
+    "patterns": ["AMC PLUS", "AMC+", "AMCPLUS", "AMC NETWORKS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Starz",
+    "patterns": ["STARZ", "STARZ.COM", "STARZ ENTERTAINMENT"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Showtime",
+    "patterns": ["SHOWTIME", "SHO DIGITAL", "SHOWTIME.COM"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "BET+",
+    "patterns": ["BET PLUS", "BET+", "BETPLUS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Criterion Channel",
+    "patterns": ["CRITERION CHANNEL", "CRITERIONCHANNEL", "CRITERION.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Mubi",
+    "patterns": ["MUBI", "MUBI.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Shudder",
+    "patterns": ["SHUDDER", "SHUDDER.COM", "AMC SHUDDER"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Curiosity Stream",
+    "patterns": ["CURIOSITY STREAM", "CURIOSITYSTREAM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Spotify",
+    "patterns": ["SPOTIFY", "SPOTIFY.COM", "SPOTIFY USA", "SPOTIFY AB"],
+    "frequency_hint": "monthly",
+    "category": "Music"
+  },
+  {
+    "name": "Apple Music",
+    "patterns": ["APPLE MUSIC", "APPLE.COM/BILL APPLE MUSIC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Amazon Music",
+    "patterns": ["AMAZON MUSIC", "AMZN MUSIC", "AMZN DIGITAL MUSIC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Tidal",
+    "patterns": ["TIDAL", "TIDAL.COM", "TIDAL MUSIC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Pandora",
+    "patterns": ["PANDORA", "PANDORA.COM", "PANDORA MEDIA"],
+    "frequency_hint": "monthly",
+    "category": "Music"
+  },
+  {
+    "name": "Deezer",
+    "patterns": ["DEEZER", "DEEZER.COM"],
+    "frequency_hint": "monthly",
+    "category": "Music"
+  },
+  {
+    "name": "SiriusXM",
+    "patterns": ["SIRIUSXM", "SIRIUS XM", "SIRIUS SATELLITE", "SXM RADIO"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Audible",
+    "patterns": ["AUDIBLE", "AUDIBLE.COM", "AMZN AUDIBLE", "AUDIBLE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Xbox Game Pass",
+    "patterns": ["XBOX GAME PASS", "MICROSOFT XBOX", "MSBILL XBOX", "XBOX LIVE"],
+    "frequency_hint": "monthly",
+    "category": "Gaming"
+  },
+  {
+    "name": "PlayStation Plus",
+    "patterns": ["PLAYSTATION PLUS", "PLAYSTATION NETWORK", "SONY PLAYSTATION", "PSN PLUS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Gaming"
+  },
+  {
+    "name": "Nintendo Switch Online",
+    "patterns": ["NINTENDO SWITCH ONLINE", "NINTENDO OF AMERICA", "NINTENDO ONLINE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Gaming"
+  },
+  {
+    "name": "EA Play",
+    "patterns": ["EA PLAY", "EA.COM", "ELECTRONIC ARTS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Gaming"
+  },
+  {
+    "name": "Ubisoft+",
+    "patterns": ["UBISOFT PLUS", "UBISOFT+", "UBISOFT ENTERTAINMENT"],
+    "frequency_hint": "monthly",
+    "category": "Gaming"
+  },
+  {
+    "name": "GeForce Now",
+    "patterns": ["GEFORCE NOW", "NVIDIA GEFORCE", "NVIDIA GEFORCENOW"],
+    "frequency_hint": "monthly",
+    "category": "Gaming"
+  },
+  {
+    "name": "Humble Bundle",
+    "patterns": ["HUMBLE BUNDLE", "HUMBLEBUNDLE"],
+    "frequency_hint": "monthly",
+    "category": "Gaming"
+  },
+  {
+    "name": "Microsoft 365",
+    "patterns": ["MICROSOFT 365", "MSBILL MICROSOFT 365", "MICROSOFT OFFICE", "MSBILL OFFICE", "MICROSOFT*MICROSOFT 365"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Google One",
+    "patterns": ["GOOGLE ONE", "GOOGLE*ONE", "GOOGLE STORAGE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud Storage"
+  },
+  {
+    "name": "Google Workspace",
+    "patterns": ["GOOGLE WORKSPACE", "GOOGLE*WORKSPACE", "GOOGLE GSUITE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Adobe Creative Cloud",
+    "patterns": ["ADOBE CREATIVE", "ADOBE SYSTEMS", "ADOBE.COM", "ADOBE CC", "ADOBE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Dropbox",
+    "patterns": ["DROPBOX", "DROPBOX.COM", "DROPBOX INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud Storage"
+  },
+  {
+    "name": "iCloud+",
+    "patterns": ["ICLOUD", "APPLE ICLOUD", "APPLE.COM/BILL ICLOUD"],
+    "frequency_hint": "monthly",
+    "category": "Cloud Storage"
+  },
+  {
+    "name": "Notion",
+    "patterns": ["NOTION", "NOTION.SO", "NOTION LABS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Evernote",
+    "patterns": ["EVERNOTE", "EVERNOTE.COM", "EVERNOTE CORP"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "1Password",
+    "patterns": ["1PASSWORD", "1PASSWORD.COM", "AGILEBITS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "LastPass",
+    "patterns": ["LASTPASS", "LASTPASS.COM", "LOGMEIN LASTPASS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Dashlane",
+    "patterns": ["DASHLANE", "DASHLANE.COM", "DASHLANE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Grammarly",
+    "patterns": ["GRAMMARLY", "GRAMMARLY.COM", "GRAMMARLY INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Canva",
+    "patterns": ["CANVA", "CANVA.COM", "CANVA PTY"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Zoom",
+    "patterns": ["ZOOM.US", "ZOOM VIDEO", "ZOOM COMMUNICATIONS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Slack",
+    "patterns": ["SLACK", "SLACK.COM", "SLACK TECHNOLOGIES"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Todoist",
+    "patterns": ["TODOIST", "DOIST INC", "TODOIST.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Figma",
+    "patterns": ["FIGMA", "FIGMA.COM", "FIGMA INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Trello",
+    "patterns": ["TRELLO", "TRELLO.COM", "ATLASSIAN TRELLO"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Asana",
+    "patterns": ["ASANA", "ASANA.COM", "ASANA INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "ChatGPT Plus",
+    "patterns": ["CHATGPT", "OPENAI CHATGPT", "OPENAI.COM", "OPENAI"],
+    "frequency_hint": "monthly",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Claude Pro",
+    "patterns": ["ANTHROPIC", "CLAUDE.AI", "ANTHROPIC CLAUDE"],
+    "frequency_hint": "monthly",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Midjourney",
+    "patterns": ["MIDJOURNEY", "MIDJOURNEY INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "GitHub Copilot",
+    "patterns": ["GITHUB COPILOT", "GITHUB.COM", "GITHUB INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Cursor",
+    "patterns": ["CURSOR", "CURSOR.SH", "ANYSPHERE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Perplexity",
+    "patterns": ["PERPLEXITY", "PERPLEXITY.AI", "PERPLEXITY AI"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Jasper AI",
+    "patterns": ["JASPER AI", "JASPER.AI", "JASPER INTERACTIVE"],
+    "frequency_hint": "monthly",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Runway ML",
+    "patterns": ["RUNWAY", "RUNWAYML", "RUNWAY ML"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "AWS",
+    "patterns": ["AMAZON WEB SERVICES", "AWS.AMAZON.COM", "AMZN WEB SERVICES", "AWS INC"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Google Cloud",
+    "patterns": ["GOOGLE CLOUD", "GCP GOOGLE", "GOOGLE*CLOUD"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Microsoft Azure",
+    "patterns": ["MICROSOFT AZURE", "MSBILL AZURE", "AZURE MICROSOFT"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Vercel",
+    "patterns": ["VERCEL", "VERCEL.COM", "VERCEL INC"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Netlify",
+    "patterns": ["NETLIFY", "NETLIFY.COM", "NETLIFY INC"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "DigitalOcean",
+    "patterns": ["DIGITALOCEAN", "DIGITAL OCEAN", "DIGITALOCEAN.COM"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Heroku",
+    "patterns": ["HEROKU", "HEROKU INC", "SALESFORCE HEROKU"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Squarespace",
+    "patterns": ["SQUARESPACE", "SQUARESPACE.COM", "SQUARESPACE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Wix",
+    "patterns": ["WIX", "WIX.COM", "WIX ONLINE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "GoDaddy",
+    "patterns": ["GODADDY", "GODADDY.COM", "GO DADDY"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Domain/Hosting"
+  },
+  {
+    "name": "Namecheap",
+    "patterns": ["NAMECHEAP", "NAMECHEAP.COM", "NAMECHEAP INC"],
+    "frequency_hint": "annual",
+    "category": "Domain/Hosting"
+  },
+  {
+    "name": "Cloudflare",
+    "patterns": ["CLOUDFLARE", "CLOUDFLARE.COM", "CLOUDFLARE INC"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Shopify",
+    "patterns": ["SHOPIFY", "SHOPIFY.COM", "SHOPIFY INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "WordPress.com",
+    "patterns": ["WORDPRESS", "WORDPRESS.COM", "AUTOMATTIC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "New York Times",
+    "patterns": ["NY TIMES", "NYTIMES", "NYT DIGITAL", "NEW YORK TIMES", "NYTIMES.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Wall Street Journal",
+    "patterns": ["WALL STREET JOURNAL", "WSJ", "WSJ.COM", "DOW JONES WSJ"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Washington Post",
+    "patterns": ["WASHINGTON POST", "WASHINGTONPOST", "WAPO DIGITAL"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "The Athletic",
+    "patterns": ["THE ATHLETIC", "THEATHLETIC", "NYTIMES ATHLETIC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Bloomberg",
+    "patterns": ["BLOOMBERG", "BLOOMBERG.COM", "BLOOMBERG LP"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "The Economist",
+    "patterns": ["ECONOMIST", "THE ECONOMIST", "ECONOMIST.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Medium",
+    "patterns": ["MEDIUM", "MEDIUM.COM", "A MEDIUM CORPORATION"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Substack",
+    "patterns": ["SUBSTACK", "SUBSTACK.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "The Information",
+    "patterns": ["THE INFORMATION", "THEINFORMATION"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "USA Today",
+    "patterns": ["USA TODAY", "USATODAY"],
+    "frequency_hint": "monthly",
+    "category": "News/Media"
+  },
+  {
+    "name": "Planet Fitness",
+    "patterns": ["PLANET FITNESS", "PLT FITNESS", "PLANET FIT"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Equinox",
+    "patterns": ["EQUINOX", "EQUINOX FITNESS", "EQUINOX MEMBERSHIP"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "ClassPass",
+    "patterns": ["CLASSPASS", "CLASS PASS", "CLASSPASS.COM"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Peloton",
+    "patterns": ["PELOTON", "PELOTON INTERACTIVE", "ONEPELOTON"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Strava",
+    "patterns": ["STRAVA", "STRAVA.COM", "STRAVA INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "MyFitnessPal",
+    "patterns": ["MYFITNESSPAL", "MY FITNESS PAL", "MYFITNESSPAL.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Fitbod",
+    "patterns": ["FITBOD", "FITBOD INC", "FITBOD.ME"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Apple Fitness+",
+    "patterns": ["APPLE FITNESS", "APPLE.COM/BILL FITNESS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Calm",
+    "patterns": ["CALM", "CALM.COM", "CALM INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Headspace",
+    "patterns": ["HEADSPACE", "HEADSPACE.COM", "HEADSPACE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "24 Hour Fitness",
+    "patterns": ["24 HOUR FITNESS", "24HR FITNESS", "24HOUR FIT"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "LA Fitness",
+    "patterns": ["LA FITNESS", "LAFITNESS", "L A FITNESS"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Orangetheory Fitness",
+    "patterns": ["ORANGETHEORY", "ORANGE THEORY", "OTF FITNESS"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Anytime Fitness",
+    "patterns": ["ANYTIME FITNESS", "ANYTIME FIT"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "HelloFresh",
+    "patterns": ["HELLOFRESH", "HELLO FRESH", "HELLOFRESH.COM"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Blue Apron",
+    "patterns": ["BLUE APRON", "BLUEAPRON", "BLUE APRON INC"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Factor",
+    "patterns": ["FACTOR75", "FACTOR MEALS", "FACTOR_"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Home Chef",
+    "patterns": ["HOME CHEF", "HOMECHEF"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Daily Harvest",
+    "patterns": ["DAILY HARVEST", "DAILYHARVEST"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Instacart+",
+    "patterns": ["INSTACART", "INSTACART MEMBERSHIP", "INSTACART PLUS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "DoorDash DashPass",
+    "patterns": ["DOORDASH DASHPASS", "DOORDASH MEMBERSHIP", "DOORDASH*DASHPASS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Uber One",
+    "patterns": ["UBER ONE", "UBER EATS PASS", "UBER MEMBERSHIP", "UBER*ONE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Grubhub+",
+    "patterns": ["GRUBHUB PLUS", "GRUBHUB+", "GRUBHUB MEMBERSHIP"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "EveryPlate",
+    "patterns": ["EVERYPLATE", "EVERY PLATE"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "BarkBox",
+    "patterns": ["BARKBOX", "BARK BOX", "BARK.CO"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "Chewy Autoship",
+    "patterns": ["CHEWY.COM", "CHEWY AUTOSHIP", "CHEWY INC"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "The Farmer's Dog",
+    "patterns": ["FARMERS DOG", "THE FARMERS DOG", "THEFARMERSDOG"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "Ollie",
+    "patterns": ["OLLIE PETS", "MYOLLIE", "OLLIE DOG"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "PetPlate",
+    "patterns": ["PETPLATE", "PET PLATE"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "Birchbox",
+    "patterns": ["BIRCHBOX", "BIRCH BOX"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Ipsy",
+    "patterns": ["IPSY", "IPSY.COM", "IPSY GLAM BAG"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Dollar Shave Club",
+    "patterns": ["DOLLAR SHAVE CLUB", "DSC", "DOLLARSHAVECLUB"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Harry's",
+    "patterns": ["HARRYS", "HARRYS.COM", "HARRY'S"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Native",
+    "patterns": ["NATIVE DEODORANT", "NATIVE.COM", "NATIVE PERSONAL CARE"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Function of Beauty",
+    "patterns": ["FUNCTION OF BEAUTY", "FUNCTIONOFBEAUTY"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "FabFitFun",
+    "patterns": ["FABFITFUN", "FAB FIT FUN"],
+    "frequency_hint": "quarterly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Coursera",
+    "patterns": ["COURSERA", "COURSERA.ORG", "COURSERA INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Skillshare",
+    "patterns": ["SKILLSHARE", "SKILLSHARE.COM", "SKILLSHARE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "MasterClass",
+    "patterns": ["MASTERCLASS", "MASTERCLASS.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "LinkedIn Learning",
+    "patterns": ["LINKEDIN LEARNING", "LINKEDIN PREMIUM", "LINKEDIN CORP"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Duolingo Plus",
+    "patterns": ["DUOLINGO", "DUOLINGO.COM", "DUOLINGO INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Brilliant",
+    "patterns": ["BRILLIANT", "BRILLIANT.ORG"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Khan Academy",
+    "patterns": ["KHAN ACADEMY", "KHANACADEMY"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Udemy Pro",
+    "patterns": ["UDEMY", "UDEMY.COM", "UDEMY INC"],
+    "frequency_hint": "monthly",
+    "category": "Education"
+  },
+  {
+    "name": "Codecademy",
+    "patterns": ["CODECADEMY", "CODECADEMY.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "NordVPN",
+    "patterns": ["NORDVPN", "NORD VPN", "NORDVPN.COM", "NORDSEC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "ExpressVPN",
+    "patterns": ["EXPRESSVPN", "EXPRESS VPN", "EXPRESSVPN.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Surfshark",
+    "patterns": ["SURFSHARK", "SURFSHARK.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Norton",
+    "patterns": ["NORTON", "NORTON LIFELOCK", "NORTONLIFELOCK", "NORTON SECURITY"],
+    "frequency_hint": "annual",
+    "category": "VPN"
+  },
+  {
+    "name": "McAfee",
+    "patterns": ["MCAFEE", "MCAFEE.COM", "MCAFEE INC", "MCAFEE SOFTWARE"],
+    "frequency_hint": "annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Bitdefender",
+    "patterns": ["BITDEFENDER", "BITDEFENDER.COM"],
+    "frequency_hint": "annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Malwarebytes",
+    "patterns": ["MALWAREBYTES", "MALWAREBYTES.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Amazon Prime",
+    "patterns": ["AMZN PRIME", "AMAZON PRIME", "AMZN MEMBERSHIP", "AMAZON.COM PRIME", "AMZN PRIME MEMBER"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Costco Membership",
+    "patterns": ["COSTCO MEMBERSHIP", "COSTCO WHSE MEMBERSHIP", "COSTCO MBR"],
+    "frequency_hint": "annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Sam's Club Membership",
+    "patterns": ["SAMS CLUB MEMBERSHIP", "SAMS CLUB MBR", "SAM'S CLUB MEMBERSHIP"],
+    "frequency_hint": "annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "AAA Membership",
+    "patterns": ["AAA MEMBERSHIP", "AAA AUTO CLUB", "AMERICAN AUTO ASSOC"],
+    "frequency_hint": "annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Walmart+",
+    "patterns": ["WALMART PLUS", "WALMART+", "WALMART MEMBERSHIP", "WM PLUS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Twitch",
+    "patterns": ["TWITCH", "TWITCH.TV", "TWITCH INTERACTIVE"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Patreon",
+    "patterns": ["PATREON", "PATREON.COM", "PATREON INC"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Discord Nitro",
+    "patterns": ["DISCORD NITRO", "DISCORD.COM", "DISCORD INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Scribd",
+    "patterns": ["SCRIBD", "SCRIBD.COM", "SCRIBD INC"],
+    "frequency_hint": "monthly",
+    "category": "News/Media"
+  },
+  {
+    "name": "Kindle Unlimited",
+    "patterns": ["KINDLE UNLIMITED", "AMZN KINDLE", "AMAZON KINDLE UNLMTD"],
+    "frequency_hint": "monthly",
+    "category": "News/Media"
+  },
+  {
+    "name": "Ancestry",
+    "patterns": ["ANCESTRY", "ANCESTRY.COM", "ANCESTRY MEMBERSHIP"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "23andMe",
+    "patterns": ["23ANDME", "23 AND ME"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "Ring Protect",
+    "patterns": ["RING PROTECT", "RING.COM", "RING PLAN"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Nest Aware",
+    "patterns": ["NEST AWARE", "GOOGLE NEST", "GOOGLE*NEST"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "SimpliSafe",
+    "patterns": ["SIMPLISAFE", "SIMPLI SAFE"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "ADT Security",
+    "patterns": ["ADT SECURITY", "ADT INC", "ADT LLC"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Turo",
+    "patterns": ["TURO", "TURO.COM", "TURO INC"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Apple One Bundle",
+    "patterns": ["APPLE ONE", "APPLE.COM/BILL APPLE ONE"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Spotify + Hulu Bundle",
+    "patterns": ["SPOTIFY HULU", "SPOTIFY BUNDLE"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Disney Bundle",
+    "patterns": ["DISNEY BUNDLE", "DISNEY PLUS BUNDLE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Bumble",
+    "patterns": ["BUMBLE", "BUMBLE.COM", "BUMBLE INC"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Tinder",
+    "patterns": ["TINDER", "TINDER.COM", "MATCH GROUP TINDER"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Hinge",
+    "patterns": ["HINGE", "HINGE.CO", "MATCH GROUP HINGE"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Match.com",
+    "patterns": ["MATCH.COM", "MATCH GROUP"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Noom",
+    "patterns": ["NOOM", "NOOM.COM", "NOOM INC"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "WeightWatchers",
+    "patterns": ["WEIGHTWATCHERS", "WEIGHT WATCHERS", "WW DIGITAL", "WW INTL"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Whoop",
+    "patterns": ["WHOOP", "WHOOP.COM", "WHOOP INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Oura Ring",
+    "patterns": ["OURA", "OURA HEALTH", "OURARING"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Comcast Xfinity",
+    "patterns": ["COMCAST", "XFINITY", "COMCAST XFINITY", "COMCAST CABLE"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "AT&T Internet",
+    "patterns": ["AT&T INTERNET", "ATT INTERNET", "AT&T UVERSE", "ATT UVERSE", "AT&T FIBER"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Verizon Fios",
+    "patterns": ["VERIZON FIOS", "VZ FIOS", "VERIZON ONLINE"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Spectrum",
+    "patterns": ["SPECTRUM", "CHARTER SPECTRUM", "CHARTER COMMUNICATIONS"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Cox Communications",
+    "patterns": ["COX COMM", "COX COMMUNICATIONS", "COX CABLE"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "CenturyLink",
+    "patterns": ["CENTURYLINK", "CENTURY LINK", "LUMEN TECHNOLOGIES", "QUANTUM FIBER"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Frontier Communications",
+    "patterns": ["FRONTIER COMM", "FRONTIER COMMUNICATIONS", "FRONTIER FIBER"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Google Fiber",
+    "patterns": ["GOOGLE FIBER", "GOOGLE*FIBER"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "T-Mobile Home Internet",
+    "patterns": ["TMOBILE HOME INTERNET", "T-MOBILE HOME", "T-MOBILE INTERNET"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Optimum",
+    "patterns": ["OPTIMUM", "OPTIMUM ONLINE", "ALTICE USA", "CABLEVISION"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Starlink",
+    "patterns": ["STARLINK", "STARLINK INTERNET", "SPACEX STARLINK"],
+    "frequency_hint": "monthly",
+    "category": "Internet"
+  },
+  {
+    "name": "Verizon Wireless",
+    "patterns": ["VERIZON WIRELESS", "VZW", "VZ WIRELESS", "VERIZON WL"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "AT&T Wireless",
+    "patterns": ["AT&T WIRELESS", "ATT WIRELESS", "AT&T MOBILITY", "ATT MOBILITY", "AT&T BILL"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "T-Mobile",
+    "patterns": ["T-MOBILE", "TMOBILE", "T MOBILE"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Mint Mobile",
+    "patterns": ["MINT MOBILE", "MINTMOBILE"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Visible",
+    "patterns": ["VISIBLE", "VISIBLE.COM", "VISIBLE WIRELESS"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Cricket Wireless",
+    "patterns": ["CRICKET WIRELESS", "CRICKET WL", "CRICKETWL"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Metro by T-Mobile",
+    "patterns": ["METRO BY T-MOBILE", "METROPCS", "METRO PCS", "METRO TMOBILE"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Google Fi",
+    "patterns": ["GOOGLE FI", "GOOGLE*FI", "PROJECT FI"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "US Mobile",
+    "patterns": ["US MOBILE", "USMOBILE"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "Boost Mobile",
+    "patterns": ["BOOST MOBILE", "BOOSTMOBILE"],
+    "frequency_hint": "monthly",
+    "category": "Wireless"
+  },
+  {
+    "name": "PG&E",
+    "patterns": ["PG&E", "PG AND E", "PACIFIC GAS ELECTRIC", "PACIFIC GAS & ELECTRIC", "PGANDE"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Con Edison",
+    "patterns": ["CON EDISON", "CONEDISON", "CONED", "CONSOLIDATED EDISON"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Duke Energy",
+    "patterns": ["DUKE ENERGY", "DUKE-ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Southern California Edison",
+    "patterns": ["SO CAL EDISON", "SCE", "SOUTHERN CALIFORNIA EDISON", "SOCAL EDISON"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Florida Power & Light",
+    "patterns": ["FPL", "FLORIDA POWER", "FLORIDA POWER & LIGHT", "FPL GROUP"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "National Grid",
+    "patterns": ["NATIONAL GRID", "NATL GRID"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Dominion Energy",
+    "patterns": ["DOMINION ENERGY", "DOMINION VA POWER", "DOMINION VIRGINIA"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "ComEd",
+    "patterns": ["COMED", "COM ED", "COMMONWEALTH EDISON"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Georgia Power",
+    "patterns": ["GEORGIA POWER", "GA POWER"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Xcel Energy",
+    "patterns": ["XCEL ENERGY", "XCELENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "AEP Ohio",
+    "patterns": ["AEP OHIO", "AMERICAN ELECTRIC POWER", "AEP ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Entergy",
+    "patterns": ["ENTERGY", "ENTERGY CORP"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "SoCalGas",
+    "patterns": ["SOCALGAS", "SOUTHERN CALIFORNIA GAS", "SO CAL GAS"],
+    "frequency_hint": "monthly",
+    "category": "Gas"
+  },
+  {
+    "name": "SDGE",
+    "patterns": ["SDGE", "SAN DIEGO GAS", "SD GAS & ELECTRIC"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Geico",
+    "patterns": ["GEICO", "GEICO INSURANCE", "GEICO AUTO", "GEICO INDEMNITY"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "State Farm",
+    "patterns": ["STATE FARM", "STATEFARM", "STATE FARM INSURANCE", "STATE FARM MUTUAL"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Progressive",
+    "patterns": ["PROGRESSIVE", "PROGRESSIVE INSURANCE", "PROGRESSIVE CASUALTY"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Allstate",
+    "patterns": ["ALLSTATE", "ALLSTATE INSURANCE", "ALLSTATE INS"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "USAA",
+    "patterns": ["USAA", "USAA INSURANCE", "USAA PROPERTY"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Liberty Mutual",
+    "patterns": ["LIBERTY MUTUAL", "LIBERTY MUTUAL INS", "LIBERTYMUTUAL"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Nationwide",
+    "patterns": ["NATIONWIDE", "NATIONWIDE INSURANCE", "NATIONWIDE INS"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Farmers Insurance",
+    "patterns": ["FARMERS INSURANCE", "FARMERS INS", "FARMERS GRP"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Erie Insurance",
+    "patterns": ["ERIE INSURANCE", "ERIE INS"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "American Family Insurance",
+    "patterns": ["AMERICAN FAMILY", "AMFAM", "AMERICAN FAMILY INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "The Hartford",
+    "patterns": ["THE HARTFORD", "HARTFORD INSURANCE", "HARTFORD INS"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Travelers Insurance",
+    "patterns": ["TRAVELERS", "TRAVELERS INSURANCE", "TRAVELERS INS"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Root Insurance",
+    "patterns": ["ROOT INSURANCE", "ROOT INS", "ROOTINSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Lemonade Insurance",
+    "patterns": ["LEMONADE", "LEMONADE INS", "LEMONADE INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Renters Insurance"
+  },
+  {
+    "name": "Hippo Insurance",
+    "patterns": ["HIPPO INSURANCE", "HIPPO INS", "HIPPO HOME"],
+    "frequency_hint": "monthly",
+    "category": "Home Insurance"
+  },
+  {
+    "name": "Safeco Insurance",
+    "patterns": ["SAFECO", "SAFECO INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Auto Insurance"
+  },
+  {
+    "name": "Kaiser Permanente",
+    "patterns": ["KAISER", "KAISER PERMANENTE", "KAISER PERM", "KAISER FOUNDATION"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Blue Cross Blue Shield",
+    "patterns": ["BLUE CROSS", "BCBS", "BLUE SHIELD", "BLUECROSS BLUESHIELD", "ANTHEM BCBS"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Aetna",
+    "patterns": ["AETNA", "AETNA INSURANCE", "AETNA HEALTH"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Cigna",
+    "patterns": ["CIGNA", "CIGNA HEALTH", "CIGNA INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "United Healthcare",
+    "patterns": ["UNITED HEALTHCARE", "UNITEDHEALTHCARE", "UHC", "UNITEDHEALTH"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Humana",
+    "patterns": ["HUMANA", "HUMANA INSURANCE", "HUMANA INC"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Anthem",
+    "patterns": ["ANTHEM", "ANTHEM INSURANCE", "ANTHEM BLUE CROSS"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Northwestern Mutual",
+    "patterns": ["NORTHWESTERN MUTUAL", "NW MUTUAL", "NORTHWESTERN MUT"],
+    "frequency_hint": "monthly",
+    "category": "Life Insurance"
+  },
+  {
+    "name": "New York Life",
+    "patterns": ["NEW YORK LIFE", "NY LIFE", "NEWYORKLIFE"],
+    "frequency_hint": "monthly",
+    "category": "Life Insurance"
+  },
+  {
+    "name": "MetLife",
+    "patterns": ["METLIFE", "MET LIFE", "METLIFE INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Life Insurance"
+  },
+  {
+    "name": "Prudential",
+    "patterns": ["PRUDENTIAL", "PRUDENTIAL FINANCIAL", "PRUDENTIAL INS"],
+    "frequency_hint": "monthly",
+    "category": "Life Insurance"
+  },
+  {
+    "name": "Globe Life",
+    "patterns": ["GLOBE LIFE", "GLOBELIFE", "GLOBE LIFE INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Life Insurance"
+  },
+  {
+    "name": "Aflac",
+    "patterns": ["AFLAC", "AFLAC INSURANCE", "AFLAC INC"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "Oscar Health",
+    "patterns": ["OSCAR HEALTH", "OSCAR INSURANCE"],
+    "frequency_hint": "monthly",
+    "category": "Health Insurance"
+  },
+  {
+    "name": "BetterHelp",
+    "patterns": ["BETTERHELP", "BETTERHELP.COM", "BETTER HELP"],
+    "frequency_hint": "monthly",
+    "category": "Therapy"
+  },
+  {
+    "name": "Talkspace",
+    "patterns": ["TALKSPACE", "TALKSPACE.COM"],
+    "frequency_hint": "monthly",
+    "category": "Therapy"
+  },
+  {
+    "name": "Cerebral",
+    "patterns": ["CEREBRAL", "CEREBRAL INC", "GETCEREBRAL"],
+    "frequency_hint": "monthly",
+    "category": "Therapy"
+  },
+  {
+    "name": "Hims",
+    "patterns": ["HIMS", "HIMS.COM", "HIMS AND HERS", "HIMS & HERS"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Hers",
+    "patterns": ["HERS", "FORHERS", "FOR HERS"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Nurx",
+    "patterns": ["NURX", "NURX.COM", "NURX INC"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Ro",
+    "patterns": ["RO HEALTH", "RO.CO", "ROMAN HEALTH"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Express Scripts",
+    "patterns": ["EXPRESS SCRIPTS", "EXPRESSSCRIPTS", "EXPRESS-SCRIPTS"],
+    "frequency_hint": "monthly",
+    "category": "Pharmacy"
+  },
+  {
+    "name": "Capsule Pharmacy",
+    "patterns": ["CAPSULE PHARMACY", "CAPSULE RX", "CAPSULE CORP"],
+    "frequency_hint": "monthly",
+    "category": "Pharmacy"
+  },
+  {
+    "name": "GoodRx",
+    "patterns": ["GOODRX", "GOOD RX", "GOODRX GOLD"],
+    "frequency_hint": "monthly",
+    "category": "Pharmacy"
+  },
+  {
+    "name": "Teladoc",
+    "patterns": ["TELADOC", "TELADOC HEALTH"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Done ADHD",
+    "patterns": ["DONE ADHD", "DONEFIRST", "DONE.HEALTH"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Keeps",
+    "patterns": ["KEEPS", "KEEPS.COM"],
+    "frequency_hint": "monthly",
+    "category": "Telehealth"
+  },
+  {
+    "name": "Apartments.com",
+    "patterns": ["APARTMENTS.COM", "APARTMENTSDOTCOM", "COZY RENT", "APARTMENTS COM RENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "RentCafe",
+    "patterns": ["RENTCAFE", "RENT CAFE", "RENTCAFE.COM"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "AppFolio",
+    "patterns": ["APPFOLIO", "APPFOLIO PROPERTY", "APPFOLIO INC"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "Buildium",
+    "patterns": ["BUILDIUM", "BUILDIUM.COM"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "PayRent",
+    "patterns": ["PAYRENT", "PAYRENT.COM", "PAY RENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "Zelle Rent",
+    "patterns": ["ZELLE RENT", "ZELLE PAYMENT RENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "Avail",
+    "patterns": ["AVAIL RENT", "AVAIL.CO", "AVAIL PAYMENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "RealPage",
+    "patterns": ["REALPAGE", "REAL PAGE", "REALPAGE PAYMENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "Entrata",
+    "patterns": ["ENTRATA", "ENTRATA.COM", "ENTRATA RENT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "TurboTenant",
+    "patterns": ["TURBOTENANT", "TURBO TENANT"],
+    "frequency_hint": "monthly",
+    "category": "Rent Payment"
+  },
+  {
+    "name": "Vudu",
+    "patterns": ["VUDU", "VUDU.COM", "FANDANGO VUDU"],
+    "frequency_hint": "monthly",
+    "category": "Streaming"
+  },
+  {
+    "name": "Plex Pass",
+    "patterns": ["PLEX", "PLEX.TV", "PLEX INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Nebula",
+    "patterns": ["NEBULA", "NEBULA.TV", "STANDARD NEBULA"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Pocket Casts",
+    "patterns": ["POCKET CASTS", "POCKETCASTS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Stitcher Premium",
+    "patterns": ["STITCHER", "STITCHER PREMIUM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Music"
+  },
+  {
+    "name": "Bitwarden",
+    "patterns": ["BITWARDEN", "BITWARDEN.COM", "BITWARDEN INC"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "ProtonMail",
+    "patterns": ["PROTONMAIL", "PROTON MAIL", "PROTON AG", "PROTON.ME"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Mailchimp",
+    "patterns": ["MAILCHIMP", "MAILCHIMP.COM", "INTUIT MAILCHIMP"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "HubSpot",
+    "patterns": ["HUBSPOT", "HUBSPOT.COM", "HUBSPOT INC"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Quickbooks Online",
+    "patterns": ["QUICKBOOKS", "INTUIT QUICKBOOKS", "QBO ONLINE", "INTUIT QBO"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "FreshBooks",
+    "patterns": ["FRESHBOOKS", "FRESH BOOKS", "FRESHBOOKS.COM"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Xero",
+    "patterns": ["XERO", "XERO.COM", "XERO ACCOUNTING"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Calendly",
+    "patterns": ["CALENDLY", "CALENDLY.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Loom",
+    "patterns": ["LOOM", "LOOM.COM", "LOOM INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Miro",
+    "patterns": ["MIRO", "MIRO.COM", "REALTIMEBOARD"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Monday.com",
+    "patterns": ["MONDAY.COM", "MONDAY COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "ClickUp",
+    "patterns": ["CLICKUP", "CLICKUP.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Linear",
+    "patterns": ["LINEAR", "LINEAR.APP"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "JetBrains",
+    "patterns": ["JETBRAINS", "JETBRAINS.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Setapp",
+    "patterns": ["SETAPP", "SETAPP.COM", "MACPAW SETAPP"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Spotify for Podcasters",
+    "patterns": ["ANCHOR FM", "SPOTIFY PODCASTERS"],
+    "frequency_hint": "monthly",
+    "category": "Music"
+  },
+  {
+    "name": "Robinhood Gold",
+    "patterns": ["ROBINHOOD GOLD", "ROBINHOOD MEMBERSHIP"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Seeking Alpha",
+    "patterns": ["SEEKING ALPHA", "SEEKINGALPHA"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "Motley Fool",
+    "patterns": ["MOTLEY FOOL", "THE MOTLEY FOOL"],
+    "frequency_hint": "annual",
+    "category": "News/Media"
+  },
+  {
+    "name": "DataCamp",
+    "patterns": ["DATACAMP", "DATACAMP.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Pluralsight",
+    "patterns": ["PLURALSIGHT", "PLURALSIGHT.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Treehouse",
+    "patterns": ["TREEHOUSE", "TEAMTREEHOUSE"],
+    "frequency_hint": "monthly",
+    "category": "Education"
+  },
+  {
+    "name": "Wondrium",
+    "patterns": ["WONDRIUM", "GREAT COURSES", "THE GREAT COURSES"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Babbel",
+    "patterns": ["BABBEL", "BABBEL.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Rosetta Stone",
+    "patterns": ["ROSETTA STONE", "ROSETTASTONE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Education"
+  },
+  {
+    "name": "Private Internet Access",
+    "patterns": ["PRIVATE INTERNET ACCESS", "PIA VPN", "KAPE TECHNOLOGIES"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "CyberGhost VPN",
+    "patterns": ["CYBERGHOST", "CYBER GHOST", "CYBERGHOSTVPN"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "IPVanish",
+    "patterns": ["IPVANISH", "IPVANISH.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "VPN"
+  },
+  {
+    "name": "Mullvad VPN",
+    "patterns": ["MULLVAD", "MULLVAD VPN"],
+    "frequency_hint": "monthly",
+    "category": "VPN"
+  },
+  {
+    "name": "Carvana",
+    "patterns": ["CARVANA", "CARVANA LLC", "CARVANA AUTO"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "ScentBird",
+    "patterns": ["SCENTBIRD", "SCENT BIRD"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Rent the Runway",
+    "patterns": ["RENT THE RUNWAY", "RENTTHERUNWAY"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Stitch Fix",
+    "patterns": ["STITCH FIX", "STITCHFIX"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Thrive Market",
+    "patterns": ["THRIVE MARKET", "THRIVEMARKET"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Butcher Box",
+    "patterns": ["BUTCHERBOX", "BUTCHER BOX"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Green Chef",
+    "patterns": ["GREEN CHEF", "GREENCHEF"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Dinnerly",
+    "patterns": ["DINNERLY", "DINNERLY.COM"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "Sunbasket",
+    "patterns": ["SUNBASKET", "SUN BASKET"],
+    "frequency_hint": "monthly",
+    "category": "Meal Kit"
+  },
+  {
+    "name": "BarkBright",
+    "patterns": ["BARKBRIGHT", "BARK BRIGHT"],
+    "frequency_hint": "monthly",
+    "category": "Pet"
+  },
+  {
+    "name": "Wisdom Panel",
+    "patterns": ["WISDOM PANEL", "WISDOMPANEL"],
+    "frequency_hint": "annual",
+    "category": "Pet"
+  },
+  {
+    "name": "YNAB",
+    "patterns": ["YNAB", "YOU NEED A BUDGET", "YOUNEEDABUDGET"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Copilot Money",
+    "patterns": ["COPILOT MONEY", "COPILOT FINANCE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Descript",
+    "patterns": ["DESCRIPT", "DESCRIPT.COM", "DESCRIPT INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Riverside.fm",
+    "patterns": ["RIVERSIDE", "RIVERSIDE.FM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Vimeo",
+    "patterns": ["VIMEO", "VIMEO.COM", "VIMEO INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Waze",
+    "patterns": ["WAZE CARPOOL", "WAZE"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Life360",
+    "patterns": ["LIFE360", "LIFE 360"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "AllTrails",
+    "patterns": ["ALLTRAILS", "ALL TRAILS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Gaia",
+    "patterns": ["GAIA", "GAIA.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Streaming"
+  },
+  {
+    "name": "Alo Moves",
+    "patterns": ["ALO MOVES", "ALOMOVES"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Beachbody",
+    "patterns": ["BEACHBODY", "BOD BEACHBODY", "BEACHBODY ON DEMAND"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Crunch Fitness",
+    "patterns": ["CRUNCH FITNESS", "CRUNCH GYM", "CRUNCH FIT"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Gold's Gym",
+    "patterns": ["GOLDS GYM", "GOLD'S GYM", "GOLDSGYM"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "YMCA",
+    "patterns": ["YMCA", "YMCA MEMBERSHIP"],
+    "frequency_hint": "monthly",
+    "category": "Fitness"
+  },
+  {
+    "name": "Zwift",
+    "patterns": ["ZWIFT", "ZWIFT.COM", "ZWIFT INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Fitness"
+  },
+  {
+    "name": "Bark",
+    "patterns": ["BARK.US", "BARK PARENTAL", "BARK TECHNOLOGIES"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Qustodio",
+    "patterns": ["QUSTODIO", "QUSTODIO.COM"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "Replika",
+    "patterns": ["REPLIKA", "REPLIKA.AI"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Copy.ai",
+    "patterns": ["COPY.AI", "COPYAI"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Writesonic",
+    "patterns": ["WRITESONIC", "WRITESONIC.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "ElevenLabs",
+    "patterns": ["ELEVENLABS", "ELEVEN LABS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Notion AI",
+    "patterns": ["NOTION AI", "NOTION LABS AI"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "AI/Productivity"
+  },
+  {
+    "name": "Overcast Premium",
+    "patterns": ["OVERCAST", "OVERCAST.FM"],
+    "frequency_hint": "annual",
+    "category": "Music"
+  },
+  {
+    "name": "Tattly",
+    "patterns": ["TATTLY", "TATTLY.COM"],
+    "frequency_hint": "monthly",
+    "category": "Beauty"
+  },
+  {
+    "name": "Spotify Audiobooks",
+    "patterns": ["SPOTIFY AUDIOBOOK"],
+    "frequency_hint": "monthly",
+    "category": "Music"
+  },
+  {
+    "name": "TurboTax Live",
+    "patterns": ["TURBOTAX", "INTUIT TURBOTAX"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "H&R Block",
+    "patterns": ["H&R BLOCK", "HRB DIGITAL", "HR BLOCK"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "Credit Karma",
+    "patterns": ["CREDIT KARMA", "CREDITKARMA"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Identity Guard",
+    "patterns": ["IDENTITY GUARD", "IDENTITYGUARD"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "LifeLock",
+    "patterns": ["LIFELOCK", "NORTON LIFELOCK"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Aura",
+    "patterns": ["AURA IDENTITY", "AURA.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Wyze Cam Plus",
+    "patterns": ["WYZE", "WYZE.COM", "WYZE CAM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Arlo Secure",
+    "patterns": ["ARLO", "ARLO.COM", "ARLO SECURE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Blink Subscription",
+    "patterns": ["BLINK SUBSCRIPTION", "BLINK PLAN", "AMZN BLINK"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Vivint",
+    "patterns": ["VIVINT", "VIVINT SMART HOME", "VIVINT INC"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "WP Engine",
+    "patterns": ["WP ENGINE", "WPENGINE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "SiteGround",
+    "patterns": ["SITEGROUND", "SITEGROUND.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Bluehost",
+    "patterns": ["BLUEHOST", "BLUEHOST.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "HostGator",
+    "patterns": ["HOSTGATOR", "HOST GATOR"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Linode",
+    "patterns": ["LINODE", "AKAMAI LINODE"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Render",
+    "patterns": ["RENDER", "RENDER.COM"],
+    "frequency_hint": "monthly",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Webflow",
+    "patterns": ["WEBFLOW", "WEBFLOW.COM", "WEBFLOW INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Cloud/Hosting"
+  },
+  {
+    "name": "Bubble",
+    "patterns": ["BUBBLE.IO", "BUBBLE INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Zapier",
+    "patterns": ["ZAPIER", "ZAPIER.COM", "ZAPIER INC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Make (Integromat)",
+    "patterns": ["MAKE.COM", "INTEGROMAT", "CELONIS MAKE"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Airtable",
+    "patterns": ["AIRTABLE", "AIRTABLE.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Coda",
+    "patterns": ["CODA.IO", "CODA DOC"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Roam Research",
+    "patterns": ["ROAM RESEARCH", "ROAMRESEARCH"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Obsidian Sync",
+    "patterns": ["OBSIDIAN", "OBSIDIAN.MD"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Bear Notes",
+    "patterns": ["BEAR NOTES", "SHINY FROG BEAR"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Craft Docs",
+    "patterns": ["CRAFT DOCS", "CRAFTDOCS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Things 3",
+    "patterns": ["CULTURED CODE", "THINGS APP"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "Fantastical",
+    "patterns": ["FANTASTICAL", "FLEXIBITS"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Superhuman",
+    "patterns": ["SUPERHUMAN", "SUPERHUMAN.COM"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Hey Email",
+    "patterns": ["HEY.COM", "BASECAMP HEY"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "Basecamp",
+    "patterns": ["BASECAMP", "BASECAMP.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Sketch",
+    "patterns": ["SKETCH", "SKETCH.COM", "BOHEMIAN CODING"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "InVision",
+    "patterns": ["INVISION", "INVISION APP", "INVISIONAPP"],
+    "frequency_hint": "monthly",
+    "category": "Software"
+  },
+  {
+    "name": "Framer",
+    "patterns": ["FRAMER", "FRAMER.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "Procreate",
+    "patterns": ["SAVAGE INTERACTIVE", "PROCREATE"],
+    "frequency_hint": "annual",
+    "category": "Software"
+  },
+  {
+    "name": "X Premium (Twitter)",
+    "patterns": ["X CORP", "TWITTER", "X.COM", "ABOUT.X.COM"],
+    "frequency_hint": "monthly_or_annual",
+    "category": "Software"
+  },
+  {
+    "name": "ConEd Water",
+    "patterns": ["NEW YORK WATER", "NYC WATER", "NYC DEP WATER"],
+    "frequency_hint": "quarterly",
+    "category": "Water"
+  },
+  {
+    "name": "American Water",
+    "patterns": ["AMERICAN WATER", "AMWATER", "AMERICAN WATER WORKS"],
+    "frequency_hint": "monthly",
+    "category": "Water"
+  },
+  {
+    "name": "Aqua America",
+    "patterns": ["AQUA AMERICA", "ESSENTIAL UTILITIES", "AQUA WATER"],
+    "frequency_hint": "monthly",
+    "category": "Water"
+  },
+  {
+    "name": "Eversource",
+    "patterns": ["EVERSOURCE", "EVERSOURCE ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Pepco",
+    "patterns": ["PEPCO", "POTOMAC ELECTRIC"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Consumers Energy",
+    "patterns": ["CONSUMERS ENERGY", "CONSUMERS ENRGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "WE Energies",
+    "patterns": ["WE ENERGIES", "WISCONSIN ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Ameren",
+    "patterns": ["AMEREN", "AMEREN CORP"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "PPL Electric",
+    "patterns": ["PPL ELECTRIC", "PPL UTILITIES"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "PSE&G",
+    "patterns": ["PSEG", "PSE&G", "PSEG ELECTRIC"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "Puget Sound Energy",
+    "patterns": ["PUGET SOUND ENERGY", "PSE ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "CPS Energy",
+    "patterns": ["CPS ENERGY", "CPSENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  },
+  {
+    "name": "NextEra Energy",
+    "patterns": ["NEXTERA", "NEXTERA ENERGY"],
+    "frequency_hint": "monthly",
+    "category": "Electric"
+  }
+]

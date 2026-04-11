@@ -1,0 +1,14 @@
+/* âââââââââââââââââââââââââââââââââââââââââââ
+   Folio â BUDGET ROUTE STYLES
+   Extracted from app.css â scoped to /budget
+   âââââââââââââââââââââââââââââââââââââââââââ */
+
+/*
+ * The budget route uses shared components
+ * (.card, .card-interactive, .budget-progress-bar,
+ *  .budget-progress-fill, .delta-badge, .section-header,
+ *  utility classes) which remain in app.css.
+ *
+ * Route-specific styles can be added here as the
+ * budget UI evolves.
+ */

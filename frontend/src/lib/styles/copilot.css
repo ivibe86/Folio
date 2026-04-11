@@ -1,0 +1,219 @@
+/* src/lib/styles/copilot.css */
+
+/* ═══════════════════════════════════════════════════════
+   Folio — COPILOT/CHAT ROUTE STYLES
+   ═══════════════════════════════════════════════════════ */
+
+/* ── Message container ── */
+.copilot-msg-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 100%;
+}
+
+/* ── Operation badges ── */
+.copilot-op-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 3px 10px;
+    border-radius: 8px;
+    width: fit-content;
+    text-transform: uppercase;
+}
+
+.copilot-op-read {
+    background: rgba(59, 130, 246, 0.10);
+    color: #3b82f6;
+}
+
+.copilot-op-write {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+}
+
+.copilot-op-success {
+    background: rgba(52, 211, 153, 0.12);
+    color: #34d399;
+}
+
+.copilot-op-error {
+    background: rgba(248, 113, 113, 0.12);
+    color: #f87171;
+}
+
+/* ── Data table ── */
+.copilot-data-table-wrap {
+    overflow-x: auto;
+    border-radius: 10px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    max-height: 320px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.copilot-data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.copilot-data-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.copilot-data-table th {
+    background: var(--surface-100);
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--card-border);
+    white-space: nowrap;
+}
+
+.copilot-data-table td {
+    padding: 6px 12px;
+    color: var(--text-primary);
+    border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent);
+    white-space: nowrap;
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.copilot-data-table tbody tr:hover {
+    background: var(--surface-100);
+}
+
+.copilot-data-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+/* Preview table (in confirmation card) — slightly different styling */
+.copilot-data-table-preview {
+    font-size: 10px;
+}
+
+.copilot-data-table-preview th {
+    font-size: 8px;
+    padding: 6px 10px;
+}
+
+.copilot-data-table-preview td {
+    padding: 5px 10px;
+}
+
+/* ── Write confirmation card ── */
+.copilot-confirm-card {
+    padding: 12px 16px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--card-bg) 95%, rgba(245, 158, 11, 0.1));
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.copilot-confirm-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 16px;
+    border-radius: 10px;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.copilot-confirm-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+}
+
+.copilot-confirm-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+.copilot-confirm-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.copilot-confirm-yes {
+    background: linear-gradient(135deg, #059669, #10b981);
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3);
+}
+
+.copilot-confirm-yes:hover:not(:disabled) {
+    box-shadow: 0 4px 16px rgba(5, 150, 105, 0.4);
+}
+
+.copilot-confirm-no {
+    background: var(--surface-200);
+    color: var(--text-secondary);
+}
+
+.copilot-confirm-no:hover:not(:disabled) {
+    background: var(--surface-100);
+}
+
+/* ── Confirmed badge ── */
+.copilot-confirmed-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #34d399;
+    padding: 4px 10px;
+    border-radius: 8px;
+    background: rgba(52, 211, 153, 0.10);
+    width: fit-content;
+}
+
+/* ── SQL toggle & block ── */
+.copilot-sql-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 0;
+    transition: color 0.15s ease;
+}
+
+.copilot-sql-toggle:hover {
+    color: var(--text-secondary);
+}
+
+.copilot-sql-block {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: var(--surface-100);
+    color: var(--text-secondary);
+    border: 1px solid var(--card-border);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    scrollbar-width: thin;
+}

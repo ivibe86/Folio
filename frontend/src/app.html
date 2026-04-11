@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" class="">
+<head>
+    <script>
+        window.__dashboardData = fetch('/api/dashboard-bundle?nw_interval=biweekly', {
+            headers: { 'X-API-Key': '%Folio_API_KEY%' }
+        })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .catch(function() { return null; });
+    </script>  
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- FOUC prevention: apply theme class before first paint -->
+    <script>
+        (function() {
+            try {
+                var theme = localStorage.getItem('theme');
+                if (theme === 'dark') {
+                    document.documentElement.classList.add('dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                }
+            } catch(e) {}
+        })();
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <!-- ââ Preload critical font CSS ââââââââââââââââââââââââââ
+         Preloading the icon font CSS tells the browser to fetch it
+         at highest priority BEFORE parsing the rest of <head>.
+         This eliminates the FOUT window where raw icon names
+         (dashboard, receipt_long, etc.) flash in the sidebar. -->
+    <link rel="preload" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block" as="style" crossorigin />
+
+    <!-- ââ Text Fonts ââââââââââââââââââââââââââââââââââââââââââ
+         Single request: Inter + Manrope + JetBrains Mono + DM Mono
+         display=swap: shows fallback text instantly, swaps when loaded -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+    <!-- ââ Icon Font â Self-Hosted (zero network latency) ââââ
+         Material Symbols Outlined served from /fonts/ directory.
+         Loaded via @font-face in app.css. No external fetch needed. -->
+
+    <title>The Ledger</title>
+    %sveltekit.head%
+</head>
+<body data-sveltekit-preload-data="hover">
+    <div style="display: contents">%sveltekit.body%</div>
+</body>
+</html>
