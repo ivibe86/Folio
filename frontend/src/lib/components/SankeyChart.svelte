@@ -835,7 +835,7 @@ onMount(() => {
         stroke-dasharray: 1;
         stroke-dashoffset: 1;
         opacity: 0;
-        animation: flowSweep 2.5s ease-in-out forwards;
+        animation: flowSweep 1.4s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
         pointer-events: none;
         mix-blend-mode: screen;
     }

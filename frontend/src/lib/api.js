@@ -44,6 +44,19 @@ export function invalidateCache() {
 }
 
 /**
+ * Invalidate cache entries whose keys contain the given substring.
+ * Useful for targeted invalidation (e.g. after enrollment, clear only
+ * dashboard-related entries without nuking unrelated cached data).
+ */
+export function invalidateCacheByPrefix(substring) {
+    for (const key of _cache.keys()) {
+        if (key.includes(substring)) {
+            _cache.delete(key);
+        }
+    }
+}
+
+/**
  * Endpoints that should NEVER have a profile parameter appended.
  * These are either global operations or return profile-agnostic data.
  */
@@ -83,8 +96,9 @@ function appendProfileParam(endpoint, method) {
     if (isProfileExempt(endpoint)) return endpoint;
 
     // Don't append to mutation endpoints EXCEPT copilot (which benefits from context)
-    if (isMutation(method) && !endpoint.startsWith('/copilot') && !endpoint.startsWith('/subscriptions')) return endpoint;
-
+    // Note: subscription endpoints that need profile pass it manually in their method definitions
+    if (isMutation(method) && !endpoint.startsWith('/copilot')) return endpoint;
+    
     try {
         const profile = get(profileParam);
         if (!profile) return endpoint; // household or empty = no filter
@@ -274,6 +288,63 @@ export function createApi(fetchFn = fetch) {
                     pattern: pattern || null
                 })
             }),
+
+        declareSubscription: (merchant, amount, frequency, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/declare${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({ merchant, amount, frequency })
+            });
+        },
+
+        cancelSubscription: (merchant, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/${encodeURIComponent(merchant)}/cancel${qs ? '?' + qs : ''}`, {
+                method: 'POST'
+            });
+        },
+
+        restoreSubscription: (merchant, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/${encodeURIComponent(merchant)}/restore${qs ? '?' + qs : ''}`, {
+                method: 'POST'
+            });
+        },
+
+        getDismissedSubscriptions: (profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/dismissed${qs ? '?' + qs : ''}`);
+        },
+
+        getSubscriptionEvents: (profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/events${qs ? '?' + qs : ''}`);
+        },
+
+        markEventsRead: (eventIds) =>
+            request('/subscriptions/events/mark-read', {
+                method: 'POST',
+                body: JSON.stringify({ event_ids: eventIds })
+            }),
+
+        redetectSubscriptions: (profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/redetect${qs ? '?' + qs : ''}`, {
+                method: 'POST'
+            });
+        },
 
         getTellerConfig: () => request('/teller-config'),
 

@@ -1,7 +1,8 @@
 <script>
     import '$lib/styles/dashboard.css';
-    import { onMount, tick } from 'svelte';
-    import { api } from '$lib/api.js';
+    import '$lib/styles/transactions.css';
+    import { onMount, onDestroy, tick } from 'svelte';
+    import { api, invalidateCacheByPrefix, invalidateCache } from '$lib/api.js';
     import {
         formatCurrency, formatCompact, formatPercent, formatMonth, formatMonthShort,
         formatDate, getCurrentMonth, computeDelta, getGreeting,
@@ -9,7 +10,7 @@
         computeTrailingSavingsRate
     } from '$lib/utils.js';
     import { darkMode, syncing, selectedPeriodStore, selectedCustomMonthStore, privacyMode } from '$lib/stores.js';
-    import { activeProfile } from '$lib/stores/profileStore.js';
+    import { profiles, activeProfile } from '$lib/stores/profileStore.js';
     import SankeyChart from '$lib/components/SankeyChart.svelte';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
     import TellerConnect from '$lib/components/TellerConnect.svelte';    
@@ -23,10 +24,16 @@
     let categories = data.categories;
     let loading = !data.summary;
     let profileSwitching = false;
+    let isRefreshing = false;
+    let _enrollmentInFlight = false;
 
     // Teller Connect configuration (fetched from backend)
     let tellerAppId = '';
     let tellerEnvironment = 'development';
+
+    // ── Enrollment sync polling ──
+    let _syncPollTimer = null;
+    let _baselineAccountCount = 0;
 
     // Period — synced with global store for cross-page persistence
     let selectedPeriod = 'this_month';
@@ -51,6 +58,16 @@
     let sankeyDrillTxns = [];
     let drillDownSection;
     let monthDropdownOpen = false;
+
+    // Sankey drill-down re-categorization state
+    let drillCatDropdownOpenForTx = null;   // original_id of tx whose dropdown is open
+    let drillCatDropdownSearch = '';         // search/filter within the dropdown
+    let drillAllCategories = [];            // category list for dropdown
+    let drillCreatingNewCategory = false;
+    let drillNewCategoryName = '';
+    let drillNewCategoryError = '';
+    let drillRecentlyUpdatedTxId = null;
+    let drillUpdateFeedback = '';
 
     // iOS-style period toggle
     const periodOptions = [
@@ -177,6 +194,119 @@
         trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
     }
 
+    // ── Sync polling: detect when backend finishes enrollment ──
+    function startSyncPolling() {
+        // Capture current account count as baseline
+        _baselineAccountCount = (accounts || []).length;
+        // Poll every 8 seconds
+        stopSyncPolling(); // clear any existing timer
+        _syncPollTimer = setInterval(pollSyncStatus, 8000);
+        // Also poll once immediately after a short delay
+        setTimeout(pollSyncStatus, 3000);
+    }
+
+    async function pollSyncStatus() {
+        try {
+            // Use a cache-busting fetch to check current accounts
+            invalidateCacheByPrefix('dashboard-bundle');
+            invalidateCacheByPrefix('accounts');
+            const freshBundle = await api.getDashboardBundle();
+            const freshAccountCount = (freshBundle?.accounts || []).length;
+
+            // Sync is complete when new accounts appear
+            if (freshAccountCount > _baselineAccountCount) {
+                console.info('✅ Sync polling: detected new accounts (%d → %d). Refreshing dashboard.',
+                    _baselineAccountCount, freshAccountCount);
+                stopSyncPolling();
+                syncing.stop();
+                await applyFreshBundle(freshBundle);
+            }
+        } catch (e) {
+            // Non-fatal — keep polling
+            console.warn('Sync poll check failed (will retry):', e.message);
+        }
+    }
+
+    function stopSyncPolling() {
+        if (_syncPollTimer) {
+            clearInterval(_syncPollTimer);
+            _syncPollTimer = null;
+        }
+    }
+
+    /**
+     * Apply a fresh dashboard bundle to all reactive state.
+     * Shared by polling completion AND handleTellerEnrolled.
+     */
+    async function applyFreshBundle(bundle) {
+        isRefreshing = true;
+        try {
+            // Purge all stale cached data
+            invalidateCacheByPrefix('dashboard-bundle');
+            invalidateCacheByPrefix('net-worth');
+            invalidateCacheByPrefix('accounts');
+            invalidateCacheByPrefix('analytics');
+            invalidateCacheByPrefix('transactions');
+            invalidateCacheByPrefix('summary');
+
+            summary = bundle.summary;
+            accounts = bundle.accounts;
+            monthly = bundle.monthly;
+            categories = bundle.categories;
+            netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
+                ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
+                : [];
+            trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
+            allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
+            if (allMonths.length > 0 && !allMonths.includes(selectedCustomMonth)) {
+                selectedCustomMonth = allMonths[0];
+            }
+
+            await computeAccountDeltas();
+            bootstrapInitialPeriod();
+
+            // Refresh profile list
+            invalidateCacheByPrefix('profiles');
+            try {
+                const freshProfiles = await api.getProfiles();
+                if (Array.isArray(freshProfiles) && freshProfiles.length > 0) {
+                    profiles.set(freshProfiles);
+                }
+            } catch (_) {}
+
+            await tick();
+
+            // Re-trigger count-up animation
+            netWorthAnimationDone = false;
+            animationDone = false;
+            animatedNetWorth = 0;
+            animatedIncome = 0;
+            animatedExpenses = 0;
+            requestAnimationFrame(() => animateNumbers());
+
+            if (!initialLoadComplete) {
+                initialLoadComplete = true;
+            }
+
+            console.info('🎉 Dashboard refreshed with new data.');
+        } finally {
+            isRefreshing = false;
+            setTimeout(() => { _enrollmentInFlight = false; }, 2000);
+        }
+    }
+
+    onDestroy(() => {
+        stopSyncPolling();
+        if (animationFrameId != null) {
+            cancelAnimationFrame(animationFrameId);
+        }
+    });
+
+    // ── If sync was already in progress (e.g. navigated away and back), resume polling ──
+    $: if ($syncing.active && $syncing.context === 'enrollment' && mounted && !_syncPollTimer) {
+        startSyncPolling();
+    }
+
     onMount(async () => {
         mounted = true;
         try {
@@ -215,44 +345,55 @@
             } catch (_) {
                 // Teller Connect will just be disabled if config isn't available
             }
+
+            // If sync was already in progress (user navigated away and back), resume polling
+            if ($syncing.active && $syncing.context === 'enrollment') {
+                console.info('🔄 Resuming sync poll — enrollment was in progress.');
+                startSyncPolling();
+            }
         } catch (e) {
             console.error('Failed to initialize dashboard:', e);
         }
     });
 
     /**
-     * Handle successful Teller Connect enrollment.
-     * Reloads the entire dashboard to include the newly linked accounts.
-     */
+    * Handle successful Teller Connect enrollment.
+    * 
+    * Two paths lead here:
+    * 1. The api.enrollAccount() promise resolved before timeout (fast sync).
+    *    → event.detail contains the enrollment result. Refresh immediately.
+    * 2. Polling detected completion (slow sync).
+    *    → applyFreshBundle() is called directly, not this function.
+    *
+    * This function now ONLY handles path 1 (the fast/happy path).
+    */
     async function handleTellerEnrolled(event) {
-        const result = event.detail;
-        console.info('Teller enrollment success:', result);
+        // Guard: Teller SDK can fire onSuccess twice (postMessage + callback)
+        if (_enrollmentInFlight) {
+            console.warn('⚠️ Enrollment already in progress, ignoring duplicate.');
+            return;
+        }
+        _enrollmentInFlight = true;
 
-        // Full dashboard reload to pick up new accounts
+        const result = event.detail;
+        console.info('🏦 Teller enrollment completed (fast path):', result);
+
+        // Stop polling — the enrollment resolved directly
+        stopSyncPolling();
+        syncing.stop();
+
+        // Grace period for DB commit
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // Re-fetch and apply fresh data
         try {
+            invalidateCacheByPrefix('dashboard-bundle');
             const bundle = await api.getDashboardBundle();
-            summary = bundle.summary;
-            accounts = bundle.accounts;
-            monthly = bundle.monthly;
-            categories = bundle.categories;
-            netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
-                ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
-                : [];
-            trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
-            allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
-            if (allMonths.length > 0 && !allMonths.includes(selectedCustomMonth)) {
-                selectedCustomMonth = allMonths[0];
-            }
-            await computeAccountDeltas();
-            bootstrapInitialPeriod();
-            netWorthAnimationDone = false;
-            animationDone = false;
-            animatedNetWorth = 0;
-            animatedIncome = 0;
-            animatedExpenses = 0;
-            requestAnimationFrame(() => animateNumbers());
+            await applyFreshBundle(bundle);
         } catch (e) {
-            console.error('Failed to reload after enrollment:', e);
+            console.error('❌ Failed to reload after enrollment:', e);
+            isRefreshing = false;
+            _enrollmentInFlight = false;
         }
     }
 
@@ -952,6 +1093,9 @@
     // Sankey drill-down
     async function handleSankeySelect(event) {
         const cat = event.detail;
+        cancelDrillEditing();
+        drillUpdateFeedback = '';
+        drillRecentlyUpdatedTxId = null;
         if (cat === null || cat === selectedSankeyCategory) {
             selectedSankeyCategory = null;
             sankeyDrillTxns = [];
@@ -988,6 +1132,117 @@
         const catEntry = sankeyCategoryList.find(c => c.category === category);
         if (catEntry) return catEntry.total;
         return sankeyDrillTxns.reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    }
+
+    // ââ Sankey drill-down re-categorization ââ
+
+    // Fetch categories list (lazy-loaded on first drill-down edit)
+    async function ensureDrillCategories() {
+        if (drillAllCategories.length === 0) {
+            try {
+                drillAllCategories = await api.getCategories();
+            } catch (_) {}
+        }
+    }
+
+    // Filtered category list for the re-tag dropdown search
+    $: drillFilteredCategories = drillCatDropdownSearch
+        ? drillAllCategories.filter(c => c.toLowerCase().includes(drillCatDropdownSearch.toLowerCase()))
+        : drillAllCategories;
+
+    function startDrillEditing(txId) {
+        ensureDrillCategories();
+        drillCatDropdownOpenForTx = txId;
+        drillCatDropdownSearch = '';
+        drillCreatingNewCategory = false;
+        drillNewCategoryName = '';
+        drillNewCategoryError = '';
+    }
+
+    function cancelDrillEditing() {
+        drillCatDropdownOpenForTx = null;
+        drillCatDropdownSearch = '';
+        drillCreatingNewCategory = false;
+        drillNewCategoryName = '';
+        drillNewCategoryError = '';
+    }
+
+    async function drillUpdateCategory(txId, newCategory) {
+        try {
+            await api.updateCategory(txId, newCategory);
+            const tx = sankeyDrillTxns.find(t => t.original_id === txId);
+            if (tx) {
+                const oldCategory = tx.category;
+                tx.category = newCategory;
+                tx.confidence = 'manual';
+                tx.categorization_source = 'user';
+                sankeyDrillTxns = sankeyDrillTxns;
+
+                // If re-categorized OUT of the currently drilled category,
+                // remove from the list and update the Sankey
+                if (newCategory !== selectedSankeyCategory) {
+                    sankeyDrillTxns = sankeyDrillTxns.filter(t => t.original_id !== txId);
+                }
+            }
+
+            // Show feedback
+            drillRecentlyUpdatedTxId = txId;
+            drillUpdateFeedback = `Categorized as "${newCategory}" — future similar transactions will auto-categorize`;
+
+            // Invalidate cache since category rules may have changed
+            invalidateCache();
+
+            // Refresh categories list
+            try {
+                drillAllCategories = await api.getCategories();
+            } catch (_) {}
+
+            // Refresh the Sankey data in the background so flows update
+            updatePeriod();
+
+            // Clear feedback after delay
+            setTimeout(() => {
+                if (drillRecentlyUpdatedTxId === txId) {
+                    drillRecentlyUpdatedTxId = null;
+                    drillUpdateFeedback = '';
+                }
+            }, 4000);
+        } catch (e) {
+            console.error('Failed to update category from drill-down:', e);
+            drillUpdateFeedback = 'Failed to update category';
+            setTimeout(() => { drillUpdateFeedback = ''; }, 3000);
+        }
+        cancelDrillEditing();
+    }
+
+    async function drillCreateAndApplyCategory(txId) {
+        const name = drillNewCategoryName.trim();
+        if (!name) {
+            drillNewCategoryError = 'Category name cannot be empty';
+            return;
+        }
+
+        if (drillAllCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
+            const existing = drillAllCategories.find(c => c.toLowerCase() === name.toLowerCase());
+            await drillUpdateCategory(txId, existing);
+            return;
+        }
+
+        try {
+            await api.createCategory(name);
+            drillAllCategories = [...drillAllCategories, name].sort();
+            await drillUpdateCategory(txId, name);
+        } catch (e) {
+            drillNewCategoryError = 'Failed to create category';
+            console.error(e);
+        }
+    }
+
+    /** Close drill-down category dropdown on window click */
+    function handleDrillWindowClick() {
+        if (drillCatDropdownOpenForTx) {
+            cancelDrillEditing();
+        }
     }
 
     // ══════════════════════════════════════════
@@ -1252,6 +1507,7 @@
     $: greeting = getGreeting();
 </script>
 
+<svelte:window on:click={handleDrillWindowClick} />
 
 {#if loading}
     <div class="space-y-6 fade-in">
@@ -1304,7 +1560,7 @@
                 aria-label={$privacyMode ? 'Show values' : 'Hide values'}
                 title={$privacyMode ? 'Show values' : 'Hide values'}
             >
-                <span class="material-symbols-outlined text-[18px]">
+                <span class="material-symbols-outlined text-[12px]">
                     {$privacyMode ? 'visibility_off' : 'visibility'}
                 </span>
             </button>
@@ -1324,7 +1580,10 @@
          S1: UNIFIED HERO CARD (Net Worth + Accounts + Credit Cards)
          ═══════════════════════════════════════════════════════ -->
     <section class="mb-6 fade-in-up" style="animation-delay: 60ms">
-        <div class="card-hero-unified">
+        <div class="card-hero-unified" class:period-updating={isRefreshing}>
+            {#if isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+                <div class="shimmer-overlay"></div>
+            {/if}
 
             <!-- ——— LEFT ZONE: Net Worth + SVG Chart Background ——— -->
             <div class="hero-zone hero-zone-left" style="padding: 1.25rem 1.5rem 0; position: relative; display: flex; flex-direction: column; min-height: 160px; overflow: hidden;">
@@ -1584,7 +1843,10 @@
         </div>
 
         {#if periodSummary}
-            <div class="metric-ribbon fade-in" class:period-updating={periodLoading}>
+            <div class="metric-ribbon fade-in" class:period-updating={periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}>
+                {#if periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+                    <div class="shimmer-overlay"></div>
+                {/if}
                 <div class="metric-ribbon-item">
                     <span class="metric-ribbon-label">Income</span>
                     <span class="metric-ribbon-value text-positive">
@@ -1688,10 +1950,13 @@
         </div>
 
         <div class="sankey-theater"
-             class:period-updating={periodLoading}
+             class:period-updating={periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
              bind:this={sankeyTheaterEl}
              on:mousemove={handleTheaterMouseMove}
              on:mouseleave={handleTheaterMouseLeave}>
+            {#if periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+                <div class="shimmer-overlay"></div>
+            {/if}             
             <div class="sankey-theater-glow" style="opacity: {sankeyGlowOpacity};"></div>
             {#if periodSummary}
                 <SankeyChart
@@ -1741,10 +2006,10 @@
         {/if}
 
         <!-- Drill-down transactions -->
-        <div>
+        <div style="position: relative; z-index: 50;">
             {#if selectedSankeyCategory && sankeyDrillTxns.length > 0}
                 {@const drillTotal = getDrillDownTotal(selectedSankeyCategory)}
-                <div class="card overflow-hidden mt-3 fade-in" style="padding: 0">
+                <div class="card mt-3 fade-in" style="padding: 0; overflow: visible">
                     <div class="flex items-center gap-3 px-5 py-2.5" style="border-bottom: 1px solid var(--card-border); background: var(--surface-100)">
                         <div class="w-6 h-6 rounded-lg flex items-center justify-center"
                             style="background: color-mix(in srgb, {CATEGORY_COLORS[selectedSankeyCategory] || '#627d98'} 15%, transparent)">
@@ -1758,14 +2023,24 @@
                         </div>
                         <p class="ml-auto text-[13px] font-bold font-mono" style="color: var(--negative)">{formatCurrency(drillTotal)}</p>
                     </div>
-                    {#each sankeyDrillTxns.slice(0, 10) as tx}
+                    {#if drillUpdateFeedback}
+                        <div class="drill-feedback-toast fade-in">
+                            <span class="material-symbols-outlined text-[14px]" style="color: var(--positive)">check_circle</span>
+                            <span class="text-[11px] font-medium" style="color: var(--text-primary)">{drillUpdateFeedback}</span>
+                        </div>
+                    {/if}
+                    {#each sankeyDrillTxns.slice(0, 10) as tx (tx.original_id)}
                         {@const amount = parseFloat(tx.amount)}
-                        <div class="flex items-center gap-4 px-5 py-2" style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
+                        {@const txCatColor = CATEGORY_COLORS[tx.category] || '#627d98'}
+                        {@const isDrillUpdated = drillRecentlyUpdatedTxId === tx.original_id}
+                        <div class="drill-tx-row"
+                            class:tx-row-updated={isDrillUpdated}
+                            style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
                             <div class="flex-1 min-w-0">
                                 <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">{tx.description}</p>
                                 <p class="text-[10px]" style="color: var(--text-muted)">{formatDate(tx.date)} · {tx.account_name}</p>
                             </div>
-                            <div class="flex items-center gap-2 flex-shrink-0">
+                            <div class="drill-tx-right">
                                 <p class="text-[13px] font-bold font-mono" style="color: {amount >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                                     {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
                                 </p>
@@ -1776,6 +2051,109 @@
                                 {:else if selectedSankeyCategory === 'Savings Transfer' || selectedSankeyCategory === 'Personal Transfer'}
                                     <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, #3b82f6 12%, transparent); color: #3b82f6">OUTFLOW</span>
                                 {/if}
+
+                                <!-- Category re-tag pill -->
+                                <div class="relative tx-cat-pill-wrapper drill-cat-pill-wrapper" on:click|stopPropagation>
+                                    <button
+                                        class="tx-cat-pill drill-cat-pill"
+                                        class:tx-cat-pill-editing={drillCatDropdownOpenForTx === tx.original_id}
+                                        on:click|stopPropagation={() => {
+                                            if (drillCatDropdownOpenForTx === tx.original_id) {
+                                                cancelDrillEditing();
+                                            } else {
+                                                startDrillEditing(tx.original_id);
+                                            }
+                                        }}
+                                        style="--pill-color: {txCatColor}">
+                                        <span class="material-symbols-outlined text-[11px]" style="color: {txCatColor}">
+                                            {CATEGORY_ICONS[tx.category] || 'label'}
+                                        </span>
+                                        <span class="tx-cat-pill-label" style="max-width: 80px">{tx.category || 'Uncategorized'}</span>
+                                        <span class="material-symbols-outlined text-[10px] tx-cat-pill-chevron"
+                                            class:txn-chevron-open={drillCatDropdownOpenForTx === tx.original_id}
+                                            style="color: var(--text-muted); opacity: 0.5;">
+                                            expand_more
+                                        </span>
+                                    </button>
+
+                                    {#if drillCatDropdownOpenForTx === tx.original_id}
+                                        <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" on:click|stopPropagation>
+                                            <div class="tx-cat-dropdown-search-wrap">
+                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                                <input
+                                                    bind:value={drillCatDropdownSearch}
+                                                    placeholder="Search categories..."
+                                                    class="tx-cat-dropdown-search"
+                                                    on:keydown={(e) => {
+                                                        if (e.key === 'Escape') cancelDrillEditing();
+                                                    }}
+                                                />
+                                            </div>
+                                            <div class="tx-cat-dropdown-list">
+                                                {#each drillFilteredCategories as cat}
+                                                    <button
+                                                        class="txn-filter-option"
+                                                        class:active={cat === tx.category}
+                                                        on:click={() => {
+                                                            if (cat !== tx.category) {
+                                                                drillUpdateCategory(tx.original_id, cat);
+                                                            } else {
+                                                                cancelDrillEditing();
+                                                            }
+                                                        }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                                {CATEGORY_ICONS[cat] || 'label'}
+                                                            </span>
+                                                            <span>{cat}</span>
+                                                        </span>
+                                                        {#if cat === tx.category}
+                                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
+                                                        {/if}
+                                                    </button>
+                                                {/each}
+                                                {#if drillFilteredCategories.length === 0 && drillCatDropdownSearch}
+                                                    <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                        No matching categories
+                                                    </div>
+                                                {/if}
+                                            </div>
+                                            <div class="tx-cat-dropdown-footer">
+                                                {#if drillCreatingNewCategory}
+                                                    <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                        <input
+                                                            bind:value={drillNewCategoryName}
+                                                            placeholder="New category name..."
+                                                            class="tx-cat-dropdown-new-input"
+                                                            on:keydown={(e) => {
+                                                                if (e.key === 'Enter') drillCreateAndApplyCategory(tx.original_id);
+                                                                if (e.key === 'Escape') { drillCreatingNewCategory = false; drillNewCategoryName = ''; drillNewCategoryError = ''; }
+                                                            }}
+                                                        />
+                                                        <button
+                                                            class="tx-edit-btn tx-edit-btn-confirm"
+                                                            on:click={() => drillCreateAndApplyCategory(tx.original_id)}
+                                                            disabled={!drillNewCategoryName.trim()}>
+                                                            <span class="material-symbols-outlined text-[13px]">check</span>
+                                                        </button>
+                                                    </div>
+                                                    {#if drillNewCategoryError}
+                                                        <span class="text-[9px] px-3" style="color: var(--negative)">{drillNewCategoryError}</span>
+                                                    {/if}
+                                                {:else}
+                                                    <button
+                                                        class="txn-filter-option tx-cat-create-btn"
+                                                        on:click={() => { drillCreatingNewCategory = true; }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                            <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                        </span>
+                                                    </button>
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    {/if}
+                                </div>
                             </div>
                         </div>
                     {/each}

@@ -818,29 +818,60 @@
     to   { opacity: 1; }
 }
 
-/* —— Period loading transition —— */
+/* ── Period loading transition ── */
 .period-updating {
-    opacity: 0.45;
+    opacity: 0.55;
     pointer-events: none;
-    transition: opacity 0.15s ease-out;
+    transition: opacity 0.2s ease-out;
     position: relative;
 }
 
-.period-updating::after {
-    content: '';
+/* ── Shimmer overlay: real DOM element, not ::after ──
+   This avoids collision with existing ::after pseudo-elements
+   on .card-hero-unified, .metric-ribbon, and .sankey-theater
+   which are used for glass-shine and ambient glow effects. */
+.shimmer-overlay {
     position: absolute;
     inset: 0;
     border-radius: inherit;
-    background: linear-gradient(90deg,
-        transparent 25%,
-        var(--surface-200) 50%,
-        transparent 75%
+    z-index: 20;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.shimmer-overlay::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(56, 189, 248, 0.06) 20%,
+        rgba(56, 189, 248, 0.12) 50%,
+        rgba(56, 189, 248, 0.06) 80%,
+        transparent 100%
     );
     background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    pointer-events: none;
-    z-index: 10;
-    opacity: 0.3;
+    animation: shimmer-sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer-sweep {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Dark mode: brighter shimmer for visibility */
+.dark .shimmer-overlay::after {
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(56, 189, 248, 0.08) 20%,
+        rgba(56, 189, 248, 0.18) 50%,
+        rgba(56, 189, 248, 0.08) 80%,
+        transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer-sweep 1.5s ease-in-out infinite;
 }
 
 .metric-ribbon,
@@ -858,4 +889,136 @@
     height: 200px;
     overflow: visible;
     display: block;
+}
+
+/* âââââââââââââââââââââââââââââââââââââââââââ
+   SANKEY DRILL-DOWN â RE-CATEGORIZATION
+   Category pill + dropdown inside the Sankey
+   drill-down transaction panel on Dashboard.
+   Reuses .tx-cat-pill / .tx-cat-dropdown from
+   transactions.css with dashboard-specific
+   layout overrides.
+   âââââââââââââââââââââââââââââââââââââââââââ */
+
+/* ââ Drill-down transaction row layout ââ */
+.drill-tx-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 1.25rem;
+    transition: background 0.3s ease;
+    position: relative;
+}
+
+.drill-tx-row:hover {
+    background: var(--surface-100);
+}
+
+.drill-tx-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+/* ââ Category pill sizing within drill-down ââ */
+.drill-cat-pill-wrapper {
+    z-index: 2;
+}
+
+.drill-cat-pill {
+    padding: 0.2rem 0.4rem 0.2rem 0.35rem;
+    font-size: 9px;
+    border-radius: 0.4rem;
+    gap: 0.2rem;
+}
+
+/* ── Dropdown positioning — anchored right, drops down ── */
+.drill-cat-dropdown {
+    left: auto !important;
+    right: 0;
+    transform: none !important;
+    top: calc(100% + 4px);
+    min-width: 220px;
+    max-width: 280px;
+    max-height: 320px;
+    z-index: 9999;
+    animation: drillCatDropIn 0.18s cubic-bezier(0.23, 1.02, 0.32, 1) both;
+}
+
+@keyframes drillCatDropIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.97);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Ensure row with open dropdown has elevated z-index */
+.drill-tx-row:has(.drill-cat-dropdown) {
+    z-index: 9999;
+    position: relative;
+}
+
+/* ââ Drill-down feedback toast ââ */
+.drill-feedback-toast {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 16px;
+    background: color-mix(in srgb, var(--positive) 6%, var(--surface-100));
+    border-bottom: 1px solid color-mix(in srgb, var(--positive) 15%, transparent);
+    animation: drill-toast-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes drill-toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ── Sankey section stacking context ──
+   The Money Flow section must sit above the Trends & Trajectory
+   sections in z-index so that the drill-down category dropdown
+   can visually float over the Monthly Net bar chart below it.
+   Without this, the dropdown renders behind the chart card
+   because each .card creates its own stacking context. */
+section:has(.sankey-theater) {
+    position: relative;
+    z-index: 10;
+}
+
+/* Trends sections sit below the Sankey drill-down */
+section:has(.monthly-net-chart-wrap),
+section:has(.trends-two-panel) {
+    position: relative;
+    z-index: 1;
+}
+
+/* ââ Responsive: on small screens, full-width dropdown ââ */
+@media (max-width: 640px) {
+    .drill-tx-row {
+        flex-wrap: wrap;
+        padding: 0.5rem 1rem;
+    }
+
+    .drill-tx-right {
+        flex-wrap: wrap;
+        gap: 0.375rem;
+    }
+
+    .drill-cat-dropdown {
+        left: 0 !important;
+        right: 0;
+        min-width: 200px;
+    }
 }

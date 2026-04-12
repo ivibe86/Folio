@@ -25,9 +25,9 @@
 
     const copilotItem = { path: '/copilot', icon: 'auto_awesome', label: 'Copilot' };
 
-    /* —— Sync —— */
+    /* ── Sync ── */
     async function handleSync() {
-        $syncing = true;
+        syncing.start('manual-sync');
         try {
             const result = await api.sync();
             lastSynced = result.last_updated;
@@ -35,7 +35,7 @@
         } catch (e) {
             console.error('Sync failed:', e);
         } finally {
-            $syncing = false;
+            syncing.stop();
         }
     }
 
@@ -242,12 +242,12 @@
 
     <!-- Footer — Status Bar -->
     <div class="rail-footer">
-        <button on:click={handleSync} disabled={$syncing}
+        <button on:click={handleSync} disabled={$syncing.active}
                 class="rail-footer-row rail-footer-row--interactive">
-            <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing}></span>
+            <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
             <span class="rail-footer-label">
-                {#if $syncing}
-                    Syncing…
+                {#if $syncing.active}
+                    Syncing...¦
                 {:else if lastSynced}
                     <span class="rail-footer-accent">Synced</span> · {relativeTime(lastSynced)}
                 {:else}
@@ -255,8 +255,8 @@
                 {/if}
             </span>
             <span class="material-symbols-outlined rail-footer-action"
-                  class:animate-spin={$syncing}>
-                {$syncing ? 'progress_activity' : 'sync'}
+                  class:animate-spin={$syncing.active}>
+                {$syncing.active ? 'progress_activity' : 'sync'}
             </span>
         </button>
 
@@ -371,11 +371,11 @@
             <div class="rail-divider"></div>
 
             <div class="rail-footer">
-                <button on:click={handleSync} disabled={$syncing}
+                <button on:click={handleSync} disabled={$syncing.active}
                         class="rail-footer-row rail-footer-row--interactive">
-                    <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing}></span>
+                    <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
                     <span class="rail-footer-label">
-                        {$syncing ? 'Syncing…' : 'Sync'}
+                        {$syncing.active ? 'Syncingâ¦' : 'Sync'}
                     </span>
                 </button>
                 <button on:click={() => darkMode.toggle()}
@@ -403,9 +403,9 @@
     <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
         Folio
     </span>
-    <button on:click={handleSync} disabled={$syncing} class="p-1.5 rounded-lg"
+    <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
             style="color: var(--sidebar-text-active)">
-        <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing}>sync</span>
+        <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
     </button>
 </div>
 

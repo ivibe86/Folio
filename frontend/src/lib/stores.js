@@ -75,8 +75,65 @@ export const filters = writable({
     search: ''
 });
 
-// ── Sync state ──
-export const syncing = writable(false);
+// ── Sync state (persistent across navigation + page refresh) ──
+function createSyncStore() {
+    // Rehydrate from sessionStorage so state survives navigation & refresh
+    let initial = { active: false, startedAt: null, context: null };
+    if (browser) {
+        try {
+            const stored = sessionStorage.getItem('folioSyncState');
+            if (stored) {
+                const parsed = JSON.parse(stored);
+                // If sync was "active" but started more than 15 min ago, consider it stale
+                if (parsed.active && parsed.startedAt) {
+                    const elapsed = Date.now() - parsed.startedAt;
+                    if (elapsed > 15 * 60 * 1000) {
+                        parsed.active = false; // stale — clear it
+                    }
+                }
+                initial = parsed;
+            }
+        } catch (_) {}
+    }
+
+    const { subscribe, set, update } = writable(initial);
+
+    // Persist every change to sessionStorage
+    if (browser) {
+        subscribe(value => {
+            try {
+                sessionStorage.setItem('folioSyncState', JSON.stringify(value));
+            } catch (_) {}
+        });
+    }
+
+    return {
+        subscribe,
+        /** Start sync — call when enrollment begins */
+        start: (context = 'enrollment') => {
+            set({ active: true, startedAt: Date.now(), context });
+        },
+        /** End sync — call when polling detects completion */
+        stop: () => {
+            set({ active: false, startedAt: null, context: null });
+        },
+        /** Raw set for backward compatibility with $syncing = true/false pattern */
+        set: (val) => {
+            if (typeof val === 'boolean') {
+                if (val) {
+                    set({ active: true, startedAt: Date.now(), context: 'manual-sync' });
+                } else {
+                    set({ active: false, startedAt: null, context: null });
+                }
+            } else {
+                set(val);
+            }
+        },
+        update,
+    };
+}
+
+export const syncing = createSyncStore();
 
 // ── Global data cache ──
 export const summaryData = writable(null);

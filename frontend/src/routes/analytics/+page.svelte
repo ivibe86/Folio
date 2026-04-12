@@ -6,7 +6,7 @@
     import { activeProfile } from '$lib/stores/profileStore.js';
     import {
         formatCurrency, formatCompact, formatPercent, formatMonth, formatMonthShort,
-        formatDate, formatDateShort, getCurrentMonth, computeDelta,
+        formatDate, formatDateShort, formatDateWithYear, getCurrentMonth, computeDelta,
         CATEGORY_COLORS, CATEGORY_ICONS
     } from '$lib/utils.js';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
@@ -25,7 +25,7 @@
     
     // iOS-style period toggle
     const analyticsPeriods = ['This Month', 'Last Month', 'Custom'];
-    let selectedAnalyticsPeriod = 'Custom';
+    let selectedAnalyticsPeriod = 'This Month';
     $: activeAnalyticsPeriodIdx = Math.max(analyticsPeriods.indexOf(selectedAnalyticsPeriod), 0);
 
     let monthCategories = [];
@@ -38,21 +38,65 @@
     let categoryTransactions = [];
     // Top Merchants
     let topMerchants = [];    
+
     // Recurring / Subscriptions
     let recurringData = null;
     let recurringLoading = true;
     let activeRecurring = [];
     let inactiveRecurring = [];
-    // Split recurring items into active/inactive whenever recurringData changes
+    let cancelledRecurring = [];
+    // Split recurring items into active/inactive/cancelled whenever recurringData changes
     $: {
         if (recurringData && recurringData.items) {
-            activeRecurring = recurringData.items.filter(i => i.status === 'active');
-            inactiveRecurring = recurringData.items.filter(i => i.status === 'inactive');
+            activeRecurring = recurringData.items.filter(i => i.status === 'active' && !i.cancelled);
+            cancelledRecurring = recurringData.items.filter(i => i.cancelled);
+            inactiveRecurring = recurringData.items.filter(i => i.status === 'inactive' && !i.cancelled);
         } else {
             activeRecurring = [];
             inactiveRecurring = [];
+            cancelledRecurring = [];
         }
     }
+
+    // Subscription events (alerts)
+    let subscriptionEvents = [];
+    let unreadEventCount = 0;
+    $: {
+        if (recurringData && recurringData.events) {
+            subscriptionEvents = recurringData.events.filter(e => !e.is_read);
+            unreadEventCount = recurringData.unread_event_count || subscriptionEvents.length;
+        } else {
+            subscriptionEvents = [];
+            unreadEventCount = 0;
+        }
+    }
+
+    // Dismissed subscriptions
+    let dismissedRecurring = [];
+    let dismissedOpen = false;
+    $: {
+        if (recurringData && recurringData.dismissed) {
+            dismissedRecurring = recurringData.dismissed;
+        } else {
+            dismissedRecurring = [];
+        }
+    }
+
+    // Redetect loading state
+    let redetectLoading = false;
+
+    // Inactive subscriptions dropdown state (closed by default)
+    let inactiveOpen = false;
+
+    // Cancelled subscriptions dropdown state (closed by default)
+    let cancelledOpen = false;
+
+    // Total historically spent on inactive subscriptions
+    // Uses total_spent from backend, falls back to amount × charge_count
+    $: inactiveTotalSpent = inactiveRecurring.reduce(
+        (sum, item) => sum + (item.total_spent || (item.amount || 0) * (item.charge_count || 0)), 0
+    );
+
     // Price change aggregation for recurring subscriptions
     let priceChangeCount = 0;
     let priceChangeTotalDelta = 0;
@@ -87,11 +131,24 @@
 
             if (storedPeriod === 'custom' && storedCustom && sorted.some(m => m.month === storedCustom)) {
                 initialMonth = storedCustom;
+                selectedAnalyticsPeriod = 'Custom';
             } else if (storedPeriod === 'last_month') {
                 const now = new Date();
                 const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
                 const lmStr = `${lm.getFullYear()}-${String(lm.getMonth() + 1).padStart(2, '0')}`;
-                if (sorted.some(m => m.month === lmStr)) initialMonth = lmStr;
+                if (sorted.some(m => m.month === lmStr)) {
+                    initialMonth = lmStr;
+                    selectedAnalyticsPeriod = 'Last Month';
+                }
+            } else {
+                // Default case: check if initialMonth matches current month
+                const now = new Date();
+                const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+                if (initialMonth === currentMonthStr) {
+                    selectedAnalyticsPeriod = 'This Month';
+                } else {
+                    selectedAnalyticsPeriod = 'Custom';
+                }
             }
 
             selectedMonth = initialMonth;
@@ -886,25 +943,168 @@
                 recurringData = {
                     ...recurringData,
                     items: recurringData.items.filter(i => i.merchant !== item.merchant),
-                    count: recurringData.count - 1,
+                    dismissed_count: (recurringData.dismissed_count || 0) + 1,
+                    dismissed: [...(recurringData.dismissed || []), { merchant: item.merchant, dismissed_at: new Date().toISOString() }],
                 };
                 // Recalculate totals
                 let newMonthly = 0, newAnnual = 0;
                 for (const r of recurringData.items) {
-                    if (r.status === 'active') {
+                    if (r.status === 'active' && !r.cancelled) {
                         newAnnual += r.annual_cost;
                         newMonthly += r.annual_cost / 12;
                     }
                 }
                 recurringData.total_monthly = Math.round(newMonthly * 100) / 100;
                 recurringData.total_annual = Math.round(newAnnual * 100) / 100;
+                recurringData.active_count = recurringData.items.filter(i => i.status === 'active' && !i.cancelled).length;
             }
-            subscriptionFeedback = `✗ ${item.merchant} dismissed`;
+            subscriptionFeedback = `✕ ${item.merchant} dismissed`;
             setTimeout(() => { subscriptionFeedback = ''; }, 3000);
         } catch (e) {
             console.error('Failed to dismiss subscription:', e);
             subscriptionFeedback = 'Failed to dismiss';
             setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        }
+    }
+
+    async function handleCancelSubscription(item) {
+        try {
+            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            await api.cancelSubscription(item.merchant, profile);
+            // Mark as cancelled locally
+            if (recurringData && recurringData.items) {
+                recurringData = {
+                    ...recurringData,
+                    items: recurringData.items.map(i =>
+                        i.merchant === item.merchant ? { ...i, cancelled: true } : i
+                    ),
+                    cancelled_count: (recurringData.cancelled_count || 0) + 1,
+                    inactive_count: Math.max((recurringData.inactive_count || 0) - 1, 0),
+                };
+            }
+            subscriptionFeedback = `✓ ${item.merchant} marked as cancelled`;
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        } catch (e) {
+            console.error('Failed to cancel subscription:', e);
+            subscriptionFeedback = 'Failed to cancel';
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        }
+    }
+
+    async function handleRestoreSubscription(item) {
+        try {
+            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            await api.restoreSubscription(item.merchant, profile);
+            // Refetch recurring data to get fresh state
+            recurringLoading = true;
+            try {
+                recurringData = await api.getRecurring();
+            } catch (_) {}
+            recurringLoading = false;
+            subscriptionFeedback = `✓ ${item.merchant} restored`;
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        } catch (e) {
+            console.error('Failed to restore subscription:', e);
+            subscriptionFeedback = 'Failed to restore';
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        }
+    }
+
+    async function handleMarkEventRead(event) {
+        try {
+            await api.markEventsRead([event.id]);
+            // Remove from local events list
+            if (recurringData && recurringData.events) {
+                recurringData = {
+                    ...recurringData,
+                    events: recurringData.events.map(e =>
+                        e.id === event.id ? { ...e, is_read: true } : e
+                    ),
+                    unread_event_count: Math.max((recurringData.unread_event_count || 0) - 1, 0),
+                };
+            }
+        } catch (e) {
+            console.error('Failed to mark event read:', e);
+        }
+    }
+
+    async function handleMarkAllEventsRead() {
+        const ids = subscriptionEvents.map(e => e.id);
+        if (ids.length === 0) return;
+        try {
+            await api.markEventsRead(ids);
+            if (recurringData && recurringData.events) {
+                recurringData = {
+                    ...recurringData,
+                    events: recurringData.events.map(e => ({ ...e, is_read: true })),
+                    unread_event_count: 0,
+                };
+            }
+        } catch (e) {
+            console.error('Failed to mark all events read:', e);
+        }
+    }
+
+    async function handleRedetectSubscriptions() {
+        redetectLoading = true;
+        try {
+            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            await api.redetectSubscriptions(profile);
+            // Refetch recurring data
+            recurringData = await api.getRecurring();
+            subscriptionFeedback = '✓ Subscriptions re-scanned';
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        } catch (e) {
+            console.error('Failed to redetect subscriptions:', e);
+            subscriptionFeedback = 'Re-detection failed';
+            setTimeout(() => { subscriptionFeedback = ''; }, 3000);
+        } finally {
+            redetectLoading = false;
+        }
+    }
+
+    function getEventIcon(eventType) {
+        switch (eventType) {
+            case 'new_detected': return 'add_circle';
+            case 'price_increase': return 'trending_up';
+            case 'price_decrease': return 'trending_down';
+            case 'gone_inactive': return 'pause_circle';
+            case 'zombie_charge': return 'warning';
+            default: return 'info';
+        }
+    }
+
+    function getEventColor(eventType) {
+        switch (eventType) {
+            case 'new_detected': return 'var(--accent)';
+            case 'price_increase': return 'var(--negative)';
+            case 'price_decrease': return 'var(--positive)';
+            case 'gone_inactive': return 'var(--warning)';
+            case 'zombie_charge': return 'var(--negative)';
+            default: return 'var(--text-muted)';
+        }
+    }
+
+    function getEventBgColor(eventType) {
+        switch (eventType) {
+            case 'new_detected': return 'color-mix(in srgb, var(--accent) 8%, transparent)';
+            case 'price_increase': return 'color-mix(in srgb, var(--negative) 8%, transparent)';
+            case 'price_decrease': return 'color-mix(in srgb, var(--positive) 8%, transparent)';
+            case 'gone_inactive': return 'color-mix(in srgb, var(--warning) 8%, transparent)';
+            case 'zombie_charge': return 'color-mix(in srgb, var(--negative) 10%, transparent)';
+            default: return 'var(--surface-100)';
+        }
+    }
+
+    function getEventMessage(event) {
+        const d = event.detail || {};
+        switch (event.event_type) {
+            case 'new_detected': return `New subscription detected: ${event.merchant_name}`;
+            case 'price_increase': return `${event.merchant_name}: ${formatCurrency(d.old_amount)} → ${formatCurrency(d.new_amount)} (+${formatCurrency(d.change)})`;
+            case 'price_decrease': return `${event.merchant_name}: ${formatCurrency(d.old_amount)} → ${formatCurrency(d.new_amount)} (${formatCurrency(d.change)})`;
+            case 'gone_inactive': return `${event.merchant_name} appears inactive — no recent charges`;
+            case 'zombie_charge': return `⚠️ ${event.merchant_name} charged after being marked cancelled`;
+            default: return `${event.merchant_name}: ${event.event_type}`;
         }
     }
 
@@ -1405,26 +1605,96 @@
             <div class="flex items-center gap-2 mb-1">
                 <div class="section-accent-bar"></div>
                 <p class="section-header">Recurring & Subscriptions</p>
-                {#if subscriptionFeedback}
-                    <span class="ml-auto text-[10px] font-medium px-2 py-1 rounded-lg fade-in"
-                        style="background: var(--surface-100); color: var(--text-secondary)">
-                        {subscriptionFeedback}
+                {#if unreadEventCount > 0}
+                    <span class="analytics-event-count-badge">{unreadEventCount}</span>
+                {/if}
+                <div class="flex items-center gap-2 ml-auto">
+                    <button class="analytics-redetect-btn" on:click|stopPropagation={handleRedetectSubscriptions}
+                        disabled={redetectLoading} title="Re-scan for subscriptions">
+                        <span class="material-symbols-outlined text-[14px]"
+                            class:animate-spin={redetectLoading}
+                            style="color: var(--text-muted)">refresh</span>
+                    </button>
+                    {#if subscriptionFeedback}
+                        <span class="text-[10px] font-medium px-2 py-1 rounded-lg fade-in"
+                            style="background: var(--surface-100); color: var(--text-secondary)">
+                            {subscriptionFeedback}
+                        </span>
+                    {/if}
+                </div>
+            </div>
+            <div class="flex items-center gap-2 mb-2 ml-6 flex-wrap">
+                <span class="analytics-sub-summary-badge" style="--badge-color: var(--positive)">
+                    {recurringData.active_count || activeRecurring.length} active
+                </span>
+                {#if (recurringData.inactive_count || inactiveRecurring.length) > 0}
+                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--warning)">
+                        {recurringData.inactive_count || inactiveRecurring.length} inactive
+                    </span>
+                {/if}
+                {#if (recurringData.cancelled_count || cancelledRecurring.length) > 0}
+                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--negative)">
+                        {recurringData.cancelled_count || cancelledRecurring.length} cancelled
+                    </span>
+                {/if}
+                {#if (recurringData.dismissed_count || dismissedRecurring.length) > 0}
+                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--text-muted)">
+                        {recurringData.dismissed_count || dismissedRecurring.length} dismissed
                     </span>
                 {/if}
             </div>
             <p class="text-[11px] mb-4 ml-6" style="color: var(--text-muted)">
-                {recurringData.count} detected ·
                 <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(recurringData.total_monthly)}/mo</span> ·
                 <span class="font-mono" style="color: var(--text-muted)">{formatCurrency(recurringData.total_annual)}/yr</span>
-                {#if inactiveRecurring.length > 0}
-                    · <span class="text-[10px]" style="color: var(--warning)">{inactiveRecurring.length} inactive</span>
-                {/if}
                 {#if priceChangeCount > 0}
                     · <span class="text-[10px]" style="color: var(--negative)">{priceChangeCount} price increase{priceChangeCount !== 1 ? 's' : ''}</span>
                 {/if}
             </p>
 
             <div class="card" style="padding: 0; overflow: hidden">
+                <!-- Subscription Events / Alerts Strip -->
+                {#if subscriptionEvents.length > 0}
+                    <div class="analytics-events-strip">
+                        <div class="analytics-events-strip-header">
+                            <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">
+                                Recent Alerts
+                            </span>
+                            {#if subscriptionEvents.length > 1}
+                                <button class="analytics-events-dismiss-all" on:click|stopPropagation={handleMarkAllEventsRead}>
+                                    Dismiss all
+                                </button>
+                            {/if}
+                        </div>
+                        {#each subscriptionEvents.slice(0, 5) as event}
+                            <div class="analytics-event-card"
+                                style="--event-color: {getEventColor(event.event_type)}; background: {getEventBgColor(event.event_type)}">
+                                <div class="flex items-center gap-2.5 flex-1 min-w-0">
+                                    <span class="material-symbols-outlined text-[16px]" style="color: var(--event-color)">
+                                        {getEventIcon(event.event_type)}
+                                    </span>
+                                    <div class="min-w-0 flex-1">
+                                        <p class="text-[11px] font-medium" style="color: var(--text-primary)">
+                                            {getEventMessage(event)}
+                                        </p>
+                                        <p class="text-[9px]" style="color: var(--text-muted)">
+                                            {event.created_at ? formatDateWithYear(event.created_at) : ''}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button class="analytics-event-dismiss" on:click|stopPropagation={() => handleMarkEventRead(event)}
+                                    title="Dismiss">
+                                    <span class="material-symbols-outlined text-[12px]">close</span>
+                                </button>
+                            </div>
+                        {/each}
+                        {#if subscriptionEvents.length > 5}
+                            <p class="text-[9px] px-4 py-1.5" style="color: var(--text-muted)">
+                                + {subscriptionEvents.length - 5} more alerts
+                            </p>
+                        {/if}
+                    </div>
+                {/if}
+
                 <!-- Header -->
                 <div class="analytics-recurring-header">
                     <span class="analytics-recurring-hcell flex-1">Merchant</span>
@@ -1432,6 +1702,7 @@
                     <span class="analytics-recurring-hcell w-20 text-right">Amount</span>
                     <span class="analytics-recurring-hcell w-20 text-right">Annual</span>
                     <span class="analytics-recurring-hcell w-16 text-center">Status</span>
+                    <span class="analytics-recurring-hcell w-16 text-center">Conf.</span>
                     <span class="analytics-recurring-hcell w-8"></span>
                 </div>
 
@@ -1441,21 +1712,35 @@
                         <div class="flex items-center gap-3 flex-1 min-w-0">
                             <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
                                 style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 10%, transparent)">
-                                <span class="material-symbols-outlined text-[13px]"
-                                    style="color: {CATEGORY_COLORS[item.category] || '#627d98'}">
-                                    {item.is_subscription ? 'subscriptions' : 'event_repeat'}
-                                </span>
+                                {#if item.logo_url}
+                                    <img src={item.logo_url} alt="" class="w-5 h-5 rounded" style="object-fit: contain" />
+                                {:else}
+                                    <span class="material-symbols-outlined text-[13px]"
+                                        style="color: {CATEGORY_COLORS[item.category] || '#627d98'}">
+                                        {item.is_subscription ? 'subscriptions' : 'event_repeat'}
+                                    </span>
+                                {/if}
                             </div>
                             <div class="min-w-0">
-                                <p class="text-[12px] font-medium truncate" style="color: var(--text-primary)">{item.merchant}</p>
+                                <div class="flex items-center gap-1.5">
+                                    <p class="text-[12px] font-medium truncate" style="color: var(--text-primary)">{item.clean_name || item.merchant}</p>
+                                    {#if item.matched_by === 'user' || item.confidence === 'user'}
+                                        <span class="analytics-recurring-badge-user">User</span>
+                                    {/if}
+                                </div>
                                 <div class="flex items-center gap-1.5 flex-wrap">
                                     <span class="text-[9px]" style="color: {CATEGORY_COLORS[item.category] || 'var(--text-muted)'}">{item.category}</span>
-                                    <span class="text-[9px]" style="color: var(--text-muted)">· {item.months_paid} mo paid</span>
-                                    {#if item.last_date}
-                                        <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateShort(item.last_date)}</span>
+                                    {#if item.charge_count}
+                                        <span class="text-[9px]" style="color: var(--text-muted)">· {item.charge_count} charges</span>
                                     {/if}
-                                    {#if item.next_expected_date}
-                                        <span class="text-[9px] font-medium" style="color: var(--accent)">· next ~{formatDateShort(item.next_expected_date)}</span>
+                                    {#if item.total_spent}
+                                        <span class="text-[9px]" style="color: var(--text-muted)">· {formatCurrency(item.total_spent)} total</span>
+                                    {/if}
+                                    {#if item.last_charge}
+                                        <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
+                                    {/if}
+                                    {#if item.next_expected}
+                                        <span class="text-[9px] font-medium" style="color: var(--accent)">· next ~{formatDateWithYear(item.next_expected)}</span>
                                     {/if}
                                     {#if item.price_change}
                                         <span class="analytics-recurring-price-change" class:price-up={item.price_change.change > 0} class:price-down={item.price_change.change < 0}
@@ -1470,10 +1755,28 @@
                         <div class="w-16 flex justify-center">
                             <span class="text-[9px] font-mono font-medium" style="color: var(--text-muted)">{item.frequency}</span>
                         </div>
-                        <span class="text-[12px] font-bold font-mono w-20 text-right" style="color: var(--text-primary)">{formatCurrency(item.avg_amount)}</span>
+                        <span class="text-[12px] font-bold font-mono w-20 text-right" style="color: var(--text-primary)">{formatCurrency(item.amount || item.avg_amount)}</span>
                         <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
                         <div class="w-16 flex justify-center">
                             <span class="analytics-recurring-badge-active">Active</span>
+                        </div>
+                        <div class="w-16 flex justify-center">
+                            {#if item.confidence === 'user'}
+                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: color-mix(in srgb, #8b5cf6 12%, transparent); color: #8b5cf6">
+                                    User
+                                </span>
+                            {:else if item.confidence === 'high'}
+                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: color-mix(in srgb, var(--positive) 12%, transparent); color: var(--positive)">
+                                    High
+                                </span>
+                            {:else}
+                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning)">
+                                    Low
+                                </span>
+                            {/if}
                         </div>
                         <div class="w-8 flex justify-center">
                             <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
@@ -1491,59 +1794,206 @@
                     </div>
                 {/if}
 
-                <!-- Inactive subscriptions -->
+                <!-- Inactive subscriptions (collapsible dropdown, closed by default) -->
                 {#if inactiveRecurring.length > 0}
-                    <div class="px-5 py-2" style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
-                        <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Inactive / Possibly Cancelled</span>
+                    <div class="analytics-recurring-inactive-toggle"
+                         style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
+                        <button class="analytics-recurring-inactive-trigger"
+                            on:click|stopPropagation={() => { inactiveOpen = !inactiveOpen; }}>
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-[14px]" style="color: var(--warning)">
+                                    {inactiveOpen ? 'expand_less' : 'expand_more'}
+                                </span>
+                                <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">
+                                    Inactive / Possibly Cancelled
+                                </span>
+                                <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: var(--surface-200); color: var(--warning)">
+                                    {inactiveRecurring.length}
+                                </span>
+                            </div>
+                            <span class="text-[9px] font-mono" style="color: var(--text-muted)">
+                                {formatCurrency(inactiveTotalSpent)} total spent
+                            </span>
+                        </button>
                     </div>
-                    {#each inactiveRecurring.slice(0, 5) as item, i}
-                        <div class="analytics-recurring-row analytics-recurring-row-inactive" style="border-bottom: {i < Math.min(inactiveRecurring.length, 5) - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
-                            <div class="flex items-center gap-3 flex-1 min-w-0">
-                                <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-                                    style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 6%, transparent)">
-                                    <span class="material-symbols-outlined text-[13px]"
-                                        style="color: {CATEGORY_COLORS[item.category] || '#627d98'}; opacity: 0.5">
-                                        {item.is_subscription ? 'subscriptions' : 'event_repeat'}
-                                    </span>
-                                </div>
-                                <div class="min-w-0">
-                                    <p class="text-[12px] font-medium truncate" style="color: var(--text-muted)">{item.merchant}</p>
-                                    <div class="flex items-center gap-1.5 flex-wrap">
-                                        <span class="text-[9px]" style="color: var(--text-muted)">{item.category}</span>
-                                        <span class="text-[9px]" style="color: var(--text-muted)">· {item.months_paid} mo paid</span>
-                                        {#if item.last_date}
-                                            <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateShort(item.last_date)}</span>
-                                        {/if}
-                                        {#if item.price_change}
-                                            <span class="analytics-recurring-price-change" class:price-up={item.price_change.change > 0} class:price-down={item.price_change.change < 0}
-                                                title="{item.price_change.change > 0 ? 'Price increased' : 'Price decreased'}: {formatCurrency(item.price_change.previous)} → {formatCurrency(item.price_change.current)}">
-                                                <span class="material-symbols-outlined text-[9px]">{item.price_change.change > 0 ? 'trending_up' : 'trending_down'}</span>
-                                                {item.price_change.change > 0 ? '+' : ''}{formatCurrency(item.price_change.change)}
-                                            </span>
-                                        {/if}
+                    {#if inactiveOpen}
+                        <div class="analytics-recurring-inactive-body">
+                            {#each inactiveRecurring as item, i}
+                                <div class="analytics-recurring-row analytics-recurring-row-inactive" style="border-bottom: {i < inactiveRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="flex items-center gap-3 flex-1 min-w-0">
+                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                            style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 6%, transparent)">
+                                            {#if item.logo_url}
+                                                <img src={item.logo_url} alt="" class="w-5 h-5 rounded" style="object-fit: contain; opacity: 0.5" />
+                                            {:else}
+                                                <span class="material-symbols-outlined text-[13px]"
+                                                    style="color: {CATEGORY_COLORS[item.category] || '#627d98'}; opacity: 0.5">
+                                                    {item.is_subscription ? 'subscriptions' : 'event_repeat'}
+                                                </span>
+                                            {/if}
+                                        </div>
+                                        <div class="min-w-0">
+                                            <p class="text-[12px] font-medium truncate" style="color: var(--text-muted)">{item.clean_name || item.merchant}</p>
+                                            <div class="flex items-center gap-1.5 flex-wrap">
+                                                <span class="text-[9px]" style="color: var(--text-muted)">{item.category}</span>
+                                                {#if item.charge_count}
+                                                    <span class="text-[9px]" style="color: var(--text-muted)">· {item.charge_count} charges</span>
+                                                {/if}
+                                                {#if item.last_charge}
+                                                    <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
+                                                {/if}
+                                                {#if item.price_change}
+                                                    <span class="analytics-recurring-price-change" class:price-up={item.price_change.change > 0} class:price-down={item.price_change.change < 0}
+                                                        title="{item.price_change.change > 0 ? 'Price increased' : 'Price decreased'}: {formatCurrency(item.price_change.previous)} → {formatCurrency(item.price_change.current)}">
+                                                        <span class="material-symbols-outlined text-[9px]">{item.price_change.change > 0 ? 'trending_up' : 'trending_down'}</span>
+                                                        {item.price_change.change > 0 ? '+' : ''}{formatCurrency(item.price_change.change)}
+                                                    </span>
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="w-16 flex justify-center">
+                                        <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
+                                    </div>
+                                    <span class="text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
+                                    <div class="w-16 flex justify-center">
+                                        <span class="analytics-recurring-badge-inactive">Inactive</span>
+                                    </div>
+                                    <div class="w-16 flex justify-center">
+                                        <button class="analytics-recurring-action-btn analytics-recurring-cancel-btn"
+                                            title="Confirm cancelled"
+                                            on:click|stopPropagation={() => handleCancelSubscription(item)}>
+                                            <span class="text-[8px] font-bold whitespace-nowrap">Cancel</span>
+                                        </button>
+                                    </div>
+                                    <div class="w-8 flex justify-center">
+                                        <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
+                                            title="Not a subscription — dismiss"
+                                            on:click|stopPropagation={() => handleDismissSubscription(item)}>
+                                            <span class="material-symbols-outlined text-[13px]">close</span>
+                                        </button>
                                     </div>
                                 </div>
-                            </div>
-                            <div class="w-16 flex justify-center">
-                                <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
-                            </div>
-                            <span class="text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.avg_amount)}</span>
-                            <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                            <div class="w-16 flex justify-center">
-                                <span class="analytics-recurring-badge-inactive">Inactive</span>
-                            </div>
-                            <div class="w-8 flex justify-center">
-                                <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
-                                    title="Not a subscription — dismiss"
-                                    on:click|stopPropagation={() => handleDismissSubscription(item)}>
-                                    <span class="material-symbols-outlined text-[13px]">close</span>
-                                </button>
-                            </div>
+                            {/each}
                         </div>
-                    {/each}
-                    {#if inactiveRecurring.length > 5}
-                        <div class="px-5 py-2 text-center" style="border-top: 1px solid color-mix(in srgb, var(--card-border) 30%, transparent)">
-                            <span class="text-[10px]" style="color: var(--text-muted)">+ {inactiveRecurring.length - 5} more inactive</span>
+                    {/if}
+                {/if}
+
+                <!-- Cancelled subscriptions (collapsible) -->
+                {#if cancelledRecurring.length > 0}
+                    <div class="analytics-recurring-inactive-toggle"
+                         style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
+                        <button class="analytics-recurring-inactive-trigger"
+                            on:click|stopPropagation={() => { cancelledOpen = !cancelledOpen; }}>
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-[14px]" style="color: var(--negative)">
+                                    {cancelledOpen ? 'expand_less' : 'expand_more'}
+                                </span>
+                                <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">
+                                    Cancelled
+                                </span>
+                                <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: var(--surface-200); color: var(--negative)">
+                                    {cancelledRecurring.length}
+                                </span>
+                            </div>
+                        </button>
+                    </div>
+                    {#if cancelledOpen}
+                        <div class="analytics-recurring-inactive-body">
+                            {#each cancelledRecurring as item, i}
+                                <div class="analytics-recurring-row analytics-recurring-row-inactive" style="border-bottom: {i < cancelledRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="flex items-center gap-3 flex-1 min-w-0">
+                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                            style="background: color-mix(in srgb, var(--negative) 6%, transparent)">
+                                            <span class="material-symbols-outlined text-[13px]"
+                                                style="color: var(--negative); opacity: 0.5">
+                                                cancel
+                                            </span>
+                                        </div>
+                                        <div class="min-w-0">
+                                            <div class="flex items-center gap-1.5">
+                                                <p class="text-[12px] font-medium truncate" style="color: var(--text-muted); text-decoration: line-through;">{item.clean_name || item.merchant}</p>
+                                                <span class="analytics-recurring-badge-cancelled">Cancelled</span>
+                                            </div>
+                                            <div class="flex items-center gap-1.5 flex-wrap">
+                                                <span class="text-[9px]" style="color: var(--text-muted)">{item.category}</span>
+                                                {#if item.last_charge}
+                                                    <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
+                                                {/if}
+                                                {#if item.total_spent}
+                                                    <span class="text-[9px]" style="color: var(--text-muted)">· {formatCurrency(item.total_spent)} total spent</span>
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="w-16 flex justify-center">
+                                        <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
+                                    </div>
+                                    <span class="text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
+                                    <div class="w-16 flex justify-center">
+                                        <span class="analytics-recurring-badge-cancelled">Cancelled</span>
+                                    </div>
+                                    <div class="w-16"></div>
+                                    <div class="w-8"></div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                {/if}
+
+                <!-- Dismissed subscriptions (collapsible) -->
+                {#if dismissedRecurring.length > 0}
+                    <div class="analytics-recurring-inactive-toggle"
+                         style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
+                        <button class="analytics-recurring-inactive-trigger"
+                            on:click|stopPropagation={() => { dismissedOpen = !dismissedOpen; }}>
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">
+                                    {dismissedOpen ? 'expand_less' : 'expand_more'}
+                                </span>
+                                <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">
+                                    Dismissed
+                                </span>
+                                <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: var(--surface-200); color: var(--text-muted)">
+                                    {dismissedRecurring.length}
+                                </span>
+                            </div>
+                        </button>
+                    </div>
+                    {#if dismissedOpen}
+                        <div class="analytics-recurring-inactive-body">
+                            {#each dismissedRecurring as item, i}
+                                <div class="analytics-recurring-row analytics-recurring-row-inactive"
+                                    style="border-bottom: {i < dismissedRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="flex items-center gap-3 flex-1 min-w-0">
+                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                            style="background: var(--surface-100)">
+                                            <span class="material-symbols-outlined text-[13px]"
+                                                style="color: var(--text-muted); opacity: 0.4">
+                                                visibility_off
+                                            </span>
+                                        </div>
+                                        <div class="min-w-0">
+                                            <p class="text-[12px] font-medium truncate" style="color: var(--text-muted)">{item.merchant}</p>
+                                            {#if item.dismissed_at}
+                                                <span class="text-[9px]" style="color: var(--text-muted)">Dismissed {formatDateWithYear(item.dismissed_at)}</span>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                    <div class="flex-shrink-0">
+                                        <button class="analytics-recurring-restore-btn"
+                                            on:click|stopPropagation={() => handleRestoreSubscription(item)}>
+                                            <span class="material-symbols-outlined text-[12px]">undo</span>
+                                            Restore
+                                        </button>
+                                    </div>
+                                </div>
+                            {/each}
                         </div>
                     {/if}
                 {/if}
@@ -1557,6 +2007,9 @@
                             <span class="font-bold" style="color: var(--text-primary)">{formatCurrency(recurringData.total_annual)}/yr</span>
                             {#if inactiveRecurring.length > 0}
                                 · {inactiveRecurring.length} inactive — review for savings
+                            {/if}
+                            {#if cancelledRecurring.length > 0}
+                                · {cancelledRecurring.length} cancelled
                             {/if}
                             {#if activeRecurring.filter(i => i.price_change && i.price_change.change > 0).length > 0}
                                 {@const priceIncreases = activeRecurring.filter(i => i.price_change && i.price_change.change > 0)}

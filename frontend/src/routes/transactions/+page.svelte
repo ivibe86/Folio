@@ -95,6 +95,11 @@
     function handleWindowClick() {
         closeAllFilters();
         monthDropdownOpen = false;
+        // Close category re-tag dropdown if open (but don't cancel full edit)
+        if (catDropdownOpenForTx) {
+            catDropdownOpenForTx = null;
+            catDropdownSearch = '';
+        }
     }
 
     // New category creation
@@ -102,9 +107,57 @@
     let newCategoryName = '';
     let newCategoryError = '';
 
+    // ── Category re-tag dropdown state ──
+    let catDropdownOpenForTx = null;   // original_id of tx whose dropdown is open
+    let catDropdownSearch = '';         // search/filter within the dropdown
+
     // Recategorization feedback
     let recentlyUpdatedTxId = null;
     let updateFeedback = '';
+
+    // Subscription declaration prompt state
+    let subscriptionPromptTxId = null;
+    let subscriptionPromptMerchant = '';
+    let subscriptionPromptAmount = 0;
+    let subscriptionPromptFrequency = '';
+    let subscriptionDeclareLoading = false;
+
+    const frequencyOptions = [
+        { key: 'monthly', label: 'Monthly' },
+        { key: 'quarterly', label: 'Quarterly' },
+        { key: 'annual', label: 'Annual' },
+    ];
+
+    async function handleDeclareSubscription(frequency) {
+        if (!subscriptionPromptMerchant || subscriptionDeclareLoading) return;
+        subscriptionDeclareLoading = true;
+        try {
+            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            await api.declareSubscription(subscriptionPromptMerchant, subscriptionPromptAmount, frequency, profile);
+            updateFeedback = `✓ Tracking ${subscriptionPromptMerchant} as ${frequency} subscription`;
+            recentlyUpdatedTxId = subscriptionPromptTxId;
+            setTimeout(() => {
+                if (recentlyUpdatedTxId === subscriptionPromptTxId) {
+                    recentlyUpdatedTxId = null;
+                    updateFeedback = '';
+                }
+            }, 4000);
+        } catch (e) {
+            console.error('Failed to declare subscription:', e);
+            updateFeedback = 'Failed to declare subscription';
+            setTimeout(() => { updateFeedback = ''; }, 3000);
+        } finally {
+            subscriptionDeclareLoading = false;
+            dismissSubscriptionPrompt();
+        }
+    }
+
+    function dismissSubscriptionPrompt() {
+        subscriptionPromptTxId = null;
+        subscriptionPromptMerchant = '';
+        subscriptionPromptAmount = 0;
+        subscriptionPromptFrequency = '';
+    }
 
     onMount(async () => {
         try {
@@ -234,13 +287,20 @@
 
     async function updateCategory(txId, newCategory) {
         try {
-            await api.updateCategory(txId, newCategory);
+            const result = await api.updateCategory(txId, newCategory);
             const tx = transactions.find(t => t.original_id === txId);
             if (tx) {
                 tx.category = newCategory;
                 tx.confidence = 'manual';
                 tx.categorization_source = 'user';
                 transactions = transactions;
+            }
+
+            // Check if backend suggests subscription tracking
+            if (result && result.subscription_prompt) {
+                subscriptionPromptTxId = txId;
+                subscriptionPromptMerchant = result.merchant || tx?.description || '';
+                subscriptionPromptAmount = result.amount || Math.abs(parseFloat(tx?.amount || 0));
             }
 
             // Show feedback
@@ -299,6 +359,8 @@
 
     function startEditing(txId) {
         editingTxId = txId;
+        catDropdownOpenForTx = txId;
+        catDropdownSearch = '';
         creatingNewCategory = false;
         newCategoryName = '';
         newCategoryError = '';
@@ -306,10 +368,17 @@
 
     function cancelEditing() {
         editingTxId = null;
+        catDropdownOpenForTx = null;
+        catDropdownSearch = '';
         creatingNewCategory = false;
         newCategoryName = '';
         newCategoryError = '';
     }
+
+    // Filtered category list for the re-tag dropdown search
+    $: filteredEditCategories = catDropdownSearch
+        ? allCategories.filter(c => c.toLowerCase().includes(catDropdownSearch.toLowerCase()))
+        : allCategories;
 
     function clearFilters() {
         search = '';
@@ -592,7 +661,14 @@
         {/each}
     </div>
 {:else}
-    <div class="card overflow-hidden fade-in-up" style="padding: 0; animation-delay: 140ms">
+    <div class="card fade-in-up" style="padding: 0; animation-delay: 140ms; overflow: visible;">
+        {#if groupedTxns.length > 0}
+            <div class="tx-column-headers">
+                <span>Description</span>
+                <span class="tx-col-header-category">Category</span>
+                <span class="tx-col-header-amount">Amount</span>
+            </div>
+        {/if}
         {#if groupedTxns.length === 0}
             <div class="text-center py-16" style="color: var(--text-muted)">
                 <span class="material-symbols-outlined text-5xl mb-3" style="opacity: 0.4">search_off</span>
@@ -620,99 +696,188 @@
                     {@const amount = parseFloat(tx.amount)}
                     {@const sourceInfo = getSourceLabel(tx)}
                     {@const isRecentlyUpdated = recentlyUpdatedTxId === tx.original_id}
-                    <div class="flex items-center gap-4 px-5 py-2.5 group transition-colors tx-row"
+                    <div class="tx-row-grid group transition-colors tx-row"
                         class:tx-row-updated={isRecentlyUpdated}
                         style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
 
-                        <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
-                            style="background: color-mix(in srgb, {CATEGORY_COLORS[tx.category] || '#627d98'} 8%, transparent)">
-                            <span class="material-symbols-outlined text-[16px]"
-                                style="color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
-                                {CATEGORY_ICONS[tx.category] || 'label'}
-                            </span>
-                        </div>
-
-                        <div class="flex-1 min-w-0">
-                            <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
-                                {tx.description || '—'}
-                            </p>
-                            <div class="flex items-center gap-2 mt-0.5 flex-wrap">
-                                {#if editingTxId === tx.original_id}
-                                    <!-- Editing mode -->
-                                    <div class="tx-edit-controls">
-                                        {#if creatingNewCategory}
-                                            <!-- New category input -->
-                                            <div class="flex items-center gap-1.5">
-                                                <input
-                                                    bind:value={newCategoryName}
-                                                    placeholder="New category name..."
-                                                    class="tx-new-cat-input"
-                                                    on:keydown={(e) => {
-                                                        if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
-                                                        if (e.key === 'Escape') cancelEditing();
-                                                    }}
-                                                />
-                                                <button
-                                                    class="tx-edit-btn tx-edit-btn-confirm"
-                                                    on:click={() => createAndApplyCategory(tx.original_id)}
-                                                    disabled={!newCategoryName.trim()}>
-                                                    <span class="material-symbols-outlined text-[13px]">check</span>
-                                                </button>
-                                                <button
-                                                    class="tx-edit-btn tx-edit-btn-cancel"
-                                                    on:click={() => { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }}>
-                                                    <span class="material-symbols-outlined text-[13px]">close</span>
-                                                </button>
-                                            </div>
-                                            {#if newCategoryError}
-                                                <span class="text-[9px]" style="color: var(--negative)">{newCategoryError}</span>
-                                            {/if}
-                                        {:else}
-                                            <!-- Category dropdown + new button -->
-                                            <select
-                                                class="tx-cat-select"
-                                                on:change={(e) => updateCategory(tx.original_id, e.target.value)}
-                                                on:blur={() => { /* keep open for the + button */ }}>
-                                                {#each allCategories as cat}
-                                                    <option value={cat} selected={cat === tx.category}>{cat}</option>
-                                                {/each}
-                                            </select>
-                                            <button
-                                                class="tx-edit-btn tx-edit-btn-new"
-                                                title="Create new category"
-                                                on:click={() => { creatingNewCategory = true; }}>
-                                                <span class="material-symbols-outlined text-[13px]">add</span>
-                                            </button>
-                                            <button
-                                                class="tx-edit-btn tx-edit-btn-cancel"
-                                                on:click={cancelEditing}>
-                                                <span class="material-symbols-outlined text-[13px]">close</span>
-                                            </button>
-                                        {/if}
-                                    </div>
-                                {:else}
-                                    <!-- Display mode -->
-                                    <button on:click={() => startEditing(tx.original_id)}
-                                        class="text-[10px] font-medium transition-opacity hover:opacity-70"
-                                        style="color: {CATEGORY_COLORS[tx.category] || 'var(--text-muted)'}">
-                                        {tx.category || 'Uncategorized'}
-                                    </button>
-                                    {#if sourceInfo}
-                                        <span class="tx-source-badge tx-source-{sourceInfo.type}">{sourceInfo.label}</span>
-                                    {/if}
-                                {/if}
-                                <span class="text-[9px]" style="color: var(--text-muted)">·</span>
-                                <span class="text-[10px]" style="color: var(--text-muted)">{tx.account_name || ''}</span>
+                        <!-- Zone 1: Icon + Description + Account -->
+                        <div class="tx-zone-desc">
+                            <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
+                                style="background: color-mix(in srgb, {CATEGORY_COLORS[tx.category] || '#627d98'} 8%, transparent)">
+                                <span class="material-symbols-outlined text-[16px]"
+                                    style="color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
+                                    {CATEGORY_ICONS[tx.category] || 'label'}
+                                </span>
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
+                                    {tx.description || '—'}
+                                </p>
+                                <span class="text-[10px] mt-0.5 block" style="color: var(--text-muted)">{tx.account_name || ''}</span>
                             </div>
                         </div>
 
-                        <div class="text-right flex-shrink-0">
+                        <!-- Zone 2: Category pill + source badge -->
+                        <div class="tx-zone-category">
+                            <div class="relative tx-cat-pill-wrapper">
+                                <button
+                                    class="tx-cat-pill"
+                                    class:tx-cat-pill-editing={editingTxId === tx.original_id}
+                                    on:click|stopPropagation={() => {
+                                        if (editingTxId === tx.original_id) {
+                                            catDropdownOpenForTx = catDropdownOpenForTx === tx.original_id ? null : tx.original_id;
+                                        } else {
+                                            startEditing(tx.original_id);
+                                        }
+                                    }}
+                                    style="--pill-color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
+                                    <span class="material-symbols-outlined text-[13px]" style="color: var(--pill-color)">
+                                        {CATEGORY_ICONS[tx.category] || 'label'}
+                                    </span>
+                                    <span class="tx-cat-pill-label">{tx.category || 'Uncategorized'}</span>
+                                    <span class="material-symbols-outlined text-[12px] tx-cat-pill-chevron"
+                                        class:txn-chevron-open={catDropdownOpenForTx === tx.original_id}
+                                        style="color: var(--text-muted); opacity: 0.5;">
+                                        expand_more
+                                    </span>
+                                </button>
+
+                                {#if catDropdownOpenForTx === tx.original_id}
+                                    <div class="txn-filter-dropdown tx-cat-dropdown" on:click|stopPropagation>
+                                        <div class="tx-cat-dropdown-search-wrap">
+                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                            <input
+                                                bind:value={catDropdownSearch}
+                                                placeholder="Search categories..."
+                                                class="tx-cat-dropdown-search"
+                                                on:keydown={(e) => {
+                                                    if (e.key === 'Escape') cancelEditing();
+                                                }}
+                                            />
+                                        </div>
+                                        <div class="tx-cat-dropdown-list">
+                                            {#each filteredEditCategories as cat}
+                                                <button
+                                                    class="txn-filter-option"
+                                                    class:active={cat === tx.category}
+                                                    on:click={() => {
+                                                        if (cat !== tx.category) {
+                                                            updateCategory(tx.original_id, cat);
+                                                        } else {
+                                                            cancelEditing();
+                                                        }
+                                                    }}>
+                                                    <span class="txn-filter-option-label">
+                                                        <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                            {CATEGORY_ICONS[cat] || 'label'}
+                                                        </span>
+                                                        <span>{cat}</span>
+                                                    </span>
+                                                    {#if cat === tx.category}
+                                                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
+                                                    {/if}
+                                                </button>
+                                            {/each}
+                                            {#if filteredEditCategories.length === 0 && catDropdownSearch}
+                                                <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                    No matching categories
+                                                </div>
+                                            {/if}
+                                        </div>
+                                        <div class="tx-cat-dropdown-footer">
+                                            {#if creatingNewCategory}
+                                                <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                    <input
+                                                        bind:value={newCategoryName}
+                                                        placeholder="New category name..."
+                                                        class="tx-cat-dropdown-new-input"
+                                                        on:keydown={(e) => {
+                                                            if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
+                                                            if (e.key === 'Escape') { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }
+                                                        }}
+                                                    />
+                                                    <button
+                                                        class="tx-edit-btn tx-edit-btn-confirm"
+                                                        on:click={() => createAndApplyCategory(tx.original_id)}
+                                                        disabled={!newCategoryName.trim()}>
+                                                        <span class="material-symbols-outlined text-[13px]">check</span>
+                                                    </button>
+                                                </div>
+                                                {#if newCategoryError}
+                                                    <span class="text-[9px] px-3" style="color: var(--negative)">{newCategoryError}</span>
+                                                {/if}
+                                            {:else}
+                                                <button
+                                                    class="txn-filter-option tx-cat-create-btn"
+                                                    on:click={() => { creatingNewCategory = true; }}>
+                                                    <span class="txn-filter-option-label">
+                                                        <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                        <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                    </span>
+                                                </button>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                {/if}
+                            </div>
+                            {#if sourceInfo}
+                                <span class="tx-source-badge tx-source-{sourceInfo.type}">{sourceInfo.label}</span>
+                            {/if}
+                        </div>
+
+                        <!-- Zone 3: Amount (far right, terminal anchor) -->
+                        <!-- Zone 3: Amount (far right, terminal anchor) -->
+                        <div class="tx-zone-amount">
                             <p class="text-[13px] font-bold font-mono"
                                 style="color: {amount >= 0 ? 'var(--positive)' : 'var(--text-primary)'}">
                                 {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
                             </p>
                         </div>
                     </div>
+
+                    <!-- Subscription Declaration Prompt -->
+                    {#if subscriptionPromptTxId === tx.original_id}
+                        <div class="tx-subscription-prompt fade-in" on:click|stopPropagation
+                            style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
+                            <div class="tx-subscription-prompt-inner">
+                                <div class="flex items-center gap-2.5 flex-1 min-w-0">
+                                    <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                        style="background: color-mix(in srgb, var(--accent) 10%, transparent)">
+                                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">event_repeat</span>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <p class="text-[12px] font-semibold" style="color: var(--text-primary)">
+                                            Track <span style="color: var(--accent)">{subscriptionPromptMerchant}</span> as recurring?
+                                        </p>
+                                        <p class="text-[10px]" style="color: var(--text-muted)">
+                                            {formatCurrency(subscriptionPromptAmount)} · Select frequency
+                                        </p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-1.5 flex-shrink-0">
+                                    {#each frequencyOptions as freq}
+                                        <button
+                                            class="tx-subscription-freq-pill"
+                                            class:tx-subscription-freq-active={subscriptionPromptFrequency === freq.key}
+                                            disabled={subscriptionDeclareLoading}
+                                            on:click|stopPropagation={() => handleDeclareSubscription(freq.key)}>
+                                            {freq.label}
+                                        </button>
+                                    {/each}
+                                    <button
+                                        class="tx-subscription-dismiss-btn"
+                                        on:click|stopPropagation={dismissSubscriptionPrompt}>
+                                        <span class="material-symbols-outlined text-[14px]">close</span>
+                                    </button>
+                                </div>
+                            </div>
+                            {#if subscriptionDeclareLoading}
+                                <div class="tx-subscription-loading">
+                                    <div class="tx-subscription-loading-bar"></div>
+                                </div>
+                            {/if}
+                        </div>
+                    {/if}
                 {/each}
             {/each}
         {/if}

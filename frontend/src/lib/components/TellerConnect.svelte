@@ -6,6 +6,7 @@
 <script>
     import { createEventDispatcher, onMount } from 'svelte';
     import { api } from '$lib/api.js';
+    import { syncing } from '$lib/stores.js';
 
     export let applicationId = '';
     export let environment = 'sandbox';
@@ -13,8 +14,10 @@
     const dispatch = createEventDispatcher();
 
     let sdkReady = false;
-    let enrolling = false;
     let error = '';
+
+    // Derive spinning state from global sync store so it persists across navigation
+    $: enrolling = $syncing.active && $syncing.context === 'enrollment';
 
     onMount(() => {
         if (typeof window !== 'undefined' && !window.TellerConnect) {
@@ -40,34 +43,38 @@
         }
 
         error = '';
-        enrolling = false;
 
         const handler = window.TellerConnect.setup({
             applicationId,
             environment,
             products: ['transactions', 'balance', 'identity'],
             onSuccess: async (enrollment) => {
-                enrolling = true;
+                // Immediately set global sync state — survives navigation + refresh
+                syncing.start('enrollment');
                 error = '';
-                try {
-                    const result = await api.enrollAccount(
-                        enrollment.accessToken,
-                        enrollment.enrollment?.institution?.name,
-                        enrollment.enrollment?.id
-                    );
+
+                // Fire-and-forget: kick off the enrollment but do NOT block on it.
+                // The +page.svelte polling loop will detect completion.
+                api.enrollAccount(
+                    enrollment.accessToken,
+                    enrollment.enrollment?.institution?.name,
+                    enrollment.enrollment?.id
+                ).then((result) => {
+                    // If we're still on the same page when it finishes, dispatch
+                    // so handleTellerEnrolled can do an immediate refresh.
                     dispatch('enrolled', result);
-                } catch (e) {
-                    error = e.message || 'Enrollment failed';
-                    dispatch('error', { message: error });
-                } finally {
-                    enrolling = false;
-                }
+                }).catch((e) => {
+                    // Proxy timeout or network error — harmless.
+                    // The backend continues syncing. Polling will pick up completion.
+                    console.warn('Enrollment request ended (likely proxy timeout, backend continues):', e.message);
+                });
             },
             onExit: () => {
                 dispatch('exit');
             },
             onFailure: (failure) => {
                 error = failure?.message || 'Teller Connect encountered an error';
+                syncing.stop();
                 dispatch('error', { message: error });
             },
         });

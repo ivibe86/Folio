@@ -45,10 +45,16 @@ export async function handle({ event, resolve }) {
             body = await event.request.text();
         }
 
+        // Enroll/sync can take 6+ minutes (LLM categorization batches).
+        // Use a generous timeout for long-running endpoints, default for others.
+        const isLongRunning = targetUrl.includes('/api/enroll') || targetUrl.includes('/api/sync');
+        const timeoutMs = isLongRunning ? 10 * 60 * 1000 : 2 * 60 * 1000; // 10min / 2min
+
         const backendResponse = await fetch(targetUrl, {
             method,
             headers: forwardHeaders,
             body,
+            signal: AbortSignal.timeout(timeoutMs),
         });
 
         // Build response — forward backend headers

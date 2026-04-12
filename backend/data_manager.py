@@ -519,6 +519,425 @@ def get_dashboard_bundle_data(
     with get_db() as c:
         return _query(c)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RECURRING / SUBSCRIPTION QUERY OPERATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
+    """
+    Read stored recurring subscription data from the merchants table.
+    Returns the same shape as RecurringDetector.detect() so the frontend
+    migration is minimal. Includes events and dismissed items in the bundle.
+    """
+    import json as _json
+
+    def _query(c):
+        profile_clause = ""
+        profile_params = []
+        if profile and profile != "household":
+            profile_clause = " AND profile_id = ?"
+            profile_params = [profile]
+
+        # Active + inactive subscriptions
+        rows = c.execute(
+            f"""SELECT merchant_key, clean_name, logo_url, domain, category,
+                       industry, subscription_frequency, subscription_amount,
+                       subscription_status, last_charge_date, next_expected_date,
+                       charge_count, total_spent, cancelled_by_user, cancelled_at,
+                       source
+                FROM merchants
+                WHERE is_subscription = 1{profile_clause}
+                ORDER BY
+                    CASE subscription_status
+                        WHEN 'active' THEN 0
+                        WHEN 'inactive' THEN 1
+                        ELSE 2
+                    END,
+                    subscription_amount DESC""",
+            profile_params,
+        ).fetchall()
+
+        # Dismissed items
+        dismissed_rows = c.execute(
+            f"""SELECT merchant_name, dismissed_at
+                FROM dismissed_recurring
+                WHERE 1=1{profile_clause.replace('profile_id', 'profile_id')}""",
+            profile_params,
+        ).fetchall()
+
+        # Events (recent, last 50)
+        event_rows = c.execute(
+            f"""SELECT id, event_type, merchant_name, detail, created_at, is_read
+                FROM subscription_events
+                WHERE 1=1{profile_clause.replace('profile_id', 'profile_id')}
+                ORDER BY created_at DESC
+                LIMIT 50""",
+            profile_params,
+        ).fetchall()
+
+        # User-declared subscriptions (to merge in)
+        user_decl_rows = c.execute(
+            f"""SELECT merchant_name, amount, frequency
+                FROM user_declared_subscriptions
+                WHERE is_active = 1{profile_clause.replace('profile_id', 'profile_id')}""",
+            profile_params,
+        ).fetchall()
+
+        dismissed_set = {row[0] for row in dismissed_rows}
+
+        items = []
+        active_count = 0
+        inactive_count = 0
+        cancelled_count = 0
+        total_monthly = 0.0
+        total_annual = 0.0
+
+        seen_merchants = set()
+
+        # Add user-declared first (Layer 0 — highest priority)
+        for row in user_decl_rows:
+            merchant_name = row[0]
+            if merchant_name in dismissed_set:
+                continue
+            merchant_key_upper = merchant_name.upper().strip()
+            seen_merchants.add(merchant_key_upper)
+
+            amt = row[1]
+            freq = row[2]
+            annual = _annualize_amount(amt, freq)
+
+            items.append({
+                "merchant": merchant_name,
+                "clean_name": merchant_name,
+                "logo_url": None,
+                "category": "Subscriptions",
+                "frequency": freq,
+                "amount": round(amt, 2),
+                "annual_cost": round(annual, 2),
+                "status": "active",
+                "confidence": "user",
+                "last_charge": None,
+                "next_expected": None,
+                "charge_count": 0,
+                "total_spent": 0,
+                "price_change": None,
+                "matched_by": "user",
+                "cancelled": False,
+            })
+            active_count += 1
+            total_annual += annual
+            total_monthly += annual / 12
+
+        # Add detection-based subscriptions
+        for row in rows:
+            merchant_key = row[0]
+            if merchant_key in dismissed_set:
+                continue
+            if merchant_key in seen_merchants:
+                # User declaration wins — update with transaction data
+                for item in items:
+                    if item["merchant"].upper().strip() == merchant_key:
+                        item["last_charge"] = row[9]
+                        item["next_expected"] = row[10]
+                        item["charge_count"] = row[11] or 0
+                        item["total_spent"] = round(row[12] or 0, 2)
+                        item["clean_name"] = row[1] or item["clean_name"]
+                        item["logo_url"] = row[2]
+                        break
+                continue
+
+            seen_merchants.add(merchant_key)
+            status = row[8] or "inactive"
+            cancelled = bool(row[13])
+            amt = row[7] or 0
+            freq = row[6] or "monthly"
+            annual = _annualize_amount(amt, freq)
+
+            if cancelled:
+                display_status = "cancelled"
+            else:
+                display_status = status
+
+            items.append({
+                "merchant": row[1] or merchant_key,
+                "clean_name": row[1] or merchant_key,
+                "logo_url": row[2],
+                "category": row[4] or "Subscriptions",
+                "frequency": freq,
+                "amount": round(amt, 2),
+                "annual_cost": round(annual, 2),
+                "status": display_status,
+                "confidence": "high" if row[15] == "seed" else "medium",
+                "last_charge": row[9],
+                "next_expected": row[10],
+                "charge_count": row[11] or 0,
+                "total_spent": round(row[12] or 0, 2),
+                "price_change": None,
+                "matched_by": row[15] or "algorithm",
+                "cancelled": cancelled,
+            })
+
+            if status == "active" and not cancelled:
+                active_count += 1
+                total_annual += annual
+                total_monthly += annual / 12
+            elif cancelled:
+                cancelled_count += 1
+            else:
+                inactive_count += 1
+
+        # Build events list
+        events = []
+        unread_count = 0
+        for erow in event_rows:
+            try:
+                detail = _json.loads(erow[3]) if erow[3] else {}
+            except Exception:
+                detail = {}
+            events.append({
+                "id": erow[0],
+                "event_type": erow[1],
+                "merchant_name": erow[2],
+                "detail": detail,
+                "created_at": erow[4],
+                "is_read": bool(erow[5]),
+            })
+            if not erow[5]:
+                unread_count += 1
+
+        # Build dismissed list
+        dismissed = [
+            {"merchant": row[0], "dismissed_at": row[1]}
+            for row in dismissed_rows
+        ]
+
+        return {
+            "items": items,
+            "active_count": active_count,
+            "inactive_count": inactive_count,
+            "cancelled_count": cancelled_count,
+            "dismissed_count": len(dismissed),
+            "total_monthly": round(total_monthly, 2),
+            "total_annual": round(total_annual, 2),
+            "events": events,
+            "unread_event_count": unread_count,
+            "dismissed": dismissed,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def _annualize_amount(amount: float, frequency: str) -> float:
+    """Convert per-period amount to annual cost."""
+    multipliers = {"monthly": 12, "quarterly": 4, "semi_annual": 2, "annual": 1}
+    return amount * multipliers.get(frequency, 12)
+
+
+def get_dismissed_subscriptions(profile: str | None = None, conn=None) -> list[dict]:
+    """Return dismissed subscription items for a profile."""
+    def _query(c):
+        if profile and profile != "household":
+            rows = c.execute(
+                "SELECT merchant_name, dismissed_at FROM dismissed_recurring WHERE profile_id = ?",
+                (profile,),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT merchant_name, dismissed_at FROM dismissed_recurring"
+            ).fetchall()
+        return [{"merchant": row[0], "dismissed_at": row[1]} for row in rows]
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_subscription_events(profile: str | None = None, conn=None) -> dict:
+    """Return subscription events and unread count."""
+    import json as _json
+
+    def _query(c):
+        params = []
+        clause = ""
+        if profile and profile != "household":
+            clause = " WHERE profile_id = ?"
+            params = [profile]
+
+        rows = c.execute(
+            f"""SELECT id, event_type, merchant_name, detail, created_at, is_read
+                FROM subscription_events{clause}
+                ORDER BY created_at DESC
+                LIMIT 100""",
+            params,
+        ).fetchall()
+
+        events = []
+        unread_count = 0
+        for row in rows:
+            try:
+                detail = _json.loads(row[3]) if row[3] else {}
+            except Exception:
+                detail = {}
+            events.append({
+                "id": row[0],
+                "event_type": row[1],
+                "merchant_name": row[2],
+                "detail": detail,
+                "created_at": row[4],
+                "is_read": bool(row[5]),
+            })
+            if not row[5]:
+                unread_count += 1
+
+        return {"events": events, "unread_count": unread_count}
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def declare_subscription(merchant: str, amount: float, frequency: str, profile: str | None = None) -> dict:
+    """
+    Store a user-declared subscription.
+    Writes to user_declared_subscriptions and merchants tables.
+    """
+    profile_id = profile or "household"
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO user_declared_subscriptions
+               (merchant_name, amount, frequency, profile_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(merchant_name, profile_id) DO UPDATE SET
+                   amount = excluded.amount,
+                   frequency = excluded.frequency,
+                   is_active = 1,
+                   updated_at = datetime('now')""",
+            (merchant, amount, frequency, profile_id),
+        )
+
+        # Also upsert merchants table
+        merchant_key = merchant.upper().strip()
+        from recurring import _annualize
+        annual = _annualize(amount, frequency)
+        conn.execute(
+            """INSERT INTO merchants
+               (merchant_key, clean_name, category, source, is_subscription,
+                subscription_frequency, subscription_amount, subscription_status,
+                profile_id)
+               VALUES (?, ?, 'Subscriptions', 'user', 1, ?, ?, 'active', ?)
+               ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
+                   clean_name = excluded.clean_name,
+                   is_subscription = 1,
+                   subscription_frequency = excluded.subscription_frequency,
+                   subscription_amount = excluded.subscription_amount,
+                   subscription_status = 'active',
+                   source = 'user',
+                   cancelled_by_user = 0,
+                   cancelled_at = NULL,
+                   updated_at = datetime('now')""",
+            (merchant_key, merchant, frequency, amount, profile_id),
+        )
+
+        # Fetch the record to return
+        row = conn.execute(
+            """SELECT merchant_name, amount, frequency, profile_id, created_at
+               FROM user_declared_subscriptions
+               WHERE merchant_name = ? AND profile_id = ?""",
+            (merchant, profile_id),
+        ).fetchone()
+
+    return {
+        "merchant": row[0],
+        "amount": row[1],
+        "frequency": row[2],
+        "profile_id": row[3],
+        "created_at": row[4],
+        "annual_cost": round(_annualize(row[1], row[2]), 2),
+    }
+
+
+def cancel_subscription(merchant: str, profile: str | None = None) -> dict:
+    """Mark a subscription as cancelled by the user."""
+    from datetime import datetime as _dt
+    profile_id = profile or "household"
+    now = _dt.now().isoformat()
+
+    with get_db() as conn:
+        merchant_key = merchant.upper().strip()
+        conn.execute(
+            """UPDATE merchants
+               SET cancelled_at = ?, cancelled_by_user = 1,
+                   subscription_status = 'cancelled',
+                   updated_at = datetime('now')
+               WHERE merchant_key = ? AND profile_id = ?""",
+            (now, merchant_key, profile_id),
+        )
+
+    return {"status": "ok", "cancelled_at": now}
+
+
+def restore_subscription(merchant: str, profile: str | None = None) -> bool:
+    """Remove a merchant from the dismissed_recurring table."""
+    profile_id = profile or "household"
+
+    with get_db() as conn:
+        result = conn.execute(
+            """DELETE FROM dismissed_recurring
+               WHERE merchant_name = ? AND profile_id = ?""",
+            (merchant, profile_id),
+        )
+        return result.rowcount > 0
+
+
+def mark_events_read(event_ids: list[int]) -> int:
+    """Mark subscription events as read. Returns count of updated rows."""
+    if not event_ids:
+        return 0
+
+    with get_db() as conn:
+        placeholders = ",".join("?" * len(event_ids))
+        result = conn.execute(
+            f"UPDATE subscription_events SET is_read = 1 WHERE id IN ({placeholders})",
+            event_ids,
+        )
+        return result.rowcount
+
+
+def trigger_full_redetection(profile: str | None = None) -> dict:
+    """
+    Run full recurring detection across all transactions and persist results.
+    Used for manual refresh via POST /api/subscriptions/redetect.
+    """
+    from recurring import RecurringDetector, write_detection_results_to_db
+
+    data = get_data()
+    txns = data["transactions"]
+
+    if profile and profile != "household":
+        txns = [t for t in txns if t.get("profile") == profile]
+
+    detector = RecurringDetector(get_db_conn=get_db)
+    result = detector.detect(
+        transactions=txns,
+        profile=profile,
+        generate_events=True,
+    )
+
+    write_detection_results_to_db(
+        get_db_conn=get_db,
+        items=result["items"],
+        events=result.get("events", []),
+        profile=profile,
+    )
+
+    return result
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # READ OPERATIONS — FULL DATASET (legacy, use sparingly)
@@ -726,6 +1145,56 @@ def fetch_fresh_data(incremental: bool = True) -> dict:
             # Snapshot net worth
             _snapshot_net_worth(conn, now)
 
+        # Incremental recurring detection on newly synced transactions
+        if all_new_transactions:
+            try:
+                from recurring import RecurringDetector, write_detection_results_to_db
+                from database import _extract_merchant_pattern as _emp
+
+                # Collect merchant keys from new transactions
+                new_merchant_keys = set()
+                for tx in all_new_transactions:
+                    merchant = (tx.get("merchant_name") or "").upper().strip()
+                    if merchant:
+                        new_merchant_keys.add(merchant)
+                    desc = tx.get("description", "")
+                    pattern = _emp(desc)
+                    if pattern:
+                        new_merchant_keys.add(pattern)
+
+                if new_merchant_keys:
+                    logger.info(
+                        "Running incremental recurring detection for %d merchant keys...",
+                        len(new_merchant_keys),
+                    )
+
+                    # Need full transaction set for affected groups
+                    all_data = get_data()
+                    all_txns = all_data["transactions"]
+
+                    # Detect per profile
+                    profiles_seen = {tx.get("profile", "primary") for tx in all_new_transactions}
+                    for prof in profiles_seen:
+                        prof_txns = [t for t in all_txns if t.get("profile") == prof]
+                        detector = RecurringDetector(get_db_conn=get_db)
+                        result = detector.detect(
+                            transactions=prof_txns,
+                            profile=prof,
+                            merchant_keys=new_merchant_keys,
+                            generate_events=True,
+                        )
+                        write_detection_results_to_db(
+                            get_db_conn=get_db,
+                            items=result["items"],
+                            events=result.get("events", []),
+                            profile=prof,
+                        )
+
+                    logger.info("Incremental recurring detection complete.")
+
+            except Exception as e:
+                logger.warning("Incremental recurring detection failed (non-fatal): %s", e)
+
         total_count_row = None
         with get_db() as conn:
             total_count_row = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()
@@ -898,15 +1367,20 @@ def _snapshot_net_worth(conn, timestamp: str):
 # WRITE OPERATIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def update_transaction_category(tx_id: str, new_category: str) -> bool:
+def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
     """
     Update a single transaction's category (user override).
     Also automatically creates a user rule for future matching.
+
+    Returns:
+        - False if transaction not found
+        - dict with {"updated": True} and optionally subscription_prompt data
+          if new_category is "Subscriptions"
     """
     with get_db() as conn:
         # Get the transaction
         row = conn.execute(
-            "SELECT description, category FROM transactions WHERE id = ?",
+            "SELECT description, category, amount, merchant_name FROM transactions WHERE id = ?",
             (tx_id,),
         ).fetchone()
 
@@ -915,6 +1389,8 @@ def update_transaction_category(tx_id: str, new_category: str) -> bool:
 
         description = row[0]
         old_category = row[1]
+        tx_amount = row[2]
+        tx_merchant_name = row[3]
 
         # Update the transaction
         conn.execute(
@@ -970,7 +1446,17 @@ def update_transaction_category(tx_id: str, new_category: str) -> bool:
                 (new_category, f"%{escaped_pattern}%", tx_id),
             )
 
-        return True
+        result = {"updated": True}
+
+        # Enhancement 7: Signal subscription prompt if category is "Subscriptions"
+        if new_category.strip().lower() == "subscriptions":
+            merchant_pattern = _extract_merchant_pattern(description)
+            result["subscription_prompt"] = True
+            result["merchant"] = tx_merchant_name if tx_merchant_name else (merchant_pattern or description[:50])
+            result["amount"] = round(abs(float(tx_amount)), 2) if tx_amount else 0.0
+            result["transaction_id"] = tx_id
+        
+        return result
 
 
 def add_category(name: str) -> bool:

@@ -254,10 +254,21 @@ def update_category(tx_id: str, body: CategoryUpdate):
             status_code=400,
             detail="Category cannot be empty.",
         )
-    success = update_transaction_category(tx_id, body.category)
-    if not success:
+    result = update_transaction_category(tx_id, body.category)
+    if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    return {"status": "updated", "tx_id": tx_id, "category": body.category}
+
+    response = {"status": "updated", "tx_id": tx_id, "category": body.category}
+
+    # Enhancement 7: Pass through subscription prompt signal
+    if isinstance(result, dict):
+        if result.get("subscription_prompt"):
+            response["subscription_prompt"] = True
+            response["merchant"] = result.get("merchant", "")
+            response["amount"] = result.get("amount", 0.0)
+            response["transaction_id"] = result.get("transaction_id", tx_id)
+
+    return response
 
 
 @app.get("/api/categories")
@@ -341,23 +352,35 @@ def merchant_insights(month: str | None = Query(None), profile: str | None = Dep
 
 
 @app.get("/api/analytics/recurring")
-def get_recurring_transactions(profile: str | None = Depends(validate_profile)):
+def get_recurring_transactions(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
     """
-    Detect recurring / subscription transactions using a three-layer approach.
+    Return stored recurring / subscription data from the merchants table.
+    Detection runs incrementally after each sync (see data_manager.fetch_fresh_data).
+    Use POST /api/subscriptions/redetect for a manual full refresh.
 
-    NOTE: This endpoint uses get_data() (full dataset load) because the
-    recurring detection algorithm requires cross-transaction analysis
-    that cannot be efficiently expressed as SQL queries.
+    Response includes items, events, and dismissed arrays for the frontend bundle.
     """
-    from recurring import RecurringDetector
+    from data_manager import get_recurring_from_db
 
     try:
-        data = get_data()
-        txns = data["transactions"]
-        txns = _filter_by_profile(txns, profile)
-
-        detector = RecurringDetector(get_db_conn=get_db)
-        return detector.detect(transactions=txns, profile=profile)
+        result = get_recurring_from_db(profile=profile, conn=db)
+        # If no items stored yet (first load before any sync), fall back to live detection
+        if not result["items"] and result["active_count"] == 0:
+            from recurring import RecurringDetector, write_detection_results_to_db
+            data = get_data()
+            txns = data["transactions"]
+            txns = _filter_by_profile(txns, profile)
+            if txns:
+                detector = RecurringDetector(get_db_conn=get_db)
+                detection = detector.detect(transactions=txns, profile=profile, generate_events=True)
+                write_detection_results_to_db(
+                    get_db_conn=get_db,
+                    items=detection["items"],
+                    events=detection.get("events", []),
+                    profile=profile,
+                )
+                result = get_recurring_from_db(profile=profile, conn=db)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -415,6 +438,7 @@ def confirm_subscription(body: SubscriptionConfirm, profile: str | None = Query(
 def dismiss_subscription(body: SubscriptionDismiss, profile: str | None = Query(None), db=Depends(get_db_session)):
     """
     User dismisses a false positive — marks the pattern as inactive for this user.
+    Also records in dismissed_recurring table for Enhancement 2.
     If it's a system seed, we create a user-level suppression entry.
     """
     pattern = (body.pattern or body.merchant).upper().strip()
@@ -442,7 +466,144 @@ def dismiss_subscription(body: SubscriptionDismiss, profile: str | None = Query(
             (body.merchant, pattern, created_by),
         )
 
+    # Also record in dismissed_recurring table (Enhancement 2)
+    db.execute(
+        """INSERT OR IGNORE INTO dismissed_recurring
+           (merchant_name, profile_id)
+           VALUES (?, ?)""",
+        (body.merchant, created_by),
+    )
+
     return {"status": "dismissed", "merchant": body.merchant, "pattern": pattern}
+
+
+# ── Subscription management (Enhancements 1-4, 6) ────────────────────────
+
+class SubscriptionDeclare(BaseModel):
+    merchant: str
+    amount: float
+    frequency: str = "monthly"
+    profile: str | None = None
+
+
+@app.post("/api/subscriptions/declare")
+def declare_subscription_endpoint(body: SubscriptionDeclare, db=Depends(get_db_session)):
+    """
+    User explicitly declares a transaction as a recurring subscription.
+    Layer 0 — always appears in results with confidence = 'user'.
+    """
+    from data_manager import declare_subscription
+
+    if not body.merchant or not body.merchant.strip():
+        raise HTTPException(status_code=400, detail="Merchant name required.")
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive.")
+    if body.frequency not in ("monthly", "quarterly", "semi_annual", "annual"):
+        raise HTTPException(status_code=400, detail="Frequency must be monthly, quarterly, semi_annual, or annual.")
+
+    profile = body.profile or "household"
+    result = declare_subscription(
+        merchant=body.merchant.strip(),
+        amount=body.amount,
+        frequency=body.frequency,
+        profile=profile,
+    )
+    return {"status": "ok", "message": "Subscription declared", "subscription": result}
+
+
+@app.post("/api/subscriptions/{merchant}/cancel")
+def cancel_subscription_endpoint(merchant: str, profile: str | None = Query(None), db=Depends(get_db_session)):
+    """
+    User confirms an inactive subscription has been cancelled.
+    Zombie detection will flag new charges from this merchant.
+    """
+    from data_manager import cancel_subscription
+
+    if not merchant or not merchant.strip():
+        raise HTTPException(status_code=400, detail="Merchant name required.")
+
+    result = cancel_subscription(merchant=merchant.strip(), profile=profile)
+    return result
+
+
+@app.post("/api/subscriptions/{merchant}/restore")
+def restore_subscription_endpoint(merchant: str, profile: str | None = Query(None), db=Depends(get_db_session)):
+    """
+    Restore a previously dismissed subscription.
+    Removes the merchant from the dismissed_recurring table.
+    """
+    from data_manager import restore_subscription
+    import urllib.parse
+
+    decoded_merchant = urllib.parse.unquote(merchant).strip()
+    if not decoded_merchant:
+        raise HTTPException(status_code=400, detail="Merchant name required.")
+
+    profile_id = profile or "household"
+
+    # Also re-activate seed if it was suppressed
+    existing = db.execute(
+        """SELECT id FROM subscription_seeds
+           WHERE pattern = ? AND source = 'user' AND created_by = ? AND is_active = 0""",
+        (decoded_merchant.upper(), profile_id),
+    ).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE subscription_seeds SET is_active = 1 WHERE id = ?",
+            (existing[0],),
+        )
+
+    success = restore_subscription(merchant=decoded_merchant, profile=profile)
+    if not success:
+        raise HTTPException(status_code=404, detail="Merchant not found in dismissed list.")
+    return {"status": "ok", "message": "Subscription restored"}
+
+
+@app.get("/api/subscriptions/dismissed")
+def list_dismissed_subscriptions(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    """Return all dismissed subscription items for a profile."""
+    from data_manager import get_dismissed_subscriptions
+    items = get_dismissed_subscriptions(profile=profile, conn=db)
+    return {"items": items}
+
+
+@app.get("/api/subscriptions/events")
+def list_subscription_events(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    """Return subscription events (alerts) for a profile."""
+    from data_manager import get_subscription_events
+    return get_subscription_events(profile=profile, conn=db)
+
+
+class MarkEventsRead(BaseModel):
+    event_ids: list[int]
+
+
+@app.post("/api/subscriptions/events/mark-read")
+def mark_events_read_endpoint(body: MarkEventsRead):
+    """Mark subscription events as read."""
+    from data_manager import mark_events_read
+    if not body.event_ids:
+        raise HTTPException(status_code=400, detail="event_ids required.")
+    count = mark_events_read(body.event_ids)
+    return {"status": "ok", "updated": count}
+
+
+@app.post("/api/subscriptions/redetect")
+def redetect_subscriptions(profile: str | None = Depends(validate_profile)):
+    """
+    Trigger a full re-detection of recurring subscriptions.
+    Scans all transactions and updates the merchants table.
+    """
+    from data_manager import trigger_full_redetection
+    try:
+        result = trigger_full_redetection(profile=profile)
+        return {
+            "status": "ok",
+            "items_detected": len(result.get("items", [])),
+            "events_generated": len(result.get("events", [])),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/sync")

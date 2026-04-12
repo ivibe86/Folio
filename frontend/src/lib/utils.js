@@ -42,6 +42,21 @@ export function formatDateShort(dateStr) {
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+/**
+ * Format a date string as "Mon D YYYY" (e.g., "Apr 7 2027").
+ * Used for recurring/subscription dates where year context matters.
+ * Accepts both date-only ("2026-04-12") and full ISO ("2026-04-12T10:30:00").
+ */
+export function formatDateWithYear(dateStr) {
+    if (!dateStr) return '';
+    // If it's already a datetime string (contains 'T'), use as-is;
+    // otherwise append T00:00:00 to avoid timezone-shift issues with date-only strings
+    const normalized = dateStr.includes('T') ? dateStr : dateStr + 'T00:00:00';
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 export function formatDayHeader(dateStr) {
     if (!dateStr) return '';
     const d = new Date(dateStr + 'T00:00:00');

@@ -1415,3 +1415,329 @@ details > summary {
 :global(.dark) .analytics-recurring-price-change.price-down {
     background: rgba(52, 211, 153, 0.14);
 }
+
+/* ── Inactive Subscriptions Collapsible Dropdown ── */
+.analytics-recurring-inactive-toggle {
+    padding: 0;
+}
+
+.analytics-recurring-inactive-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.625rem 1.25rem;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    transition: background var(--duration-fast) ease;
+}
+
+.analytics-recurring-inactive-trigger:hover {
+    background: color-mix(in srgb, var(--warning) 4%, transparent);
+}
+
+.dark .analytics-recurring-inactive-trigger:hover {
+    background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+
+.analytics-recurring-inactive-body {
+    animation: inactiveDropdownIn 0.25s var(--ease-out-expo) both;
+    border-top: 1px solid color-mix(in srgb, var(--card-border) 40%, transparent);
+    max-height: 320px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+/* Webkit scrollbar for inactive subscriptions body */
+.analytics-recurring-inactive-body::-webkit-scrollbar {
+    width: 5px;
+}
+
+.analytics-recurring-inactive-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.analytics-recurring-inactive-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.10);
+    border-radius: 4px;
+}
+
+.analytics-recurring-inactive-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+
+:root:not(.dark) .analytics-recurring-inactive-body {
+    scrollbar-color: rgba(0, 0, 0, 0.10) transparent;
+}
+
+:root:not(.dark) .analytics-recurring-inactive-body::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+:root:not(.dark) .analytics-recurring-inactive-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.14);
+}
+
+@keyframes inactiveDropdownIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ── Subscription Summary Badges ── */
+.analytics-sub-summary-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.5625rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    padding: 0.1875rem 0.5rem;
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--badge-color, var(--text-muted)) 10%, transparent);
+    color: var(--badge-color, var(--text-muted));
+    white-space: nowrap;
+}
+
+/* ── Unread Event Count Badge ── */
+.analytics-event-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9999px;
+    background: var(--negative);
+    color: white;
+    font-size: 0.5625rem;
+    font-weight: 800;
+    font-family: var(--font-mono);
+    line-height: 1;
+    animation: eventBadgePulse 2s ease-in-out infinite;
+}
+
+@keyframes eventBadgePulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+}
+
+/* ── Redetect / Refresh Button ── */
+.analytics-redetect-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    cursor: pointer;
+    transition: all var(--duration-fast) ease;
+}
+
+.analytics-redetect-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.analytics-redetect-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.animate-spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ── Events / Alerts Strip ── */
+.analytics-events-strip {
+    border-bottom: 1px solid var(--card-border);
+    background: var(--surface-100);
+    padding: 0.5rem 0;
+}
+
+.analytics-events-strip-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.25rem 1.25rem 0.5rem;
+}
+
+.analytics-events-dismiss-all {
+    font-size: 0.5625rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    transition: all var(--duration-fast) ease;
+}
+
+.analytics-events-dismiss-all:hover {
+    background: var(--surface-200);
+    color: var(--text-secondary);
+}
+
+.analytics-event-card {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0.75rem 0.375rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--event-color, var(--text-muted)) 15%, transparent);
+    transition: all var(--duration-fast) ease;
+    animation: eventCardIn 0.2s var(--ease-out-expo) both;
+}
+
+@keyframes eventCardIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.analytics-event-card:hover {
+    border-color: color-mix(in srgb, var(--event-color, var(--text-muted)) 30%, transparent);
+}
+
+.analytics-event-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0.4;
+    transition: all var(--duration-fast) ease;
+    flex-shrink: 0;
+}
+
+.analytics-event-card:hover .analytics-event-dismiss {
+    opacity: 0.7;
+}
+
+.analytics-event-dismiss:hover {
+    opacity: 1 !important;
+    background: var(--surface-200);
+    color: var(--text-primary);
+}
+
+/* ── User-Declared Badge ── */
+.analytics-recurring-badge-user {
+    font-size: 0.4375rem;
+    font-weight: 800;
+    padding: 0.125rem 0.375rem;
+    border-radius: 9999px;
+    background: color-mix(in srgb, #8b5cf6 12%, transparent);
+    color: #8b5cf6;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* ── Cancelled Badge ── */
+.analytics-recurring-badge-cancelled {
+    font-size: 0.5rem;
+    font-weight: 700;
+    padding: 0.1875rem 0.5rem;
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--negative) 10%, transparent);
+    color: var(--negative);
+    white-space: nowrap;
+}
+
+/* ── Cancel Confirmation Button (in inactive rows) ── */
+.analytics-recurring-cancel-btn {
+    width: auto !important;
+    padding: 0.1875rem 0.5rem !important;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--negative) 20%, transparent) !important;
+    background: color-mix(in srgb, var(--negative) 6%, transparent) !important;
+    color: var(--negative) !important;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: all var(--duration-fast) ease;
+}
+
+.analytics-recurring-row:hover .analytics-recurring-cancel-btn {
+    opacity: 1;
+}
+
+.analytics-recurring-cancel-btn:hover {
+    background: color-mix(in srgb, var(--negative) 12%, transparent) !important;
+    border-color: color-mix(in srgb, var(--negative) 35%, transparent) !important;
+}
+
+/* ── Restore Button (in dismissed rows) ── */
+.analytics-recurring-restore-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3125rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    font-size: 0.625rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--duration-fast) ease;
+    white-space: nowrap;
+}
+
+.analytics-recurring-restore-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+/* Dark mode refinements for new elements */
+.dark .analytics-events-strip {
+    background: rgba(30, 42, 58, 0.50);
+}
+
+.dark .analytics-event-card {
+    border-color: color-mix(in srgb, var(--event-color, var(--text-muted)) 20%, transparent);
+}
+
+.dark .analytics-recurring-restore-btn {
+    background: rgba(30, 42, 58, 0.60);
+    border-color: rgba(82, 100, 124, 0.35);
+}
+
+.dark .analytics-recurring-restore-btn:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent);
+}
+
+.dark .analytics-redetect-btn {
+    background: rgba(30, 42, 58, 0.60);
+    border-color: rgba(82, 100, 124, 0.35);
+}
+
+.dark .analytics-sub-summary-badge {
+    background: color-mix(in srgb, var(--badge-color, var(--text-muted)) 14%, transparent);
+}

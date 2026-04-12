@@ -861,31 +861,13 @@
     "name": "Amazon Prime",
     "patterns": ["AMZN PRIME", "AMAZON PRIME", "AMZN MEMBERSHIP", "AMAZON.COM PRIME", "AMZN PRIME MEMBER"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Streaming"
-  },
-  {
-    "name": "Costco Membership",
-    "patterns": ["COSTCO MEMBERSHIP", "COSTCO WHSE MEMBERSHIP", "COSTCO MBR"],
-    "frequency_hint": "annual",
-    "category": "Streaming"
-  },
-  {
-    "name": "Sam's Club Membership",
-    "patterns": ["SAMS CLUB MEMBERSHIP", "SAMS CLUB MBR", "SAM'S CLUB MEMBERSHIP"],
-    "frequency_hint": "annual",
-    "category": "Streaming"
-  },
-  {
-    "name": "AAA Membership",
-    "patterns": ["AAA MEMBERSHIP", "AAA AUTO CLUB", "AMERICAN AUTO ASSOC"],
-    "frequency_hint": "annual",
-    "category": "Streaming"
+    "category": "Membership"
   },
   {
     "name": "Walmart+",
     "patterns": ["WALMART PLUS", "WALMART+", "WALMART MEMBERSHIP", "WM PLUS"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Streaming"
+    "category": "Membership"
   },
   {
     "name": "Twitch",
@@ -897,7 +879,7 @@
     "name": "Patreon",
     "patterns": ["PATREON", "PATREON.COM", "PATREON INC"],
     "frequency_hint": "monthly",
-    "category": "Streaming"
+    "category": "Creator Support"
   },
   {
     "name": "Discord Nitro",
@@ -924,40 +906,16 @@
     "category": "Software"
   },
   {
-    "name": "23andMe",
-    "patterns": ["23ANDME", "23 AND ME"],
-    "frequency_hint": "annual",
-    "category": "Software"
-  },
-  {
     "name": "Ring Protect",
     "patterns": ["RING PROTECT", "RING.COM", "RING PLAN"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
+    "category": "Smart Home"
   },
   {
     "name": "Nest Aware",
     "patterns": ["NEST AWARE", "GOOGLE NEST", "GOOGLE*NEST"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
-  },
-  {
-    "name": "SimpliSafe",
-    "patterns": ["SIMPLISAFE", "SIMPLI SAFE"],
-    "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
-    "name": "ADT Security",
-    "patterns": ["ADT SECURITY", "ADT INC", "ADT LLC"],
-    "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
-    "name": "Turo",
-    "patterns": ["TURO", "TURO.COM", "TURO INC"],
-    "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Smart Home"
   },
   {
     "name": "Apple One Bundle",
@@ -981,25 +939,25 @@
     "name": "Bumble",
     "patterns": ["BUMBLE", "BUMBLE.COM", "BUMBLE INC"],
     "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Dating"
   },
   {
     "name": "Tinder",
     "patterns": ["TINDER", "TINDER.COM", "MATCH GROUP TINDER"],
     "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Dating"
   },
   {
     "name": "Hinge",
     "patterns": ["HINGE", "HINGE.CO", "MATCH GROUP HINGE"],
     "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Dating"
   },
   {
     "name": "Match.com",
     "patterns": ["MATCH.COM", "MATCH GROUP"],
     "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Dating"
   },
   {
     "name": "Noom",
@@ -1024,534 +982,6 @@
     "patterns": ["OURA", "OURA HEALTH", "OURARING"],
     "frequency_hint": "monthly",
     "category": "Fitness"
-  },
-  {
-    "name": "Comcast Xfinity",
-    "patterns": ["COMCAST", "XFINITY", "COMCAST XFINITY", "COMCAST CABLE"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "AT&T Internet",
-    "patterns": ["AT&T INTERNET", "ATT INTERNET", "AT&T UVERSE", "ATT UVERSE", "AT&T FIBER"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Verizon Fios",
-    "patterns": ["VERIZON FIOS", "VZ FIOS", "VERIZON ONLINE"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Spectrum",
-    "patterns": ["SPECTRUM", "CHARTER SPECTRUM", "CHARTER COMMUNICATIONS"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Cox Communications",
-    "patterns": ["COX COMM", "COX COMMUNICATIONS", "COX CABLE"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "CenturyLink",
-    "patterns": ["CENTURYLINK", "CENTURY LINK", "LUMEN TECHNOLOGIES", "QUANTUM FIBER"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Frontier Communications",
-    "patterns": ["FRONTIER COMM", "FRONTIER COMMUNICATIONS", "FRONTIER FIBER"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Google Fiber",
-    "patterns": ["GOOGLE FIBER", "GOOGLE*FIBER"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "T-Mobile Home Internet",
-    "patterns": ["TMOBILE HOME INTERNET", "T-MOBILE HOME", "T-MOBILE INTERNET"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Optimum",
-    "patterns": ["OPTIMUM", "OPTIMUM ONLINE", "ALTICE USA", "CABLEVISION"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Starlink",
-    "patterns": ["STARLINK", "STARLINK INTERNET", "SPACEX STARLINK"],
-    "frequency_hint": "monthly",
-    "category": "Internet"
-  },
-  {
-    "name": "Verizon Wireless",
-    "patterns": ["VERIZON WIRELESS", "VZW", "VZ WIRELESS", "VERIZON WL"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "AT&T Wireless",
-    "patterns": ["AT&T WIRELESS", "ATT WIRELESS", "AT&T MOBILITY", "ATT MOBILITY", "AT&T BILL"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "T-Mobile",
-    "patterns": ["T-MOBILE", "TMOBILE", "T MOBILE"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Mint Mobile",
-    "patterns": ["MINT MOBILE", "MINTMOBILE"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Visible",
-    "patterns": ["VISIBLE", "VISIBLE.COM", "VISIBLE WIRELESS"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Cricket Wireless",
-    "patterns": ["CRICKET WIRELESS", "CRICKET WL", "CRICKETWL"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Metro by T-Mobile",
-    "patterns": ["METRO BY T-MOBILE", "METROPCS", "METRO PCS", "METRO TMOBILE"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Google Fi",
-    "patterns": ["GOOGLE FI", "GOOGLE*FI", "PROJECT FI"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "US Mobile",
-    "patterns": ["US MOBILE", "USMOBILE"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "Boost Mobile",
-    "patterns": ["BOOST MOBILE", "BOOSTMOBILE"],
-    "frequency_hint": "monthly",
-    "category": "Wireless"
-  },
-  {
-    "name": "PG&E",
-    "patterns": ["PG&E", "PG AND E", "PACIFIC GAS ELECTRIC", "PACIFIC GAS & ELECTRIC", "PGANDE"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Con Edison",
-    "patterns": ["CON EDISON", "CONEDISON", "CONED", "CONSOLIDATED EDISON"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Duke Energy",
-    "patterns": ["DUKE ENERGY", "DUKE-ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Southern California Edison",
-    "patterns": ["SO CAL EDISON", "SCE", "SOUTHERN CALIFORNIA EDISON", "SOCAL EDISON"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Florida Power & Light",
-    "patterns": ["FPL", "FLORIDA POWER", "FLORIDA POWER & LIGHT", "FPL GROUP"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "National Grid",
-    "patterns": ["NATIONAL GRID", "NATL GRID"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Dominion Energy",
-    "patterns": ["DOMINION ENERGY", "DOMINION VA POWER", "DOMINION VIRGINIA"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "ComEd",
-    "patterns": ["COMED", "COM ED", "COMMONWEALTH EDISON"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Georgia Power",
-    "patterns": ["GEORGIA POWER", "GA POWER"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Xcel Energy",
-    "patterns": ["XCEL ENERGY", "XCELENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "AEP Ohio",
-    "patterns": ["AEP OHIO", "AMERICAN ELECTRIC POWER", "AEP ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Entergy",
-    "patterns": ["ENTERGY", "ENTERGY CORP"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "SoCalGas",
-    "patterns": ["SOCALGAS", "SOUTHERN CALIFORNIA GAS", "SO CAL GAS"],
-    "frequency_hint": "monthly",
-    "category": "Gas"
-  },
-  {
-    "name": "SDGE",
-    "patterns": ["SDGE", "SAN DIEGO GAS", "SD GAS & ELECTRIC"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Geico",
-    "patterns": ["GEICO", "GEICO INSURANCE", "GEICO AUTO", "GEICO INDEMNITY"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "State Farm",
-    "patterns": ["STATE FARM", "STATEFARM", "STATE FARM INSURANCE", "STATE FARM MUTUAL"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Progressive",
-    "patterns": ["PROGRESSIVE", "PROGRESSIVE INSURANCE", "PROGRESSIVE CASUALTY"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Allstate",
-    "patterns": ["ALLSTATE", "ALLSTATE INSURANCE", "ALLSTATE INS"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "USAA",
-    "patterns": ["USAA", "USAA INSURANCE", "USAA PROPERTY"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Liberty Mutual",
-    "patterns": ["LIBERTY MUTUAL", "LIBERTY MUTUAL INS", "LIBERTYMUTUAL"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Nationwide",
-    "patterns": ["NATIONWIDE", "NATIONWIDE INSURANCE", "NATIONWIDE INS"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Farmers Insurance",
-    "patterns": ["FARMERS INSURANCE", "FARMERS INS", "FARMERS GRP"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Erie Insurance",
-    "patterns": ["ERIE INSURANCE", "ERIE INS"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "American Family Insurance",
-    "patterns": ["AMERICAN FAMILY", "AMFAM", "AMERICAN FAMILY INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "The Hartford",
-    "patterns": ["THE HARTFORD", "HARTFORD INSURANCE", "HARTFORD INS"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Travelers Insurance",
-    "patterns": ["TRAVELERS", "TRAVELERS INSURANCE", "TRAVELERS INS"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Root Insurance",
-    "patterns": ["ROOT INSURANCE", "ROOT INS", "ROOTINSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Lemonade Insurance",
-    "patterns": ["LEMONADE", "LEMONADE INS", "LEMONADE INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Renters Insurance"
-  },
-  {
-    "name": "Hippo Insurance",
-    "patterns": ["HIPPO INSURANCE", "HIPPO INS", "HIPPO HOME"],
-    "frequency_hint": "monthly",
-    "category": "Home Insurance"
-  },
-  {
-    "name": "Safeco Insurance",
-    "patterns": ["SAFECO", "SAFECO INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Auto Insurance"
-  },
-  {
-    "name": "Kaiser Permanente",
-    "patterns": ["KAISER", "KAISER PERMANENTE", "KAISER PERM", "KAISER FOUNDATION"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Blue Cross Blue Shield",
-    "patterns": ["BLUE CROSS", "BCBS", "BLUE SHIELD", "BLUECROSS BLUESHIELD", "ANTHEM BCBS"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Aetna",
-    "patterns": ["AETNA", "AETNA INSURANCE", "AETNA HEALTH"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Cigna",
-    "patterns": ["CIGNA", "CIGNA HEALTH", "CIGNA INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "United Healthcare",
-    "patterns": ["UNITED HEALTHCARE", "UNITEDHEALTHCARE", "UHC", "UNITEDHEALTH"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Humana",
-    "patterns": ["HUMANA", "HUMANA INSURANCE", "HUMANA INC"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Anthem",
-    "patterns": ["ANTHEM", "ANTHEM INSURANCE", "ANTHEM BLUE CROSS"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Northwestern Mutual",
-    "patterns": ["NORTHWESTERN MUTUAL", "NW MUTUAL", "NORTHWESTERN MUT"],
-    "frequency_hint": "monthly",
-    "category": "Life Insurance"
-  },
-  {
-    "name": "New York Life",
-    "patterns": ["NEW YORK LIFE", "NY LIFE", "NEWYORKLIFE"],
-    "frequency_hint": "monthly",
-    "category": "Life Insurance"
-  },
-  {
-    "name": "MetLife",
-    "patterns": ["METLIFE", "MET LIFE", "METLIFE INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Life Insurance"
-  },
-  {
-    "name": "Prudential",
-    "patterns": ["PRUDENTIAL", "PRUDENTIAL FINANCIAL", "PRUDENTIAL INS"],
-    "frequency_hint": "monthly",
-    "category": "Life Insurance"
-  },
-  {
-    "name": "Globe Life",
-    "patterns": ["GLOBE LIFE", "GLOBELIFE", "GLOBE LIFE INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Life Insurance"
-  },
-  {
-    "name": "Aflac",
-    "patterns": ["AFLAC", "AFLAC INSURANCE", "AFLAC INC"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "Oscar Health",
-    "patterns": ["OSCAR HEALTH", "OSCAR INSURANCE"],
-    "frequency_hint": "monthly",
-    "category": "Health Insurance"
-  },
-  {
-    "name": "BetterHelp",
-    "patterns": ["BETTERHELP", "BETTERHELP.COM", "BETTER HELP"],
-    "frequency_hint": "monthly",
-    "category": "Therapy"
-  },
-  {
-    "name": "Talkspace",
-    "patterns": ["TALKSPACE", "TALKSPACE.COM"],
-    "frequency_hint": "monthly",
-    "category": "Therapy"
-  },
-  {
-    "name": "Cerebral",
-    "patterns": ["CEREBRAL", "CEREBRAL INC", "GETCEREBRAL"],
-    "frequency_hint": "monthly",
-    "category": "Therapy"
-  },
-  {
-    "name": "Hims",
-    "patterns": ["HIMS", "HIMS.COM", "HIMS AND HERS", "HIMS & HERS"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Hers",
-    "patterns": ["HERS", "FORHERS", "FOR HERS"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Nurx",
-    "patterns": ["NURX", "NURX.COM", "NURX INC"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Ro",
-    "patterns": ["RO HEALTH", "RO.CO", "ROMAN HEALTH"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Express Scripts",
-    "patterns": ["EXPRESS SCRIPTS", "EXPRESSSCRIPTS", "EXPRESS-SCRIPTS"],
-    "frequency_hint": "monthly",
-    "category": "Pharmacy"
-  },
-  {
-    "name": "Capsule Pharmacy",
-    "patterns": ["CAPSULE PHARMACY", "CAPSULE RX", "CAPSULE CORP"],
-    "frequency_hint": "monthly",
-    "category": "Pharmacy"
-  },
-  {
-    "name": "GoodRx",
-    "patterns": ["GOODRX", "GOOD RX", "GOODRX GOLD"],
-    "frequency_hint": "monthly",
-    "category": "Pharmacy"
-  },
-  {
-    "name": "Teladoc",
-    "patterns": ["TELADOC", "TELADOC HEALTH"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Done ADHD",
-    "patterns": ["DONE ADHD", "DONEFIRST", "DONE.HEALTH"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Keeps",
-    "patterns": ["KEEPS", "KEEPS.COM"],
-    "frequency_hint": "monthly",
-    "category": "Telehealth"
-  },
-  {
-    "name": "Apartments.com",
-    "patterns": ["APARTMENTS.COM", "APARTMENTSDOTCOM", "COZY RENT", "APARTMENTS COM RENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "RentCafe",
-    "patterns": ["RENTCAFE", "RENT CAFE", "RENTCAFE.COM"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "AppFolio",
-    "patterns": ["APPFOLIO", "APPFOLIO PROPERTY", "APPFOLIO INC"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "Buildium",
-    "patterns": ["BUILDIUM", "BUILDIUM.COM"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "PayRent",
-    "patterns": ["PAYRENT", "PAYRENT.COM", "PAY RENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "Zelle Rent",
-    "patterns": ["ZELLE RENT", "ZELLE PAYMENT RENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "Avail",
-    "patterns": ["AVAIL RENT", "AVAIL.CO", "AVAIL PAYMENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "RealPage",
-    "patterns": ["REALPAGE", "REAL PAGE", "REALPAGE PAYMENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "Entrata",
-    "patterns": ["ENTRATA", "ENTRATA.COM", "ENTRATA RENT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
-  },
-  {
-    "name": "TurboTenant",
-    "patterns": ["TURBOTENANT", "TURBO TENANT"],
-    "frequency_hint": "monthly",
-    "category": "Rent Payment"
   },
   {
     "name": "Vudu",
@@ -1758,12 +1188,6 @@
     "category": "VPN"
   },
   {
-    "name": "Carvana",
-    "patterns": ["CARVANA", "CARVANA LLC", "CARVANA AUTO"],
-    "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
     "name": "ScentBird",
     "patterns": ["SCENTBIRD", "SCENT BIRD"],
     "frequency_hint": "monthly",
@@ -1818,12 +1242,6 @@
     "category": "Pet"
   },
   {
-    "name": "Wisdom Panel",
-    "patterns": ["WISDOM PANEL", "WISDOMPANEL"],
-    "frequency_hint": "annual",
-    "category": "Pet"
-  },
-  {
     "name": "YNAB",
     "patterns": ["YNAB", "YOU NEED A BUDGET", "YOUNEEDABUDGET"],
     "frequency_hint": "monthly_or_annual",
@@ -1854,16 +1272,10 @@
     "category": "Software"
   },
   {
-    "name": "Waze",
-    "patterns": ["WAZE CARPOOL", "WAZE"],
-    "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
     "name": "Life360",
     "patterns": ["LIFE360", "LIFE 360"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
+    "category": "Family/Parental"
   },
   {
     "name": "AllTrails",
@@ -1917,13 +1329,13 @@
     "name": "Bark",
     "patterns": ["BARK.US", "BARK PARENTAL", "BARK TECHNOLOGIES"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
+    "category": "Family/Parental"
   },
   {
     "name": "Qustodio",
     "patterns": ["QUSTODIO", "QUSTODIO.COM"],
     "frequency_hint": "annual",
-    "category": "Software"
+    "category": "Family/Parental"
   },
   {
     "name": "Replika",
@@ -1974,64 +1386,28 @@
     "category": "Music"
   },
   {
-    "name": "TurboTax Live",
-    "patterns": ["TURBOTAX", "INTUIT TURBOTAX"],
-    "frequency_hint": "annual",
-    "category": "Software"
-  },
-  {
-    "name": "H&R Block",
-    "patterns": ["H&R BLOCK", "HRB DIGITAL", "HR BLOCK"],
-    "frequency_hint": "annual",
-    "category": "Software"
-  },
-  {
-    "name": "Credit Karma",
-    "patterns": ["CREDIT KARMA", "CREDITKARMA"],
+    "name": "GoodRx",
+    "patterns": ["GOODRX", "GOOD RX", "GOODRX GOLD"],
     "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
-    "name": "Identity Guard",
-    "patterns": ["IDENTITY GUARD", "IDENTITYGUARD"],
-    "frequency_hint": "monthly",
-    "category": "Software"
-  },
-  {
-    "name": "LifeLock",
-    "patterns": ["LIFELOCK", "NORTON LIFELOCK"],
-    "frequency_hint": "monthly_or_annual",
-    "category": "Software"
-  },
-  {
-    "name": "Aura",
-    "patterns": ["AURA IDENTITY", "AURA.COM"],
-    "frequency_hint": "monthly_or_annual",
     "category": "Software"
   },
   {
     "name": "Wyze Cam Plus",
     "patterns": ["WYZE", "WYZE.COM", "WYZE CAM"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
+    "category": "Smart Home"
   },
   {
     "name": "Arlo Secure",
     "patterns": ["ARLO", "ARLO.COM", "ARLO SECURE"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
+    "category": "Smart Home"
   },
   {
     "name": "Blink Subscription",
     "patterns": ["BLINK SUBSCRIPTION", "BLINK PLAN", "AMZN BLINK"],
     "frequency_hint": "monthly_or_annual",
-    "category": "Software"
-  },
-  {
-    "name": "Vivint",
-    "patterns": ["VIVINT", "VIVINT SMART HOME", "VIVINT INC"],
-    "frequency_hint": "monthly",
-    "category": "Software"
+    "category": "Smart Home"
   },
   {
     "name": "WP Engine",
@@ -2188,83 +1564,5 @@
     "patterns": ["X CORP", "TWITTER", "X.COM", "ABOUT.X.COM"],
     "frequency_hint": "monthly_or_annual",
     "category": "Software"
-  },
-  {
-    "name": "ConEd Water",
-    "patterns": ["NEW YORK WATER", "NYC WATER", "NYC DEP WATER"],
-    "frequency_hint": "quarterly",
-    "category": "Water"
-  },
-  {
-    "name": "American Water",
-    "patterns": ["AMERICAN WATER", "AMWATER", "AMERICAN WATER WORKS"],
-    "frequency_hint": "monthly",
-    "category": "Water"
-  },
-  {
-    "name": "Aqua America",
-    "patterns": ["AQUA AMERICA", "ESSENTIAL UTILITIES", "AQUA WATER"],
-    "frequency_hint": "monthly",
-    "category": "Water"
-  },
-  {
-    "name": "Eversource",
-    "patterns": ["EVERSOURCE", "EVERSOURCE ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Pepco",
-    "patterns": ["PEPCO", "POTOMAC ELECTRIC"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Consumers Energy",
-    "patterns": ["CONSUMERS ENERGY", "CONSUMERS ENRGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "WE Energies",
-    "patterns": ["WE ENERGIES", "WISCONSIN ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Ameren",
-    "patterns": ["AMEREN", "AMEREN CORP"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "PPL Electric",
-    "patterns": ["PPL ELECTRIC", "PPL UTILITIES"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "PSE&G",
-    "patterns": ["PSEG", "PSE&G", "PSEG ELECTRIC"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "Puget Sound Energy",
-    "patterns": ["PUGET SOUND ENERGY", "PSE ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "CPS Energy",
-    "patterns": ["CPS ENERGY", "CPSENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
-  },
-  {
-    "name": "NextEra Energy",
-    "patterns": ["NEXTERA", "NEXTERA ENERGY"],
-    "frequency_hint": "monthly",
-    "category": "Electric"
   }
 ]

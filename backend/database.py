@@ -118,6 +118,7 @@ def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA_SQL)
         _migrate_expense_type(conn)
+        _migrate_merchants_table(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)        
@@ -150,6 +151,23 @@ def _migrate_expense_type(conn: sqlite3.Connection):
             (name,),
         )
 
+def _migrate_merchants_table(conn: sqlite3.Connection):
+    """
+    Ensure merchants table has all required columns for Enhancement 4
+    (cancelled_at, cancelled_by_user). Idempotent.
+    """
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(merchants)").fetchall()]
+    except Exception:
+        return  # Table doesn't exist yet; SCHEMA_SQL will create it
+
+    if not cols:
+        return
+
+    if "cancelled_at" not in cols:
+        conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_at TEXT")
+    if "cancelled_by_user" not in cols:
+        conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_by_user INTEGER DEFAULT 0")
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,6 +337,74 @@ CREATE TABLE IF NOT EXISTS enrolled_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_enrolled_tokens_profile ON enrolled_tokens(profile);
 CREATE INDEX IF NOT EXISTS idx_enrolled_tokens_active ON enrolled_tokens(is_active);
+
+CREATE TABLE IF NOT EXISTS merchants (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant_key        TEXT NOT NULL,
+    clean_name          TEXT,
+    logo_url            TEXT,
+    domain              TEXT,
+    category            TEXT,
+    industry            TEXT,
+    source              TEXT DEFAULT 'trove',
+    is_subscription     INTEGER DEFAULT 0,
+    subscription_frequency TEXT,
+    subscription_amount REAL,
+    subscription_status TEXT,
+    cancelled_at        TEXT,
+    cancelled_by_user   INTEGER DEFAULT 0,
+    last_charge_date    TEXT,
+    next_expected_date  TEXT,
+    total_spent         REAL DEFAULT 0,
+    charge_count        INTEGER DEFAULT 0,
+    profile_id          TEXT,
+    created_at          TEXT DEFAULT (datetime('now')),
+    updated_at          TEXT DEFAULT (datetime('now')),
+    UNIQUE(merchant_key, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchants_profile ON merchants(profile_id);
+CREATE INDEX IF NOT EXISTS idx_merchants_subscription ON merchants(is_subscription, profile_id);
+CREATE INDEX IF NOT EXISTS idx_merchants_key ON merchants(merchant_key);
+
+CREATE TABLE IF NOT EXISTS user_declared_subscriptions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant_name       TEXT NOT NULL,
+    amount              REAL NOT NULL,
+    frequency           TEXT NOT NULL DEFAULT 'monthly',
+    profile_id          TEXT NOT NULL,
+    is_active           INTEGER DEFAULT 1,
+    created_at          TEXT DEFAULT (datetime('now')),
+    updated_at          TEXT DEFAULT (datetime('now')),
+    UNIQUE(merchant_name, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_declared_subs_profile ON user_declared_subscriptions(profile_id);
+CREATE INDEX IF NOT EXISTS idx_user_declared_subs_active ON user_declared_subscriptions(is_active, profile_id);
+
+CREATE TABLE IF NOT EXISTS subscription_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type          TEXT NOT NULL,
+    merchant_name       TEXT NOT NULL,
+    profile_id          TEXT NOT NULL,
+    detail              TEXT DEFAULT '{}',
+    created_at          TEXT DEFAULT (datetime('now')),
+    is_read             INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_sub_events_profile ON subscription_events(profile_id);
+CREATE INDEX IF NOT EXISTS idx_sub_events_unread ON subscription_events(is_read, profile_id);
+CREATE INDEX IF NOT EXISTS idx_sub_events_type ON subscription_events(event_type);
+
+CREATE TABLE IF NOT EXISTS dismissed_recurring (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant_name       TEXT NOT NULL,
+    profile_id          TEXT NOT NULL,
+    dismissed_at        TEXT DEFAULT (datetime('now')),
+    UNIQUE(merchant_name, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dismissed_recurring_profile ON dismissed_recurring(profile_id);
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,7 +708,63 @@ def sync_enrichment_cache_from_seeds():
         "Enrichment cache seeded: %d patterns from subscription seeds.", inserted
     )
 
+def upsert_merchant_from_enrichment(
+    conn: sqlite3.Connection,
+    merchant_key: str,
+    enrichment: dict,
+    profile_id: str,
+    source: str = "trove",
+):
+    """
+    Upsert the merchants table with enrichment data.
+    Never overwrites fields where existing source = 'user'.
+    Trove data can update trove-sourced fields and fill empty fields.
+    """
+    if not merchant_key or not profile_id:
+        return
 
+    clean_name = (enrichment.get("name") or enrichment.get("merchant_name") or "").strip()
+    domain = (enrichment.get("domain") or enrichment.get("merchant_domain") or "").strip()
+    category = (enrichment.get("category") or enrichment.get("industry") or enrichment.get("merchant_industry") or "").strip()
+    industry = (enrichment.get("industry") or enrichment.get("merchant_industry") or "").strip()
+    logo_url = (enrichment.get("logo_url") or "").strip()
+
+    if not clean_name and not domain:
+        return
+
+    try:
+        conn.execute(
+            """INSERT INTO merchants
+               (merchant_key, clean_name, logo_url, domain, category, industry, source, profile_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
+                   clean_name = CASE
+                       WHEN merchants.source = 'user' AND merchants.clean_name != '' THEN merchants.clean_name
+                       WHEN excluded.clean_name != '' THEN excluded.clean_name
+                       ELSE merchants.clean_name END,
+                   logo_url = CASE
+                       WHEN excluded.logo_url != '' THEN excluded.logo_url
+                       ELSE merchants.logo_url END,
+                   domain = CASE
+                       WHEN merchants.source = 'user' AND merchants.domain != '' THEN merchants.domain
+                       WHEN excluded.domain != '' THEN excluded.domain
+                       ELSE merchants.domain END,
+                   category = CASE
+                       WHEN merchants.source = 'user' AND merchants.category != '' THEN merchants.category
+                       WHEN excluded.category != '' THEN excluded.category
+                       ELSE merchants.category END,
+                   industry = CASE
+                       WHEN merchants.source = 'user' AND merchants.industry != '' THEN merchants.industry
+                       WHEN excluded.industry != '' THEN excluded.industry
+                       ELSE merchants.industry END,
+                   source = CASE
+                       WHEN merchants.source = 'user' THEN 'user'
+                       ELSE excluded.source END,
+                   updated_at = datetime('now')""",
+            (merchant_key, clean_name, logo_url, domain, category, industry, source, profile_id),
+        )
+    except Exception as e:
+        logger.debug("Merchant upsert failed for %s: %s", merchant_key, e)
 # ══════════════════════════════════════════════════════════════════════════════
 # NOTE: Database initialization is handled by main.py's startup event.
 # Do NOT auto-initialize here — it causes double-init and can trigger

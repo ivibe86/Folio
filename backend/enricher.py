@@ -156,7 +156,35 @@ def _persist_enrichment(pattern_key: str, enrichment: dict, source: str = "trove
             )
     except Exception as e:
         logger.debug("Persistent cache write failed: %s", e)
-        
+
+def _upsert_merchant_from_tx(tx: dict, enrichment: dict):
+    """
+    After enriching a transaction, upsert the merchants table.
+    Requires profile_id on the transaction dict (set during categorize_transactions).
+    If profile_id is not available, silently skips — enrichment still works,
+    merchants table just won't be populated until sync writes it.
+    """
+    profile_id = tx.get("profile", "")
+    if not profile_id:
+        return
+
+    merchant_key = _dedup_key(tx)
+    if not merchant_key or len(merchant_key) < 3:
+        return
+
+    try:
+        get_db = _get_db_conn()
+        with get_db() as conn:
+            from database import upsert_merchant_from_enrichment
+            upsert_merchant_from_enrichment(
+                conn=conn,
+                merchant_key=merchant_key,
+                enrichment=enrichment,
+                profile_id=profile_id,
+                source="trove",
+            )
+    except Exception as e:
+        logger.debug("Merchant upsert from enrichment failed: %s", e)        
 # ══════════════════════════════════════════════════════════════════════════════
 # ENRICHMENT CACHE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -753,6 +781,9 @@ def _enrich_via_single(
                 # Persist to DB cache for future runs
                 _persist_enrichment(_dedup_key(tx), data, source="trove")
 
+                # Upsert merchants table (Enhancement 5)
+                _upsert_merchant_from_tx(tx, data)
+
                 transactions[idx] = _apply_enrichment(tx, data)
                 if transactions[idx].get("enriched"):
                     api_enriched += 1
@@ -1085,6 +1116,9 @@ def _apply_bulk_batch_results(
             desc = tx.get("raw_description") or tx.get("description", "")
             _enrichment_cache.put(desc, enrichment)
             _persist_enrichment(_dedup_key(tx), enrichment, source="trove")
+
+            # Upsert merchants table (Enhancement 5)
+            _upsert_merchant_from_tx(tx, enrichment)
 
             transactions[idx] = _apply_enrichment(tx, enrichment)
             if transactions[idx].get("enriched"):
