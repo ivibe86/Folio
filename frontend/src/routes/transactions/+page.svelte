@@ -271,13 +271,50 @@
     // Transactions are already server-filtered
     $: filteredTxns = transactions;
 
+    // Transfer types excluded from accrual-basis totals (same model as dashboard)
+    const EXCLUDED_EXPENSE_TYPES = new Set(['transfer_internal', 'transfer_cc_payment', 'transfer_household']);
+    const NON_SPENDING_CATEGORIES = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+
     $: groupedTxns = groupTransactionsByDate(filteredTxns);
-    $: totalSpending = filteredTxns.filter(t => parseFloat(t.amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
-    $: totalIncome = filteredTxns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: totalSpending = filteredTxns
+        .filter(t => {
+            const amount = parseFloat(t.amount);
+            if (amount >= 0) return false;
+            // Exclude non-spending categories (same as dashboard)
+            if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
+            // Exclude internal and CC payment transfers
+            if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
+            return true;
+        })
+        .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    $: totalIncome = filteredTxns
+        .filter(t => {
+            const amount = parseFloat(t.amount);
+            if (amount <= 0) return false;
+            // Only count actual income
+            if (t.category !== 'Income') return false;
+            // Exclude internal transfers showing as income
+            if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
+            return true;
+        })
+        .reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: txCcRepaid = filteredTxns
+        .filter(t => t.category === 'Credit Card Payment' && parseFloat(t.amount) < 0)
+        .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    $: txExternalTransfers = filteredTxns
+        .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0)
+        .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    $: txNetFlow = totalIncome - totalSpending - txExternalTransfers;
     $: topCategory = (() => {
         const cats = {};
-        filteredTxns.filter(t => parseFloat(t.amount) < 0).forEach(t => {
-            if (t.category && t.category !== 'Credit Card Payment' && t.category !== 'Savings Transfer' && t.category !== 'Personal Transfer') {
+        filteredTxns.filter(t => {
+            const amount = parseFloat(t.amount);
+            if (amount >= 0) return false;
+            if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
+            if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
+            return true;
+        }).forEach(t => {
+            if (t.category) {
                 cats[t.category] = (cats[t.category] || 0) + Math.abs(parseFloat(t.amount));
             }
         });
@@ -393,6 +430,14 @@
 
     $: hasActiveFilters = search || filterCategory || filterAccount || selectedPeriod !== 'this_month';
 
+    function formatDayHeaderFull(dateStr) {
+        const base = formatDayHeader(dateStr);
+        if ((selectedPeriod === 'all' || selectedPeriod === 'ytd') && base !== 'Today' && base !== 'Yesterday' && dateStr) {
+            return `${base}, ${dateStr.substring(0, 4)}`;
+        }
+        return base;
+    }
+
     /**
      * Get a display label for the categorization source.
      */
@@ -471,30 +516,34 @@
 {/if}
 
 <!-- SUMMARY STRIP -->
-<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5 fade-in-up" style="animation-delay: 60ms">
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5 fade-in-up" style="animation-delay: 60ms">
     <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Transactions</p>
-        <p class="text-base font-bold font-mono mt-0.5" style="color: var(--text-primary)">{totalCount}</p>
-    </div>
-    <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Total Spent</p>
-        <p class="text-base font-bold font-mono mt-0.5 text-negative">{formatCurrency(totalSpending)}</p>
-    </div>
-    <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Total Income</p>
+        <p class="stat-label">Income</p>
         <p class="text-base font-bold font-mono mt-0.5 text-positive">{formatCurrency(totalIncome)}</p>
     </div>
     <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Top Category</p>
-        {#if topCategory}
-            <div class="flex items-center gap-1.5 mt-0.5">
-                <span class="w-2 h-2 rounded-full" style="background: {CATEGORY_COLORS[topCategory.name] || '#627d98'}"></span>
-                <p class="text-[12px] font-semibold truncate" style="color: var(--text-primary)">{topCategory.name}</p>
-                <p class="text-[11px] font-mono ml-auto" style="color: var(--text-muted)">{formatCurrency(topCategory.total)}</p>
-            </div>
-        {:else}
-            <p class="text-sm mt-0.5" style="color: var(--text-muted)">—</p>
-        {/if}
+        <p class="stat-label">Spending</p>
+        <p class="text-base font-bold font-mono mt-0.5 text-negative">{formatCurrency(totalSpending)}</p>
+    </div>
+    <div class="card" style="padding: 0.75rem 1rem; opacity: 0.7">
+        <p class="stat-label" style="display: flex; align-items: center; gap: 4px;">
+            Ext. Transfers
+            <span class="material-symbols-outlined text-[12px]" style="color: var(--text-muted); opacity: 0.6" title="Transfers to people outside your accounts (Zelle, Venmo, etc). Counted in Net Flow.">info</span>
+        </p>
+        <p class="text-base font-bold font-mono mt-0.5" style="color: var(--warning)">{formatCurrency(txExternalTransfers)}</p>
+    </div>
+    <div class="card" style="padding: 0.75rem 1rem; opacity: 0.7">
+        <p class="stat-label" style="display: flex; align-items: center; gap: 4px;">
+            CC Repaid
+            <span class="material-symbols-outlined text-[12px]" style="color: var(--text-muted); opacity: 0.6" title="Payments toward prior credit card charges. Not counted as new spending.">info</span>
+        </p>
+        <p class="text-base font-bold font-mono mt-0.5" style="color: var(--text-muted)">{formatCurrency(txCcRepaid)}</p>
+    </div>
+    <div class="card" style="padding: 0.75rem 1rem">
+        <p class="stat-label">Net Flow</p>
+        <p class="text-base font-bold font-mono mt-0.5" style="color: {txNetFlow >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+            {txNetFlow >= 0 ? '+' : ''}{formatCurrency(txNetFlow)}
+        </p>
     </div>
 </div>
 
@@ -681,7 +730,7 @@
                 {@const dayIncome = txns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0)}
 
                 <div class="day-header" style="{gi > 0 ? 'border-top: 1px solid var(--card-border)' : ''}">
-                    <span class="text-[11px] font-semibold" style="color: var(--text-primary)">{formatDayHeader(date)}</span>
+                    <span class="text-[11px] font-semibold" style="color: var(--text-primary)">{formatDayHeaderFull(date)}</span>
                     <div class="flex items-center gap-3">
                         {#if dayIncome > 0}
                             <span class="text-[10px] font-mono font-medium text-positive">+{formatCurrency(dayIncome, 2)}</span>

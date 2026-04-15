@@ -17,7 +17,7 @@
     export let data;
 
     let monthly = data.monthly;
-    let allCategories = data.categories;
+    let allCategories = Array.isArray(data.categories) ? data.categories : (data.categories?.categories || []);
     let loading = false;
     let profileSwitching = false;
     let selectedMonth = '';
@@ -85,6 +85,9 @@
     // Redetect loading state
     let redetectLoading = false;
 
+    // Categories that are not real spending in the accrual model
+    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+
     // Inactive subscriptions dropdown state (closed by default)
     let inactiveOpen = false;
 
@@ -105,9 +108,7 @@
         priceChangeCount = increases.length;
         priceChangeTotalDelta = increases.reduce((sum, i) => sum + i.price_change.change, 0);
     }
-    // Fixed vs Variable toggle
-    let editingExpenseType = null; // category name being edited
-    let expenseTypeFeedback = '';    
+
     // Waterfall
     let waterfallEl;
     let waterfallTooltip = { show: false, x: 0, y: 0, label: '', amount: 0, runningFrom: 0, runningTo: 0, count: 0 };
@@ -177,7 +178,8 @@
             }
 
             const results = await Promise.all(promises);
-            monthCategories = results[0];
+            const catResult0 = results[0];
+            monthCategories = Array.isArray(catResult0) ? catResult0 : (catResult0?.categories || []);
             monthTransactions = results[1];
             topMerchants = results[2] || [];
             selectedCategory = '';
@@ -185,7 +187,8 @@
 
             if (hasPrev) {
                 prevMonthData = sorted[currentIdx + 1];
-                prevMonthCategories = results[3] || [];
+                const catResult3 = results[3];
+                prevMonthCategories = Array.isArray(catResult3) ? catResult3 : (catResult3?.categories || []);
             } else {
                 prevMonthData = null;
                 prevMonthCategories = [];
@@ -216,7 +219,7 @@
             ]);
             recurringData = rec;
             monthly = m;
-            allCategories = c;
+            allCategories = Array.isArray(c) ? c : (c?.categories || []);
             if (monthly.length > 0) {
                 const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
                 if (!sorted.some(s => s.month === selectedMonth)) {
@@ -270,7 +273,10 @@
 
         const totalMonths = analyticsContext.totalMonths;
 
-        return monthCategories.map(cat => {
+        // Filter out transfer categories — they're not spending in the accrual model
+        const spendingCategories = monthCategories.filter(c => !NON_SPENDING_CATEGORIES_SET.has(c.category));
+
+        return spendingCategories.map(cat => {
             const catName = cat.category;
             const currentTotal = cat.total;
 
@@ -338,10 +344,12 @@
 
         const income = currentMonthSummary.income;
         const expenses = currentMonthSummary.expenses;
+        // Accrual-basis: external transfers are a real outflow (Zelle/Venmo to others)
+        const externalTransfers = currentMonthSummary.external_transfers || 0;
 
-        // Estimate opening balance: we don't have exact account balance history per month,
-        // so we'll use a relative waterfall starting from 0 and showing flows
-        // The waterfall shows: Income sources → Expense drawdowns → Net result
+        // The waterfall shows: Income → Expense categories → External Transfers → Net
+        // Internal/household transfers (Savings Transfer, Personal Transfer, CC Payment)
+        // are excluded — they're just money moving between your own accounts.
 
         const items = [];
         let running = 0;
@@ -369,6 +377,7 @@
         });
 
         // Expense categories sorted by total descending
+        // Exclude transfer categories — they're not real spending in the accrual model
         const expenseCats = [...monthCategories]
             .filter(c => c.category !== 'Savings Transfer' && c.category !== 'Personal Transfer')
             .sort((a, b) => b.total - a.total);
@@ -396,41 +405,24 @@
             });
         }
 
-        // Savings Transfer if present
-        const savingsTransferCat = monthCategories.find(c => c.category === 'Savings Transfer');
-        if (savingsTransferCat && savingsTransferCat.total > 0) {
+        // External Transfers (Zelle/Venmo to people outside your accounts)
+        // These are real outflows in the accrual model
+        if (externalTransfers > 0) {
             const before = running;
-            running -= savingsTransferCat.total;
+            running -= externalTransfers;
             items.push({
-                label: 'Savings',
-                value: -savingsTransferCat.total,
+                label: 'Ext. Transfers',
+                value: -externalTransfers,
                 runningBefore: before,
                 runningAfter: running,
-                type: 'savings',
-                color: 'var(--flow-savings)',
-                icon: 'savings',
-                count: txnCounts['Savings Transfer'] || 0
+                type: 'external_transfer',
+                color: 'var(--warning)',
+                icon: 'send_money',
+                count: monthTransactions.filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0).length
             });
         }
 
-        // Personal Transfer if present
-        const personalTransferCat = monthCategories.find(c => c.category === 'Personal Transfer');
-        if (personalTransferCat && personalTransferCat.total > 0) {
-            const before = running;
-            running -= personalTransferCat.total;
-            items.push({
-                label: 'Transfers',
-                value: -personalTransferCat.total,
-                runningBefore: before,
-                runningAfter: running,
-                type: 'transfer',
-                color: 'var(--flow-transfer)',
-                icon: 'swap_horiz',
-                count: txnCounts['Personal Transfer'] || 0
-            });
-        }
-
-        // END bar (anchor)
+        // END bar (anchor) — Net = Income - Spending - External Transfers
         items.push({
             label: 'Net',
             value: running,
@@ -555,71 +547,17 @@
 
     function handleWaterfallClick(bar) {
         if (bar.type === 'anchor' || bar.type === 'result' || bar.type === 'income') return;
+        if (bar.type === 'external_transfer') {
+            // Drill into external transfer transactions
+            selectedCategory = 'External Transfers';
+            categoryTransactions = monthTransactions
+                .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0)
+                .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
+            return;
+        }
         let catName = bar.label;
-        if (bar.type === 'savings') catName = 'Savings Transfer';
-        if (bar.type === 'transfer') catName = 'Personal Transfer';
         drillIntoCategory(catName);
     }
-
-    /* ═══════════════════════════════════════
-       S3: FIXED vs VARIABLE SPLIT
-       ═══════════════════════════════════════ */
-    // Classification is now driven by the `expense_type` field from the backend DB.
-    // Each category object in monthCategories/allCategories includes:
-    //   expense_type: 'fixed' | 'variable' | 'non_expense'
-    // Fallback to 'variable' if the field is missing (backward compat).
-
-    $: fixedVsVariable = (() => {
-        if (!monthCategories.length) return null;
-        const fixedCats = [];
-        const variableCats = [];
-
-        for (const cat of monthCategories) {
-            const expType = cat.expense_type || 'variable';
-            if (expType === 'non_expense') continue;
-            // Classification driven purely by DB expense_type — no recurring override
-            if (expType === 'fixed') {
-                fixedCats.push(cat);
-            } else {
-                variableCats.push(cat);
-            }
-        }
-
-        const fixedTotal = fixedCats.reduce((s, c) => s + c.total, 0);
-        const variableTotal = variableCats.reduce((s, c) => s + c.total, 0);
-        const grandTotal = fixedTotal + variableTotal;
-        const fixedPct = grandTotal > 0 ? (fixedTotal / grandTotal) * 100 : 0;
-        const variablePct = grandTotal > 0 ? (variableTotal / grandTotal) * 100 : 0;
-
-        fixedCats.sort((a, b) => b.total - a.total);
-        variableCats.sort((a, b) => b.total - a.total);
-
-        // Compute historical averages using allCategories + monthly data
-        const totalMonths = monthly.length || 1;
-        let histFixedTotal = 0;
-        let histVariableTotal = 0;
-        for (const ac of allCategories) {
-            const acExpType = ac.expense_type || 'variable';
-            if (acExpType === 'non_expense') continue;
-            if (acExpType === 'fixed') {
-                histFixedTotal += ac.total || 0;
-            } else {
-                histVariableTotal += ac.total || 0;
-            }
-        }
-        const avgFixed = histFixedTotal / totalMonths;
-        const avgVariable = histVariableTotal / totalMonths;
-        const fixedDeltaPct = avgFixed > 0 ? ((fixedTotal - avgFixed) / avgFixed) * 100 : 0;
-        const variableDeltaPct = avgVariable > 0 ? ((variableTotal - avgVariable) / avgVariable) * 100 : 0;
-
-        return {
-            fixedCats, variableCats,
-            fixedTotal, variableTotal,
-            fixedPct, variablePct, grandTotal,
-            avgFixed, avgVariable,
-            fixedDeltaPct, variableDeltaPct
-        };
-    })();
 
     /* ═══════════════════════════════════════
        S4: SAVINGS RATE TREND
@@ -629,7 +567,9 @@
         const sorted = analyticsContext.sortedMonthly;
 
         const points = sorted.map(m => {
-            const rate = m.income > 0 ? Math.max(((m.income - m.expenses) / m.income) * 100, 0) : 0;
+            // Accrual-basis: Net Flow = Income - Spending - External Transfers
+            const extTransfers = m.external_transfers || 0;
+            const rate = m.income > 0 ? Math.max(((m.income - m.expenses - extTransfers) / m.income) * 100, 0) : 0;
             return { month: m.month, rate: Math.min(rate, 100) };
         });
 
@@ -720,20 +660,21 @@
         if (monthly.length < 3) return null;
         const sorted = analyticsContext.sortedMonthly;
 
-        // Last 3 months rolling average
+        // Last 3 months rolling average (accrual-basis)
         const last3 = sorted.slice(-3);
         const avgIncome = last3.reduce((s, m) => s + m.income, 0) / last3.length;
         const avgExpenses = last3.reduce((s, m) => s + m.expenses, 0) / last3.length;
-        const avgNet = avgIncome - avgExpenses;
+        const avgExtTransfers = last3.reduce((s, m) => s + (m.external_transfers || 0), 0) / last3.length;
+        const avgNet = avgIncome - avgExpenses - avgExtTransfers;
 
         // Current year
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth(); // 0-indexed
         const remainingMonths = 12 - currentMonth - 1;
 
-        // YTD totals
+        // YTD totals (accrual-basis net)
         const ytdMonths = sorted.filter(m => m.month.startsWith(currentYear.toString()));
-        const ytdNet = ytdMonths.reduce((s, m) => s + m.net, 0);
+        const ytdNet = ytdMonths.reduce((s, m) => s + (m.income || 0) - (m.expenses || 0) + (m.refunds || 0) - (m.external_transfers || 0), 0);
 
         const projectedAdditional = avgNet * remainingMonths;
         const projectedTotal = ytdNet + projectedAdditional;
@@ -839,55 +780,21 @@
         if (totalPotential <= 0) return null;
 
         const annualized = totalPotential * 12;
+        const extTransfers = currentMonthSummary.external_transfers || 0;
         const currentSR = currentMonthSummary.income > 0
-            ? ((currentMonthSummary.income - currentMonthSummary.expenses) / currentMonthSummary.income) * 100
+            ? ((currentMonthSummary.income - currentMonthSummary.expenses - extTransfers) / currentMonthSummary.income) * 100
             : 0;
         const newSR = currentMonthSummary.income > 0
-            ? ((currentMonthSummary.income - currentMonthSummary.expenses + totalPotential) / currentMonthSummary.income) * 100
+            ? ((currentMonthSummary.income - currentMonthSummary.expenses - extTransfers + totalPotential) / currentMonthSummary.income) * 100
             : 0;
 
         return { totalPotential, annualized, suggestions, currentSR, newSR };
     })();
 
-    /* ═══════════════════════════════════════
+
+    /* ---------------------------------------
        DRILL-DOWN
-       ═══════════════════════════════════════ */
-    function startEditingExpenseType(categoryName) {
-        editingExpenseType = categoryName;
-    }
-
-    function cancelEditingExpenseType() {
-        editingExpenseType = null;
-    }
-
-    async function toggleExpenseType(categoryName, newType) {
-        try {
-            await api.updateExpenseType(categoryName, newType);
-
-            // Update local data immediately
-            const updateList = (list) => list.map(c =>
-                c.category === categoryName ? { ...c, expense_type: newType } : c
-            );
-            monthCategories = updateList(monthCategories);
-            allCategories = updateList(allCategories);
-
-            // Invalidate cache since classification changed
-            invalidateCache();
-
-            // Show feedback
-            expenseTypeFeedback = `${categoryName} → ${newType === 'fixed' ? 'Fixed' : 'Variable'}`;
-            setTimeout(() => { expenseTypeFeedback = ''; }, 3000);
-        } catch (e) {
-            console.error('Failed to update expense type:', e);
-            expenseTypeFeedback = 'Failed to update';
-            setTimeout(() => { expenseTypeFeedback = ''; }, 3000);
-        }
-        editingExpenseType = null;
-    }
-
-    /* âââââââââââââââââââââââââââââââââââââââ
-       DRILL-DOWN
-       âââââââââââââââââââââââââââââââââââââââ */
+       --------------------------------------- */
     function drillIntoCategory(cat) {
         selectedCategory = cat;
         categoryTransactions = monthTransactions
@@ -1111,7 +1018,6 @@
     function handleWindowClick() {
         if (monthPickerOpen) monthPickerOpen = false;
         if (selectedCategory) closeDrillDown();
-        if (editingExpenseType) cancelEditingExpenseType();
     }    
 </script>
 <svelte:window on:click={handleWindowClick} />
@@ -1133,15 +1039,8 @@
     </div>
 {:else}
 <div class="profile-transition" class:profile-loading={profileSwitching}>
-    <!-- Expense type feedback toast -->
-    {#if expenseTypeFeedback}
-        <div class="analytics-fv-toast fade-in">
-            <span class="material-symbols-outlined text-[16px]" style="color: var(--positive)">check_circle</span>
-            <span class="text-[12px] font-medium" style="color: var(--text-primary)">{expenseTypeFeedback}</span>
-        </div>
-    {/if}
 
-    <!-- âââ HEADER âââ -->
+    <!-- --- HEADER --- -->
     <div class="flex items-start justify-between mb-8 fade-in" style="position: relative; z-index: 100;">
         <div>
             <p class="text-[10px] font-bold tracking-[0.2em] uppercase mb-1.5" style="color: var(--accent)">Insights</p>
@@ -1157,13 +1056,14 @@
 <!-- ═══════════════════════════════════════
          S1: CASH FLOW WATERFALL (Hero)
          ═══════════════════════════════════════ -->
-    <!-- âââââââââââââââââââââââââââââââââââââââ
+    <!-----------------------------------------
          S0: HERO SUMMARY HEADLINE
-         âââââââââââââââââââââââââââââââââââââââ -->
+         ----------------------------------------->
     {#if currentMonthSummary}
         {@const allTimeAvgExpenses = monthly.length > 0 ? monthly.reduce((s, m) => s + m.expenses, 0) / monthly.length : 0}
         {@const expVsAvgPct = allTimeAvgExpenses > 0 ? ((currentMonthSummary.expenses - allTimeAvgExpenses) / allTimeAvgExpenses) * 100 : 0}
-        {@const currentSavingsRate = currentMonthSummary.income > 0 ? Math.max(((currentMonthSummary.income - currentMonthSummary.expenses) / currentMonthSummary.income) * 100, 0) : 0}
+        {@const extTransfers = currentMonthSummary.external_transfers || 0}
+        {@const currentSavingsRate = currentMonthSummary.income > 0 ? Math.max(((currentMonthSummary.income - currentMonthSummary.expenses - extTransfers) / currentMonthSummary.income) * 100, 0) : 0}
         <section class="mb-8 fade-in-up" style="animation-delay: 30ms">
             <div class="analytics-hero-strip">
                 <div class="analytics-hero-headline">
@@ -1358,15 +1258,21 @@
                 <!-- Summary ribbon -->
                 <div class="analytics-wf-summary">
                     <div class="analytics-wf-summary-item">
-                        <span class="analytics-wf-summary-label">In</span>
+                        <span class="analytics-wf-summary-label">Income</span>
                         <span class="analytics-wf-summary-value text-positive">+{formatCurrency(currentMonthSummary.income)}</span>
                     </div>
                     <div class="analytics-wf-summary-item">
-                        <span class="analytics-wf-summary-label">Out</span>
+                        <span class="analytics-wf-summary-label">Spending</span>
                         <span class="analytics-wf-summary-value text-negative">-{formatCurrency(currentMonthSummary.expenses)}</span>
                     </div>
+                    {#if (currentMonthSummary.external_transfers || 0) > 0}
+                        <div class="analytics-wf-summary-item">
+                            <span class="analytics-wf-summary-label">Ext. Transfers</span>
+                            <span class="analytics-wf-summary-value" style="color: var(--warning)">-{formatCurrency(currentMonthSummary.external_transfers)}</span>
+                        </div>
+                    {/if}
                     <div class="analytics-wf-summary-item">
-                        <span class="analytics-wf-summary-label">Net</span>
+                        <span class="analytics-wf-summary-label">Net Flow</span>
                         <span class="analytics-wf-summary-value" style="color: {waterfallData.netResult >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                             {waterfallData.netResult >= 0 ? '+' : ''}{formatCurrency(waterfallData.netResult)}
                         </span>
@@ -1427,137 +1333,6 @@
     {/if}
 
     <!-- ═══════════════════════════════════════
-         S3: FIXED vs VARIABLE
-         ═══════════════════════════════════════ -->
-    {#if fixedVsVariable && fixedVsVariable.grandTotal > 0}
-        <section class="mb-10 fade-in-up" style="animation-delay: 100ms">
-            <div class="flex items-center gap-2 mb-4">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Fixed vs Variable</p>
-            </div>
-
-            <div class="card" style="padding: 1.25rem 1.5rem">
-                <!-- Stacked bar -->
-                <div class="flex items-center gap-4 mb-4">
-                    <div class="flex-1">
-                        <div class="flex h-3 rounded-full overflow-hidden" style="background: var(--surface-200)">
-                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.fixedPct}%; background: var(--accent); border-radius: 8px 0 0 8px;"></div>
-                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.variablePct}%; background: var(--warning);"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="analytics-fv-split">
-                    <!-- Fixed side -->
-                    <div class="analytics-fv-column">
-                        <div class="flex items-center gap-2 mb-3">
-                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--accent)"></span>
-                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Fixed (Recurring)</span>
-                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--accent)">
-                                {formatCurrency(fixedVsVariable.fixedTotal)}
-                            </span>
-                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.fixedPct)}</span>
-                        </div>
-                        {#each fixedVsVariable.fixedCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row" on:click|stopPropagation>
-                                {#if editingExpenseType === cat.category}
-                                    <div class="analytics-fv-toggle-controls">
-                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
-                                        <div class="analytics-fv-toggle-btns">
-                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
-                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Fixed</button>
-                                            <button class="analytics-fv-toggle-btn"
-                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'variable')}>Variable</button>
-                                        </div>
-                                    </div>
-                                {:else}
-                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
-                                    </button>
-                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
-                                {/if}
-                            </div>
-                        {/each}
-                        {#if fixedVsVariable.fixedCats.length === 0}
-                            <p class="text-[10px]" style="color: var(--text-muted)">No fixed expenses detected</p>
-                        {/if}
-                    </div>
-
-                    <!-- Divider -->
-                    <div class="analytics-fv-divider"></div>
-
-                    <!-- Variable side -->
-                    <div class="analytics-fv-column">
-                        <div class="flex items-center gap-2 mb-3">
-                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--warning)"></span>
-                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Variable (Discretionary)</span>
-                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--warning)">
-                                {formatCurrency(fixedVsVariable.variableTotal)}
-                            </span>
-                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.variablePct)}</span>
-                        </div>
-                        {#each fixedVsVariable.variableCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row" on:click|stopPropagation>
-                                {#if editingExpenseType === cat.category}
-                                    <div class="analytics-fv-toggle-controls">
-                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
-                                        <div class="analytics-fv-toggle-btns">
-                                            <button class="analytics-fv-toggle-btn"
-                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'fixed')}>Fixed</button>
-                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
-                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Variable</button>
-                                        </div>
-                                    </div>
-                                {:else}
-                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
-                                    </button>
-                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
-                                {/if}
-                            </div>
-                        {/each}
-                    </div>
-                </div>
-
-                <!-- Temporal context -->
-                <div class="flex gap-4 mt-3 mb-2 px-1">
-                    <div class="flex items-center gap-2 flex-1">
-                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--accent)"></span>
-                        <span class="text-[11px]" style="color: var(--text-secondary)">
-                            Fixed: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.fixedTotal)}</span>
-                        </span>
-                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.fixedDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                            {fixedVsVariable.fixedDeltaPct > 0 ? '↑' : fixedVsVariable.fixedDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.fixedDeltaPct))} vs avg
-                        </span>
-                    </div>
-                    <div class="flex items-center gap-2 flex-1">
-                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--warning)"></span>
-                        <span class="text-[11px]" style="color: var(--text-secondary)">
-                            Variable: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.variableTotal)}</span>
-                        </span>
-                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.variableDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                            {fixedVsVariable.variableDeltaPct > 0 ? '↑' : fixedVsVariable.variableDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.variableDeltaPct))} vs avg
-                        </span>
-                    </div>
-                </div>
-
-                <!-- Insight footer -->
-                <div class="analytics-fv-insight">
-                    <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">lightbulb</span>
-                    <p class="text-[11px]" style="color: var(--text-secondary)">
-                        Your fixed costs are <span class="font-bold" style="color: var(--text-primary)">{formatPercent(fixedVsVariable.fixedPct)}</span> of spending.
-                        {#if fixedVsVariable.variablePct > 50}
-                            You have significant room to optimize discretionary spend.
-                        {:else}
-                            Most of your budget is committed, focus on renegotiating recurring costs.
-                        {/if}
-                    </p>
-                </div>
-            </div>
-        </section>
-    {/if}
-
-    <!-- ═══════════════════════════════════════
          TOP MERCHANTS
          ═══════════════════════════════════════ -->
     {#if topMerchants.length > 0}
@@ -1598,13 +1373,13 @@
     {/if}
 
     <!-- ═══════════════════════════════════════
-         RECURRING & SUBSCRIPTIONS
+         RECURRING SUBSCRIPTIONS
          ═══════════════════════════════════════ -->
     {#if recurringData && recurringData.items && recurringData.items.length > 0}
         <section class="mb-10 fade-in-up" style="animation-delay: 130ms">
             <div class="flex items-center gap-2 mb-1">
                 <div class="section-accent-bar"></div>
-                <p class="section-header">Recurring & Subscriptions</p>
+                <p class="section-header">Recurring Subscriptions</p>
                 {#if unreadEventCount > 0}
                     <span class="analytics-event-count-badge">{unreadEventCount}</span>
                 {/if}
@@ -2422,7 +2197,7 @@
             <table class="w-full">
                 <thead>
                     <tr style="border-bottom: 1px solid var(--card-border)">
-                        {#each ['Month', 'Income', 'Expenses', 'Savings', 'Net Flow'] as h}
+                        {#each ['Month', 'Income', 'Spending', 'Ext. Transfers', 'Net Flow'] as h}
                             <th class="text-left px-5 py-2.5 text-[9px] font-bold uppercase tracking-wider"
                                 style="color: var(--text-muted)">{h}</th>
                         {/each}
@@ -2430,6 +2205,7 @@
                 </thead>
                 <tbody>
                     {#each [...monthly].sort((a,b) => b.month.localeCompare(a.month)) as m}
+                        {@const accrualNet = (m.income || 0) - (m.expenses || 0) + (m.refunds || 0) - (m.external_transfers || 0)}
                         <tr class="transition-colors cursor-pointer" style="border-bottom: 1px solid var(--card-border)"
                             on:click={() => { selectedMonth = m.month; }}>
                             <td class="px-5 py-2.5 text-[12px] font-medium" style="color: var(--text-primary)">
@@ -2440,10 +2216,10 @@
                             </td>
                             <td class="px-5 py-2.5 text-[12px] font-mono text-positive">{formatCurrency(m.income)}</td>
                             <td class="px-5 py-2.5 text-[12px] font-mono text-negative">{formatCurrency(m.expenses)}</td>
-                            <td class="px-5 py-2.5 text-[12px] font-mono" style="color: var(--accent)">{formatCurrency(m.savings)}</td>
+                            <td class="px-5 py-2.5 text-[12px] font-mono" style="color: {(m.external_transfers || 0) > 0 ? 'var(--warning)' : 'var(--text-muted)'}">{formatCurrency(m.external_transfers || 0)}</td>
                             <td class="px-5 py-2.5 text-[12px] font-bold font-mono"
-                                style="color: {m.net >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                {m.net >= 0 ? '+' : ''}{formatCurrency(m.net)}
+                                style="color: {accrualNet >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                                {accrualNet >= 0 ? '+' : ''}{formatCurrency(accrualNet)}
                             </td>
                         </tr>
                     {/each}

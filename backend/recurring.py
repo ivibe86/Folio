@@ -971,6 +971,10 @@ class RecurringDetector:
             desc_upper = (t.get("description") or "").upper()
             if any(token in desc_upper for token in self._DISQUALIFY_TOKENS):
                 continue
+            # Skip internal transfers — recurring savings transfers etc.
+            # should not be detected as subscriptions.
+            if t.get("expense_type") == "transfer_internal":
+                continue
             expense_txns.append(t)
 
         recurring: list[dict] = []

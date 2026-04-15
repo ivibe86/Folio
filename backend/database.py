@@ -119,9 +119,10 @@ def init_db():
         conn.executescript(SCHEMA_SQL)
         _migrate_expense_type(conn)
         _migrate_merchants_table(conn)
+        _migrate_transaction_expense_type(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
-        _seed_teller_category_map(conn)        
+        _seed_teller_category_map(conn)          
 
 
 def _migrate_expense_type(conn: sqlite3.Connection):
@@ -168,6 +169,17 @@ def _migrate_merchants_table(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_at TEXT")
     if "cancelled_by_user" not in cols:
         conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_by_user INTEGER DEFAULT 0")
+        
+def _migrate_transaction_expense_type(conn: sqlite3.Connection):
+    """
+    Ensure transactions table has an expense_type column for transfer
+    sub-classification (transfer_internal, transfer_household, transfer_external).
+    Idempotent — safe to call on every startup.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "expense_type" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN expense_type TEXT DEFAULT NULL")
+        logger.info("Added expense_type column to transactions table.")        
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -231,6 +243,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     enriched                INTEGER DEFAULT 0,
     confidence              TEXT DEFAULT '',
     is_excluded             INTEGER DEFAULT 0,
+    expense_type            TEXT DEFAULT NULL,
     created_at              TEXT DEFAULT (datetime('now')),
     updated_at              TEXT
 );

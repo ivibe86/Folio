@@ -12,8 +12,9 @@
     import { darkMode, syncing, selectedPeriodStore, selectedCustomMonthStore, privacyMode } from '$lib/stores.js';
     import { profiles, activeProfile } from '$lib/stores/profileStore.js';
     import SankeyChart from '$lib/components/SankeyChart.svelte';
+    import IncomeVsSpendingChart from '$lib/components/IncomeVsSpendingChart.svelte';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
-    import TellerConnect from '$lib/components/TellerConnect.svelte';    
+    import TellerConnect from '$lib/components/TellerConnect.svelte';  
 
     export let data;
     // Accept (and ignore) the 'params' prop that SvelteKit may pass to pages
@@ -48,6 +49,8 @@
     let periodSummary = null;
     let periodCategories = [];
     let sankeyCategoryList = [];
+    let periodCcRepaid = 0;
+    let periodExternalTransfers = 0;
 
     // Sankey: separated flows
     let sankeySavingsTotal = 0;
@@ -96,10 +99,6 @@
     // Hover tooltip for net worth chart
     let hoverPoint = null;
 
-    // Hover tooltip for monthly net bar chart
-    let hoveredBarIdx = -1;
-    let hoveredBar = null;
-
     // Trailing savings rate
     let trailingSavingsInfo = { rate: 0, delta: 0, months: 0 };
 
@@ -108,6 +107,17 @@
 
     // Categories to exclude from expenses (flow directly from income)
     const DIRECT_FLOW_CATEGORIES = ['Savings Transfer', 'Personal Transfer'];
+
+
+    // Transfer sub-types for Sankey filtering
+    const TRANSFER_INTERNAL = 'transfer_internal';
+    const TRANSFER_HOUSEHOLD = 'transfer_household';
+    const TRANSFER_EXTERNAL = 'transfer_external';
+
+    // Fixed vs Variable spending
+    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    let editingExpenseType = null;
+    let expenseTypeFeedback = '';
 
     // Sankey theater mouse-tracking glow
     let sankeyTheaterEl = null;
@@ -178,13 +188,19 @@
         }
     }
 
-    // ── Seed derived state from load() data ──────────────────────
+    // ââ Seed derived state from load() data ââââââââââââââââââââââ
+    let bundleSavingsTransferTotal = data.savingsTransferTotal || 0;
+    let bundlePersonalTransferTotal = data.personalTransferTotal || 0;
+    let bundleCcRepaid = data.ccRepaid || 0;
+    let bundleExternalTransfers = data.externalTransfers || 0;
+    let monthlyCategoryBreakdown = data.monthlyCategoryBreakdown || [];
     {
         allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
         if (allMonths.length > 0) selectedCustomMonth = allMonths[0];
+        monthlyCategoryBreakdown = data.monthlyCategoryBreakdown || [];
 
         // Net worth trend: use pre-fetched real balance history from load().
-        // No more cumulative monthly-net fallback — that produced a visually
+        // No more cumulative monthly-net fallback â that produced a visually
         // incorrect chart shape (the "ghost chart" on initial load).
         netWorthTrendData = (Array.isArray(data.netWorthSeries) && data.netWorthSeries.length >= 2)
             ? data.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
@@ -253,6 +269,11 @@
             accounts = bundle.accounts;
             monthly = bundle.monthly;
             categories = bundle.categories;
+            bundleSavingsTransferTotal = bundle.savingsTransferTotal || 0;
+            bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
+            bundleCcRepaid = bundle.ccRepaid || 0;
+            bundleExternalTransfers = bundle.externalTransfers || 0;
+            monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -319,6 +340,11 @@
                     accounts = bundle.accounts;
                     monthly = bundle.monthly;
                     categories = bundle.categories;
+                    bundleSavingsTransferTotal = bundle.savingsTransferTotal || 0;
+                    bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
+                    bundleCcRepaid = bundle.ccRepaid || 0;
+                    bundleExternalTransfers = bundle.externalTransfers || 0;
+                    monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
                     netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                         ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                         : [];
@@ -432,42 +458,29 @@
         // The default period is 'this_month', so compute for current month
         const targetMonth = getMonthForPeriod(selectedPeriod);
 
-        // Extract savings + personal transfer totals from bundle categories
-        const savCat = categories.find(c => c.category === 'Savings Transfer');
-        const ptCat = categories.find(c => c.category === 'Personal Transfer');
-
-        // For 'this_month' or any single-month period, we need month-specific
-        // data. The bundle categories are all-time. But we have monthly data
-        // from the bundle too, so we can estimate.
-        //
-        // The most accurate fast path: use all-time categories (which match
-        // "all" period) or the monthly income from the bundle for the target month.
-        // For the initial load, we use the all-time categories as a close
-        // approximation and let the user's period selection trigger a precise
-        // refresh if they switch.
-
+        // Use backend-provided transfer totals (expense_type-aware)
         let inc = 0;
         if (selectedPeriod === 'all') {
             inc = summary?.income || 0;
             periodCategories = categories;
-            sankeySavingsTotal = savCat?.total || 0;
-            sankeyPersonalTransferTotal = ptCat?.total || 0;
+            sankeySavingsTotal = bundleSavingsTransferTotal;
+            sankeyPersonalTransferTotal = bundlePersonalTransferTotal;
         } else if (selectedPeriod === 'ytd') {
             const year = new Date().getFullYear().toString();
             const ytdMonths = monthly.filter(m => m.month.startsWith(year));
             inc = ytdMonths.reduce((s, m) => s + m.income, 0);
             periodCategories = categories;
-            sankeySavingsTotal = savCat?.total || 0;
-            sankeyPersonalTransferTotal = ptCat?.total || 0;
+            sankeySavingsTotal = bundleSavingsTransferTotal;
+            sankeyPersonalTransferTotal = bundlePersonalTransferTotal;
         } else {
-            // this_month, last_month, custom — use monthly data from bundle
+            // this_month, last_month, custom â use monthly data from bundle
             const m = monthly.find(m => m.month === targetMonth);
             inc = m ? m.income : 0;
             // For single-month, we don't have month-specific categories from
             // the bundle (it's all-time). Fire a lightweight background refresh.
             periodCategories = categories;
-            sankeySavingsTotal = savCat?.total || 0;
-            sankeyPersonalTransferTotal = ptCat?.total || 0;
+            sankeySavingsTotal = bundleSavingsTransferTotal;
+            sankeyPersonalTransferTotal = bundlePersonalTransferTotal;
 
             // Kick off the precise month-specific fetch in the background
             // so the Sankey updates within ~200ms without blocking first paint.
@@ -475,7 +488,10 @@
         }
 
         sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
+        // Use bundle-level CC repaid and external transfers for initial period
+        periodCcRepaid = bundleCcRepaid;
+        periodExternalTransfers = bundleExternalTransfers;
+        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
         periodLoading = false;
     }
 
@@ -485,16 +501,24 @@
      */
     async function updatePeriodBackground(targetMonth, income) {
         try {
-            const [cats, savTotal, ptTotal] = await Promise.all([
-                api.getCategoryAnalytics(targetMonth).catch(() => periodCategories),
-                fetchCategoryTransferTotal(targetMonth, 'Savings Transfer'),
-                fetchCategoryTransferTotal(targetMonth, 'Personal Transfer')
-            ]);
-            periodCategories = cats;
-            sankeySavingsTotal = savTotal;
-            sankeyPersonalTransferTotal = ptTotal;
+            const catResult = await api.getCategoryAnalytics(targetMonth).catch(() => ({
+                categories: periodCategories,
+                savings_transfer_total: sankeySavingsTotal,
+                personal_transfer_total: sankeyPersonalTransferTotal
+            }));
+            if (Array.isArray(catResult)) {
+                periodCategories = catResult;
+            } else {
+                periodCategories = catResult.categories || periodCategories;
+                sankeySavingsTotal = catResult.savings_transfer_total || 0;
+                sankeyPersonalTransferTotal = catResult.personal_transfer_total || 0;
+            }
+            // Fetch month-specific CC repaid and external transfers from monthly data
+            const monthData = monthly.find(m => m.month === targetMonth);
+            periodCcRepaid = monthData?.cc_repaid || 0;
+            periodExternalTransfers = monthData?.external_transfers || 0;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
+            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
         } catch (_) {}
     }
 
@@ -602,22 +626,6 @@
         }
     }
 
-    async function fetchCategoryTransferTotal(monthOrMonths, categoryName) {
-        try {
-            let txns = [];
-            if (Array.isArray(monthOrMonths)) {
-                const results = await Promise.all(monthOrMonths.map(m => api.getTransactions({ month: m, category: categoryName, limit: 1000 }).then(r => r.data)));
-                txns = results.flat();
-            } else if (monthOrMonths) {
-                txns = (await api.getTransactions({ month: monthOrMonths, category: categoryName, limit: 1000 })).data;
-            } else {
-                txns = (await api.getTransactions({ category: categoryName, limit: 1000 })).data;
-            }
-            const outflowTxns = txns.filter(t => parseFloat(t.amount) < 0);
-            return Math.round(outflowTxns.reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0) * 100) / 100;
-        } catch (e) { return 0; }
-    }
-
     function buildSankeyCategoryList(cats, savingsTotal, personalTransferTotal) {
         const expenseCats = cats.filter(c => !DIRECT_FLOW_CATEGORIES.includes(c.category));
         const expenseTotal = expenseCats.reduce((s, c) => s + (c.total || 0), 0);
@@ -631,22 +639,31 @@
             combined.push({ category: 'Savings Transfer', total: savingsTotal, percent: 0, isDirectFlow: true });
         }
         if (personalTransferTotal > 0) {
-            combined.push({ category: 'Personal Transfer', total: personalTransferTotal, percent: 0, isDirectFlow: true });
+            combined.push({
+                category: 'Personal Transfer',
+                total: personalTransferTotal,
+                percent: 0,
+                isDirectFlow: true
+            });
         }
 
         combined.sort((a, b) => b.total - a.total);
         return combined;
     }
 
-    function buildPeriodSummary(income, cats, savingsTotal, personalTransferTotal) {
+    function buildPeriodSummary(income, cats, savingsTotal, personalTransferTotal, ccRepaid = 0, externalTransfers = 0) {
         const expenseCats = (cats || []).filter(c => !DIRECT_FLOW_CATEGORIES.includes(c.category));
         const expenses = expenseCats.reduce((s, c) => s + (c.total || 0), 0);
-        const netFlow = income - expenses - savingsTotal - personalTransferTotal;
+        // Accrual-basis Net Flow: Income - Spending - External Transfers
+        // CC payments and internal transfers are excluded
+        const netFlow = income - expenses - externalTransfers;
         const savings = Math.max(income - expenses, 0);
         return {
             income, expenses, savings,
             savingsTransfer: savingsTotal,
             personalTransfer: personalTransferTotal,
+            cc_repaid: ccRepaid,
+            external_transfers: externalTransfers,
             net_flow: netFlow,
             savings_rate: sanitizeSavingsRate(income, expenses, savings)
         };
@@ -664,53 +681,78 @@
         if (selectedPeriod === 'all') {
             const inc = summary?.income || 0;
             try {
-                const [cats, savTotal, ptTotal] = await Promise.all([
-                    api.getCategoryAnalytics().catch(() => categories),
-                    fetchCategoryTransferTotal(null, 'Savings Transfer'),
-                    fetchCategoryTransferTotal(null, 'Personal Transfer')
-                ]);
-                periodCategories = cats;
-                sankeySavingsTotal = savTotal;
-                sankeyPersonalTransferTotal = ptTotal;
+                const catResult = await api.getCategoryAnalytics().catch(() => ({
+                    categories: categories,
+                    savings_transfer_total: 0,
+                    personal_transfer_total: 0
+                }));
+                if (Array.isArray(catResult)) {
+                    periodCategories = catResult;
+                    sankeySavingsTotal = 0;
+                    sankeyPersonalTransferTotal = 0;
+                } else {
+                    periodCategories = catResult.categories || categories;
+                    sankeySavingsTotal = catResult.savings_transfer_total || 0;
+                    sankeyPersonalTransferTotal = catResult.personal_transfer_total || 0;
+                }
             } catch (e) { periodCategories = categories; sankeySavingsTotal = 0; sankeyPersonalTransferTotal = 0; }
+            periodCcRepaid = summary?.cc_repaid || bundleCcRepaid;
+            periodExternalTransfers = summary?.external_transfers || bundleExternalTransfers;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
         } else if (selectedPeriod === 'ytd') {
             const year = new Date().getFullYear().toString();
             const ytdMonths = monthly.filter(m => m.month.startsWith(year));
             const inc = ytdMonths.reduce((s, m) => s + m.income, 0);
             const ytdMonthKeys = ytdMonths.map(m => m.month);
             try {
-                const [cats, savTotal, ptTotal] = await Promise.all([
-                    fetchAggregatedCategories(ytdMonthKeys).catch(() => categories),
-                    fetchCategoryTransferTotal(ytdMonthKeys, 'Savings Transfer'),
-                    fetchCategoryTransferTotal(ytdMonthKeys, 'Personal Transfer')
-                ]);
-                periodCategories = cats;
-                sankeySavingsTotal = savTotal;
-                sankeyPersonalTransferTotal = ptTotal;
+                const aggResult = await fetchAggregatedCategories(ytdMonthKeys).catch(() => ({
+                    categories: categories,
+                    savings_transfer_total: 0,
+                    personal_transfer_total: 0
+                }));
+                if (Array.isArray(aggResult)) {
+                    periodCategories = aggResult;
+                    sankeySavingsTotal = 0;
+                    sankeyPersonalTransferTotal = 0;
+                } else {
+                    periodCategories = aggResult.categories || categories;
+                    sankeySavingsTotal = aggResult.savings_transfer_total || 0;
+                    sankeyPersonalTransferTotal = aggResult.personal_transfer_total || 0;
+                }
             } catch (e) { periodCategories = categories; sankeySavingsTotal = 0; sankeyPersonalTransferTotal = 0; }
+            periodCcRepaid = ytdMonths.reduce((s, m) => s + (m.cc_repaid || 0), 0);
+            periodExternalTransfers = ytdMonths.reduce((s, m) => s + (m.external_transfers || 0), 0);
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
         } else {
             const targetMonth = getMonthForPeriod(selectedPeriod);
             if (targetMonth) {
                 const m = monthly.find(m => m.month === targetMonth);
                     const inc = m ? m.income : 0;
                     try {
-                        const [cats, savTotal, ptTotal] = await Promise.all([
-                            api.getCategoryAnalytics(targetMonth).catch(() => []),
-                            fetchCategoryTransferTotal(targetMonth, 'Savings Transfer'),
-                            fetchCategoryTransferTotal(targetMonth, 'Personal Transfer')
-                        ]);
-                        periodCategories = cats;
-                        sankeySavingsTotal = savTotal;
-                        sankeyPersonalTransferTotal = ptTotal;
+                        const catResult = await api.getCategoryAnalytics(targetMonth).catch(() => ({
+                            categories: [],
+                            savings_transfer_total: 0,
+                            personal_transfer_total: 0
+                        }));
+                        if (Array.isArray(catResult)) {
+                            periodCategories = catResult;
+                            sankeySavingsTotal = 0;
+                            sankeyPersonalTransferTotal = 0;
+                        } else {
+                            periodCategories = catResult.categories || [];
+                            sankeySavingsTotal = catResult.savings_transfer_total || 0;
+                            sankeyPersonalTransferTotal = catResult.personal_transfer_total || 0;
+                        }
                     } catch (e) { periodCategories = []; sankeySavingsTotal = 0; sankeyPersonalTransferTotal = 0; }
+                    const monthData = monthly.find(m => m.month === targetMonth);
+                    periodCcRepaid = monthData?.cc_repaid || 0;
+                    periodExternalTransfers = monthData?.external_transfers || 0;
                     sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
+                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
             } else {
-                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, net_flow: 0, savings_rate: 0 };
+                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, cc_repaid: 0, external_transfers: 0, net_flow: 0, savings_rate: 0 };
                 periodCategories = [];
                 sankeyCategoryList = [];
                 sankeySavingsTotal = 0;
@@ -729,17 +771,30 @@
     }
 
     async function fetchAggregatedCategories(monthList) {
-        if (!monthList || monthList.length === 0) return [];
+        if (!monthList || monthList.length === 0) return {
+            categories: [],
+            savings_transfer_total: 0,
+            personal_transfer_total: 0
+        };
         const results = await Promise.all(monthList.map(m => api.getCategoryAnalytics(m)));
         const merged = {};
-        for (const monthCats of results) {
-            for (const cat of (monthCats || [])) {
+        let savTotal = 0;
+        let ptTotal = 0;
+        for (const res of results) {
+            const cats = Array.isArray(res) ? res : (res.categories || []);
+            savTotal += (res.savings_transfer_total || 0);
+            ptTotal += (res.personal_transfer_total || 0);
+            for (const cat of (cats || [])) {
                 merged[cat.category] = (merged[cat.category] || 0) + (cat.total || 0);
             }
         }
         const entries = Object.entries(merged).map(([category, total]) => ({ category, total }));
         const grandTotal = entries.reduce((s, e) => s + e.total, 0) || 1;
-        return entries.map(e => ({ ...e, percent: (e.total / grandTotal) * 100 })).sort((a, b) => b.total - a.total);
+        return {
+            categories: entries.map(e => ({ ...e, percent: (e.total / grandTotal) * 100 })).sort((a, b) => b.total - a.total),
+            savings_transfer_total: savTotal,
+            personal_transfer_total: ptTotal
+        };
     }
 
     function sanitizeSavingsRate(income, expenses, savings) {
@@ -781,6 +836,11 @@
             accounts = bundle.accounts;
             monthly = bundle.monthly;
             categories = bundle.categories;
+            bundleSavingsTransferTotal = bundle.savingsTransferTotal || 0;
+            bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
+            bundleCcRepaid = bundle.ccRepaid || 0;
+            bundleExternalTransfers = bundle.externalTransfers || 0;
+            monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -1243,98 +1303,65 @@
         if (drillCatDropdownOpenForTx) {
             cancelDrillEditing();
         }
-    }
-
-    // ══════════════════════════════════════════
-    // S4: MONTHLY NET SURPLUS/DEFICIT (Plotly)
-    // ══════════════════════════════════════════
-
-    // Computed stats for the monthly net section
-    $: monthlyNetStats = (() => {
-        if (!monthly || monthly.length === 0) return null;
-        const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
-        const nets = sorted.map(m => m.net);
-        const surplusMonths = nets.filter(n => n >= 0);
-        const deficitMonths = nets.filter(n => n < 0);
-        const totalIncome = sorted.reduce((s, m) => s + m.income, 0);
-        const totalExpenses = sorted.reduce((s, m) => s + m.expenses, 0);
-        const totalNet = totalIncome - totalExpenses;
-        const effectiveSaveRate = totalIncome > 0 ? Math.max((totalNet / totalIncome) * 100, 0) : 0;
-        const avgNet = nets.length > 0 ? nets.reduce((s, n) => s + n, 0) / nets.length : 0;
-
-        return {
-            surplusCount: surplusMonths.length,
-            deficitCount: deficitMonths.length,
-            totalMonths: nets.length,
-            avgSurplus: surplusMonths.length > 0 ? surplusMonths.reduce((s, n) => s + n, 0) / surplusMonths.length : 0,
-            avgDeficit: deficitMonths.length > 0 ? deficitMonths.reduce((s, n) => s + n, 0) / deficitMonths.length : 0,
-            effectiveSaveRate: Math.min(effectiveSaveRate, 100),
-            avgNet
-        };
-    })();
-
-    // ── Monthly Net SVG Bar Chart (replaces Plotly) ──────────────
-    let prevMonthlyRef = null;
-    let monthlyNetSVG = null;
-
-    $: {
-        if (monthly !== prevMonthlyRef) {
-            prevMonthlyRef = monthly;
-            monthlyNetSVG = (() => {
-                if (!monthly || monthly.length === 0) return null;
-
-                const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
-                const labels = sorted.map(m => {
-                    const [y, mo] = m.month.split('-');
-                    const d = new Date(parseInt(y), parseInt(mo) - 1);
-                    return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-                });
-                const vals = sorted.map(m => m.net);
-                const avg = vals.reduce((a, b) => a + b, 0) / (vals.length || 1);
-                const maxAbs = Math.max(...vals.map(Math.abs), Math.abs(avg)) * 1.15 || 1;
-
-                const W = 720, H = 280;
-                const pad = { top: 24, right: 16, bottom: 40, left: 60 };
-                const plotW = W - pad.left - pad.right;
-                const plotH = H - pad.top - pad.bottom;
-
-                const barGap = 0.3;
-                const step = plotW / vals.length;
-                const barW = step * (1 - barGap);
-
-                const yScale = (v) => pad.top + plotH / 2 - (v / maxAbs) * (plotH / 2);
-                const zeroY = yScale(0);
-
-                // Y-axis ticks
-                const tickCount = 5;
-                const yTicks = Array.from({ length: tickCount }, (_, i) => {
-                    const v = maxAbs - (2 * maxAbs * i) / (tickCount - 1);
-                    return { value: v, y: yScale(v) };
-                });
-
-                // Bars
-                const bars = vals.map((v, i) => {
-                    const isLast = i === vals.length - 1;
-                    return {
-                        x: pad.left + i * step + (step - barW) / 2,
-                        y: v >= 0 ? yScale(v) : zeroY,
-                        w: barW,
-                        h: Math.max(Math.abs(yScale(v) - zeroY), 1),
-                        fill: v >= 0 ? 'rgba(13, 150, 104,' : 'rgba(220, 53, 69,',
-                        opacity: isLast ? 0.95 : 0.65,
-                        isLast,
-                        strokeColor: isLast ? (v >= 0 ? 'rgba(13, 150, 104, 1)' : 'rgba(220, 53, 69, 1)') : 'transparent',
-                        value: v,
-                        label: labels[i]
-                    };
-                });
-
-                const avgY = yScale(avg);
-
-                return { W, H, pad, bars, yTicks, zeroY, avgY, avg, labels, step, barW };
-            })();
+        if (editingExpenseType) {
+            cancelEditingExpenseType();
         }
     }
+
+    // ══════════════════════════════════════════
+    // S4: INCOME vs SPENDING (Luminous Overlap)
+    // ══════════════════════════════════════════
+    // Shared last-12-month data used by both ivsStats and the 5th stat card
+    $: ivsChartData = (() => {
+        if (!monthly || monthly.length === 0) return [];
+        const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
+        const last12 = sorted.slice(-12);
+        return last12.map(m => {
+            const netExp = (m.expenses || 0) - (m.refunds || 0);
+            return {
+                month: m.month,
+                income: m.income || 0,
+                spending: Math.max(netExp, 0),
+                net: (m.income || 0) - netExp,
+            };
+        });
+    })();
+
+    $: ivsStats = (() => {
+        if (ivsChartData.length < 2) return null;
+        const months = ivsChartData;
+
+        const totalIncome = months.reduce((s, m) => s + m.income, 0);
+        const totalSpending = months.reduce((s, m) => s + m.spending, 0);
+        const avgIncome = totalIncome / months.length;
+        const avgSpending = totalSpending / months.length;
+        const avgNet = avgIncome - avgSpending;
+
+        const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
+        const last12 = sorted.slice(-12);
+
+        const highestSpendMonth = last12.reduce((best, m) => {
+            const netExp = (m.expenses || 0) - (m.refunds || 0);
+            return netExp > (best.val || 0) ? { month: m.month, val: netExp } : best;
+        }, { month: '', val: 0 });
+
+        const bestSavingsMonth = last12.reduce((best, m) => {
+            const netExp = (m.expenses || 0) - (m.refunds || 0);
+            const net = (m.income || 0) - netExp;
+            return net > (best.val || -Infinity) ? { month: m.month, val: net } : best;
+        }, { month: '', val: -Infinity });
+
+        return {
+            avgIncome,
+            avgSpending,
+            avgNet,
+            highestSpendMonth: highestSpendMonth.month,
+            highestSpendVal: highestSpendMonth.val,
+            bestSavingsMonth: bestSavingsMonth.month,
+            bestSavingsVal: bestSavingsMonth.val,
+            monthCount: months.length,
+        };
+    })();
 
     // ══════════════════════════════════════════
     // S5a: YoY SAME-PERIOD COMPARISON
@@ -1404,6 +1431,118 @@
         return { yearStats, maxVal, delta };
     })();
 
+
+    /* ── YTD net-worth delta (derived from netWorthTrendData) ── */
+    $: ytdDelta = (() => {
+        if (!Array.isArray(netWorthTrendData) || netWorthTrendData.length === 0) return null;
+        const now = new Date();
+        const startOfYear = `${now.getFullYear()}-01`;
+        let janValue = null;
+        let latestValue = null;
+        for (const pt of netWorthTrendData) {
+            const month = pt.month || pt.date || '';
+            if (janValue === null && month >= startOfYear) {
+                janValue = pt.value ?? 0;
+            }
+            latestValue = pt.value ?? 0;
+        }
+        if (janValue === null || latestValue === null) return null;
+        return latestValue - janValue;
+    })();
+
+    /* ── Fixed vs. Variable spending breakdown ── */
+    $: fixedVsVariable = (() => {
+        const cats = periodCategories || [];
+        if (!cats.length) return null;
+        const fixedCats = [];
+        const variableCats = [];
+
+        for (const cat of cats) {
+            if (NON_SPENDING_CATEGORIES_SET.has(cat.category)) continue;
+            const expType = cat.expense_type || 'variable';
+            if (expType === 'non_expense') continue;
+            if (expType === 'fixed') {
+                fixedCats.push(cat);
+            } else {
+                variableCats.push(cat);
+            }
+        }
+
+        // External transfers are real outflows — add as variable
+        const extTransfers = periodSummary?.external_transfers || 0;
+        if (extTransfers > 0) {
+            variableCats.push({
+                category: 'Ext. Transfers',
+                total: extTransfers,
+                expense_type: 'variable'
+            });
+        }
+
+        const fixedTotal = fixedCats.reduce((s, c) => s + c.total, 0);
+        const variableTotal = variableCats.reduce((s, c) => s + c.total, 0);
+        const grandTotal = fixedTotal + variableTotal;
+        const fixedPct = grandTotal > 0 ? (fixedTotal / grandTotal) * 100 : 0;
+        const variablePct = grandTotal > 0 ? (variableTotal / grandTotal) * 100 : 0;
+
+        fixedCats.sort((a, b) => b.total - a.total);
+        variableCats.sort((a, b) => b.total - a.total);
+
+        // Historical averages
+        const totalMonths = monthly.length || 1;
+        let histFixedTotal = 0;
+        let histVariableTotal = 0;
+        const histExtTransfers = monthly.reduce((s, m) => s + (m.external_transfers || 0), 0);
+        histVariableTotal += histExtTransfers;
+        for (const ac of categories) {
+            if (NON_SPENDING_CATEGORIES_SET.has(ac.category)) continue;
+            const acExpType = ac.expense_type || 'variable';
+            if (acExpType === 'non_expense') continue;
+            if (acExpType === 'fixed') {
+                histFixedTotal += ac.total || 0;
+            } else {
+                histVariableTotal += ac.total || 0;
+            }
+        }
+        const avgFixed = histFixedTotal / totalMonths;
+        const avgVariable = histVariableTotal / totalMonths;
+        const fixedDeltaPct = avgFixed > 0 ? ((fixedTotal - avgFixed) / avgFixed) * 100 : 0;
+        const variableDeltaPct = avgVariable > 0 ? ((variableTotal - avgVariable) / avgVariable) * 100 : 0;
+
+        return {
+            fixedCats, variableCats,
+            fixedTotal, variableTotal,
+            fixedPct, variablePct, grandTotal,
+            avgFixed, avgVariable,
+            fixedDeltaPct, variableDeltaPct
+        };
+    })();
+
+    function startEditingExpenseType(categoryName) {
+        editingExpenseType = categoryName;
+    }
+
+    function cancelEditingExpenseType() {
+        editingExpenseType = null;
+    }
+
+    async function toggleExpenseType(categoryName, newType) {
+        try {
+            await api.updateExpenseType(categoryName, newType);
+            const updateList = (list) => list.map(c =>
+                c.category === categoryName ? { ...c, expense_type: newType } : c
+            );
+            periodCategories = updateList(periodCategories);
+            categories = updateList(categories);
+            invalidateCache();
+            expenseTypeFeedback = `${categoryName} → ${newType === 'fixed' ? 'Fixed' : 'Variable'}`;
+            setTimeout(() => { expenseTypeFeedback = ''; }, 3000);
+        } catch (e) {
+            console.error('Failed to update expense type:', e);
+            expenseTypeFeedback = 'Failed to update';
+            setTimeout(() => { expenseTypeFeedback = ''; }, 3000);
+        }
+        editingExpenseType = null;
+    }
     // ══════════════════════════════════════════
     // S5b: NET WORTH TRAJECTORY (Plotly)
     // ══════════════════════════════════════════
@@ -1528,11 +1667,6 @@
         <div>
             <div class="skeleton h-3 w-28 mb-3" style="border-radius: 6px;"></div>
             <div class="skeleton-chart-block skeleton-sankey rounded-2xl"></div>
-        </div>
-        <!-- Monthly net bar chart skeleton -->
-        <div>
-            <div class="skeleton h-3 w-44 mb-3" style="border-radius: 6px;"></div>
-            <div class="skeleton-chart-block skeleton-bar-chart rounded-2xl"></div>
         </div>
         <!-- Two-panel row skeleton -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1670,13 +1804,25 @@
 
                 <div class="flex items-center justify-between mb-1">
                     <p class="text-[10px] font-bold tracking-[0.18em] uppercase" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">Net Worth</p>
-                    {#if netWorthDelta !== null}
-                        <span class="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-lg"
-                            style="background: {netWorthDelta >= 0 ? 'rgba(52,211,153,0.18)' : 'rgba(248,113,113,0.18)'}; color: {netWorthDelta >= 0 ? '#34d399' : '#f87171'}">
-                            {netWorthDelta >= 0 ? '▲' : '▼'} {(void privacyKey, formatCurrency(Math.abs(netWorthDelta)))}
-                        </span>
-                    {/if}
+                    <div style="display:flex; align-items:center; gap:0;">
+                        {#if netWorthDelta !== null}
+                            <span class="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-lg"
+                                style="background: {netWorthDelta >= 0 ? 'rgba(52,211,153,0.18)' : 'rgba(248,113,113,0.18)'}; color: {netWorthDelta >= 0 ? '#34d399' : '#f87171'}">
+                                {netWorthDelta >= 0 ? '▲' : '▼'} {(void privacyKey, formatCurrency(Math.abs(netWorthDelta)))}
+                                <span style="font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; opacity:0.7; margin-left:0.25rem;">MoM</span>
+                            </span>
+                        {/if}
+                        {#if ytdDelta !== null}
+                            <span class="hero-delta-separator"></span>
+                            <span class="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-lg"
+                                style="background: {ytdDelta >= 0 ? 'rgba(52,211,153,0.18)' : 'rgba(248,113,113,0.18)'}; color: {ytdDelta >= 0 ? '#34d399' : '#f87171'}">
+                                {ytdDelta >= 0 ? '▲' : '▼'} {(void privacyKey, formatCurrency(Math.abs(ytdDelta)))}
+                                <span style="font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; opacity:0.7; margin-left:0.25rem;">YTD</span>
+                            </span>
+                        {/if}
+                    </div>
                 </div>
+                                
                 <p class="text-[2.5rem] md:text-[2.75rem] font-extrabold font-display mt-0 mb-2 tracking-tight leading-none"
                    style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}; opacity: {animationStarted ? 1 : 0}; transition: opacity 0.2s ease-out;">
                     {formatCurrency(animationDone ? netWorth : animatedNetWorth)}
@@ -1861,7 +2007,7 @@
                     {/if}
                 </div>
                 <div class="metric-ribbon-item">
-                    <span class="metric-ribbon-label">Expenses</span>
+                    <span class="metric-ribbon-label">Spending</span>
                     <span class="metric-ribbon-value text-negative">
                         {formatCurrency(animationStarted ? (animationDone ? periodSummary.expenses : animatedExpenses) : (periodSummary?.expenses ?? 0))}
                     </span>
@@ -1880,47 +2026,34 @@
                     </span>
                 </div>
                 <div class="metric-ribbon-item metric-derived metric-derived-first">
+                    <span class="metric-ribbon-label" style="display: flex; align-items: center; gap: 4px;">
+                        Ext. Transfers
+                        <span class="material-symbols-outlined text-[10px]" style="color: var(--text-muted); opacity: 0.5" title="Transfers to people outside your accounts (Zelle, Venmo, etc). Counted in Net Flow.">info</span>
+                    </span>
+                    <span class="metric-ribbon-value" style="color: var(--warning)">
+                        {formatCurrency(periodSummary.external_transfers || 0)}
+                    </span>
+                </div>
+                <div class="metric-ribbon-item metric-derived">
+                    <span class="metric-ribbon-label" style="display: flex; align-items: center; gap: 4px;">
+                        CC Repaid
+                        <span class="material-symbols-outlined text-[10px]" style="color: var(--text-muted); opacity: 0.5" title="Payments toward prior credit card charges. Not counted as new spending.">info</span>
+                    </span>
+                    <span class="metric-ribbon-value" style="color: #8B5CF6">
+                        {formatCurrency(periodSummary.cc_repaid || 0)}
+                    </span>
+                </div>
+                <div class="metric-ribbon-item metric-derived">
                     <span class="metric-ribbon-label">Net Flow</span>
                     <span class="metric-ribbon-value" style="color: {periodSummary.net_flow >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                         {periodSummary.net_flow >= 0 ? '+' : ''}{formatCurrency(periodSummary.net_flow)}
                     </span>
-                </div>
-                <div class="metric-ribbon-item metric-derived">
-                    <span class="metric-ribbon-label">
-                        Savings Rate
-                        {#if trailingSavingsInfo.months > 1}
-                            <span style="font-weight: 500; letter-spacing: 0.05em; text-transform: none; opacity: 0.7">
-                                ({trailingSavingsInfo.months}mo avg)
-                            </span>
-                        {/if}
-                    </span>
-                    <span class="metric-ribbon-value" style="color: var(--accent)">
-                        {savingsRate > 0 ? formatPercent(savingsRate) : '—'}
-                    </span>
-                    {#if savingsRate > 0}
-                        <div class="flex items-center gap-2 mt-0.5">
-                            <div class="flex-1 h-1 rounded-full" style="background: var(--surface-200)">
-                                <div class="h-1 rounded-full transition-all duration-700" style="width: {Math.min(savingsRate, 100)}%; background: var(--accent)"></div>
-                            </div>
-                            {#if savingsRateDelta !== 0}
-                                <span class="text-[9px] font-mono font-semibold" style="color: {savingsRateDelta >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                    {savingsRateDelta >= 0 ? '↑' : '↓'}{formatPercent(Math.abs(savingsRateDelta))}
-                                </span>
-                            {/if}
-                        </div>
+                    {#if dailyPace}
+                        <span class="metric-ribbon-sub">
+                            {formatCurrency(dailyPace.dailyAvg)}/day → {formatCurrency(dailyPace.projected)} projected
+                        </span>
                     {/if}
                 </div>
-                {#if dailyPace}
-                    <div class="metric-ribbon-item metric-derived" style="border-left: 1px solid var(--card-border)">
-                        <span class="metric-ribbon-label">Pace</span>
-                        <span class="metric-ribbon-value" style="color: {dailyPace.projected > (periodSummary.income || Infinity) ? 'var(--negative)' : 'var(--text-secondary)'}">
-                            {formatCurrency(dailyPace.dailyAvg)}/day
-                        </span>
-                        <span class="metric-ribbon-sub">
-                            → {formatCurrency(dailyPace.projected)} projected
-                        </span>
-                    </div>
-                {/if}
             </div>
         {/if}
     </section>
@@ -1964,6 +2097,7 @@
                     expenses={periodSummary.expenses}
                     savingsTransfer={sankeySavingsTotal}
                     personalTransfer={sankeyPersonalTransferTotal}
+                    ccRepaid={periodSummary.cc_repaid || 0}
                     categories={sankeyCategoryList.filter(c => !c.isDirectFlow)}
                     selectedCategory={selectedSankeyCategory}
                     height={340}
@@ -1997,7 +2131,7 @@
                             {cat.category}
                             <span class="sankey-cat-pill-value">{formatCompact(cat.total)}</span>
                             {#if cat.isDirectFlow}
-                                <span class="sankey-cat-pill-direct">→</span>
+                                <span class="sankey-cat-pill-direct">Ã¢</span>
                             {/if}
                         </button>
                     {/each}
@@ -2050,6 +2184,13 @@
                                     <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: var(--positive-light); color: var(--positive)">REFUND</span>
                                 {:else if selectedSankeyCategory === 'Savings Transfer' || selectedSankeyCategory === 'Personal Transfer'}
                                     <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, #3b82f6 12%, transparent); color: #3b82f6">OUTFLOW</span>
+                                {/if}
+                                {#if tx.expense_type === 'transfer_internal'}
+                                    <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, var(--text-muted) 10%, transparent); color: var(--text-muted)">INTERNAL</span>
+                                {:else if tx.expense_type === 'transfer_household'}
+                                    <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, #8b5cf6 12%, transparent); color: #8b5cf6">HOUSEHOLD</span>
+                                {:else if tx.expense_type === 'transfer_external'}
+                                    <span class="text-[8px] font-semibold px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, #f59e0b 12%, transparent); color: #f59e0b">EXTERNAL</span>
                                 {/if}
 
                                 <!-- Category re-tag pill -->
@@ -2173,398 +2314,226 @@
         </div>
     </section>
 
-    <!-- ═══════════════════════════════════════════════════════
-         TRENDS & TRAJECTORY — FULL HISTORY
-         ═══════════════════════════════════════════════════════ -->
+    <!-- ── Expense type feedback toast ── -->
+    {#if expenseTypeFeedback}
+        <div class="analytics-fv-toast fade-in">
+            <span class="material-symbols-outlined text-[16px]" style="color: var(--positive)">check_circle</span>
+            <span class="text-[12px] font-medium" style="color: var(--text-primary)">{expenseTypeFeedback}</span>
+        </div>
+    {/if}
 
-    <div class="flex items-center gap-3 mb-6 fade-in-up" style="animation-delay: 180ms">
-        <div class="section-accent-bar"></div>
-        <p class="section-header">Trends & Trajectory</p>
-        <span class="section-zone-label">Full History</span>
-    </div>
-
-    <!-- ═══ S4: MONTHLY NET SURPLUS / DEFICIT ═══ -->
-    <section class="mb-6 fade-in-up" style="animation-delay: 200ms">
-        <div class="flex items-center justify-between mb-3">
-            <p class="section-header">Monthly Net Surplus / Deficit</p>
-            <div class="flex items-center gap-1.5">
-                <span class="w-3 h-1 rounded-full" style="background: rgba(13, 150, 104, 0.75)"></span>
-                <span class="text-[10px] font-medium" style="color: var(--text-muted)">Surplus</span>
-                <span class="w-3 h-1 rounded-full ml-2" style="background: rgba(220, 53, 69, 0.75)"></span>
-                <span class="text-[10px] font-medium" style="color: var(--text-muted)">Deficit</span>
+    <!-- âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+         FIXED vs VARIABLE SPENDING
+         âââââââââââââââââââââââââââââââââââââââââââââââââââââââ -->
+    {#if fixedVsVariable && fixedVsVariable.grandTotal > 0}
+        <section class="mb-10 fade-in-up" style="animation-delay: 155ms">
+            <div class="flex items-center gap-2 mb-4">
+                <div class="section-accent-bar"></div>
+                <p class="section-header">Fixed vs Variable</p>
             </div>
-        </div>
-        <div class="card" style="background-image: var(--surface-trend)">
-            {#if monthlyNetSVG}
-                {@const c = monthlyNetSVG}
-                <div class="monthly-net-chart-wrap">
-                    <svg viewBox="0 0 {c.W} {c.H}" preserveAspectRatio="xMidYMid meet" class="monthly-net-svg"
-                        on:mousemove={(e) => {
-                            const svg = e.currentTarget;
-                            const pt = svg.createSVGPoint();
-                            pt.x = e.clientX;
-                            pt.y = e.clientY;
-                            const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
-                            const mouseX = svgPt.x;
-                            const slotIdx = Math.floor((mouseX - c.pad.left) / c.step);
-                            const idx = (slotIdx >= 0 && slotIdx < c.bars.length) ? slotIdx : -1;
-                            if (idx >= 0) {
-                                const bar = c.bars[idx];
-                                hoveredBarIdx = idx;
-                                hoveredBar = {
-                                    x: bar.x + bar.w / 2,
-                                    y: bar.value >= 0 ? bar.y - 8 : bar.y + bar.h + 8,
-                                    label: bar.label,
-                                    value: bar.value,
-                                    above: bar.value >= 0
-                                };
-                            } else {
-                                hoveredBarIdx = -1;
-                                hoveredBar = null;
-                            }
-                        }}
-                        on:mouseleave={() => { hoveredBarIdx = -1; hoveredBar = null; }}>
 
-                        <defs>
-                            <!-- Glow filter for the zero baseline -->
-                            <filter id="zeroLineGlow" x="-2%" y="-50%" width="104%" height="200%">
-                                <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
-                                <feMerge>
-                                    <feMergeNode in="blur"/>
-                                    <feMergeNode in="SourceGraphic"/>
-                                </feMerge>
-                            </filter>
-                            <!-- Glow filter for the average line -->
-                            <filter id="avgLineGlow" x="-1%" y="-50%" width="102%" height="200%">
-                                <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur"/>
-                                <feMerge>
-                                    <feMergeNode in="blur"/>
-                                    <feMergeNode in="SourceGraphic"/>
-                                </feMerge>
-                            </filter>
-                        </defs>
-
-                        <!-- Y-axis grid + labels -->
-                        {#each c.yTicks as tick}
-                            <line
-                                x1={c.pad.left} x2={c.W - c.pad.right}
-                                y1={tick.y} y2={tick.y}
-                                stroke="var(--text-muted)" stroke-width="1" opacity="0.06"
-                            />
-                            <text
-                                x={c.pad.left - 8} y={tick.y + 3.5}
-                                text-anchor="end" fill="var(--text-muted)" font-size="10"
-                                font-family="JetBrains Mono, monospace" opacity="0.7"
-                            >{$privacyMode ? '$•••' : ((tick.value >= 0 ? '' : 'â') + '$' + (Math.abs(tick.value) >= 1000 ? (Math.abs(tick.value) / 1000).toFixed(1) + 'k' : Math.abs(tick.value).toFixed(0)))}</text>
-                        {/each}
-
-                        <!-- Zero line zone tints (subtle positive/negative regions) -->
-                        <rect
-                            x={c.pad.left} y={c.pad.top}
-                            width={c.W - c.pad.left - c.pad.right}
-                            height={c.zeroY - c.pad.top}
-                            fill={$darkMode ? 'rgba(52, 211, 153, 0.02)' : 'rgba(5, 150, 105, 0.02)'}
-                        />
-                        <rect
-                            x={c.pad.left} y={c.zeroY}
-                            width={c.W - c.pad.left - c.pad.right}
-                            height={c.pad.top + (c.H - c.pad.top - c.pad.bottom) - c.zeroY + c.pad.top}
-                            fill={$darkMode ? 'rgba(248, 113, 113, 0.02)' : 'rgba(225, 29, 72, 0.02)'}
-                        />
-
-                        <!-- Zero line — premium accent glow baseline -->
-                        <line
-                            x1={c.pad.left} x2={c.W - c.pad.right}
-                            y1={c.zeroY} y2={c.zeroY}
-                            stroke="var(--accent)" stroke-width="1.5" opacity="0.40"
-                            filter="url(#zeroLineGlow)"
-                        />
-                        <!-- Zero label -->
-                        <text
-                            x={c.pad.left - 8} y={c.zeroY + 3.5}
-                            text-anchor="end"
-                            fill={$darkMode ? 'rgba(255,255,255,0.50)' : 'rgba(0,0,0,0.45)'}
-                            font-size="9"
-                            font-family="JetBrains Mono, monospace"
-                            font-weight="700"
-                        >{$privacyMode ? '$•••' : '$0'}</text>
-
-                        <!-- Bars with rounded corners + hover highlight -->
-                        {#each c.bars as bar, i}
-                            {@const isHovered = hoveredBarIdx === i}
-                            {@const barRx = 4}
-                            {#if bar.value >= 0}
-                                <!-- Positive bar: rounded top corners via clipPath trick -->
-                                <rect
-                                    x={bar.x} y={bar.y} width={bar.w} height={bar.h + barRx}
-                                    rx={barRx} ry={barRx}
-                                    fill="{bar.fill}{isHovered ? Math.min(bar.opacity + 0.25, 1) : bar.opacity})"
-                                    stroke={isHovered ? (bar.value >= 0 ? 'rgba(13, 150, 104, 0.9)' : 'rgba(220, 53, 69, 0.9)') : bar.strokeColor}
-                                    stroke-width={isHovered ? 2 : (bar.isLast ? 2 : 0)}
-                                    class="monthly-net-bar"
-                                    style="animation-delay: {i * 30}ms; cursor: pointer; transition: fill 0.15s ease, stroke 0.15s ease;"
-                                />
-                                <!-- Clip the bottom rounded corners by overlaying a rect -->
-                                <rect
-                                    x={bar.x} y={bar.y + bar.h} width={bar.w} height={barRx}
-                                    fill="{bar.fill}{isHovered ? Math.min(bar.opacity + 0.25, 1) : bar.opacity})"
-                                />
-                            {:else}
-                                <!-- Negative bar: rounded bottom corners -->
-                                <rect
-                                    x={bar.x} y={bar.y - barRx} width={bar.w} height={bar.h + barRx}
-                                    rx={barRx} ry={barRx}
-                                    fill="{bar.fill}{isHovered ? Math.min(bar.opacity + 0.25, 1) : bar.opacity})"
-                                    stroke={isHovered ? 'rgba(220, 53, 69, 0.9)' : bar.strokeColor}
-                                    stroke-width={isHovered ? 2 : (bar.isLast ? 2 : 0)}
-                                    class="monthly-net-bar"
-                                    style="animation-delay: {i * 30}ms; cursor: pointer; transition: fill 0.15s ease, stroke 0.15s ease;"
-                                />
-                                <!-- Clip the top rounded corners -->
-                                <rect
-                                    x={bar.x} y={bar.y - barRx} width={bar.w} height={barRx}
-                                    fill="{bar.fill}{isHovered ? Math.min(bar.opacity + 0.25, 1) : bar.opacity})"
-                                />
-                            {/if}
-                        {/each}
-
-                        <!-- Average dashed line — enhanced contrast with glow -->
-                        <line
-                            x1={c.pad.left} x2={c.W - c.pad.right}
-                            y1={c.avgY} y2={c.avgY}
-                            stroke={$darkMode ? '#7CB9E8' : '#2563EB'} stroke-width="2" stroke-dasharray="8,4" opacity="0.85"
-                            filter="url(#avgLineGlow)"
-                        />
-
-                        <!-- Average label — pill-style badge at right end -->
-                        <rect
-                            x={c.W - c.pad.right - 120} y={c.avgY - 14}
-                            width="118" height="18" rx="9"
-                            fill={$darkMode ? 'rgba(30, 58, 95, 0.85)' : 'rgba(219, 234, 254, 0.90)'}
-                            stroke={$darkMode ? 'rgba(124, 185, 232, 0.30)' : 'rgba(37, 99, 235, 0.25)'}
-                            stroke-width="1"
-                        />
-                        <text
-                            x={c.W - c.pad.right - 61} y={c.avgY - 2}
-                            text-anchor="middle" fill={$darkMode ? '#7CB9E8' : '#2563EB'}
-                            font-size="9" font-family="JetBrains Mono, monospace" font-weight="700"
-                        >AVG {$privacyMode ? '$•••••' : formatCurrency(c.avg)}/mo</text>
-
-                        <!-- X-axis labels -->
-                        {#each c.bars as bar, i}
-                            <text
-                                x={bar.x + bar.w / 2}
-                                y={c.H - c.pad.bottom + 18}
-                                text-anchor="middle" fill="var(--text-muted)" font-size="10"
-                                font-family="Inter, system-ui, sans-serif"
-                                transform="rotate(-30, {bar.x + bar.w / 2}, {c.H - c.pad.bottom + 18})"
-                            >{bar.label}</text>
-                        {/each}
-
-                        <!-- Hover tooltip -->
-                        {#if hoveredBar}
-                            {@const tt = hoveredBar}
-                            {@const ttW = 130}
-                            {@const ttH = 36}
-                            {@const ttX = Math.max(c.pad.left, Math.min(tt.x - ttW / 2, c.W - c.pad.right - ttW))}
-                            {@const ttY = tt.above ? tt.y - ttH - 4 : tt.y + 4}
-                            <rect
-                                x={ttX} y={ttY}
-                                width={ttW} height={ttH} rx="8"
-                                fill={$darkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.95)'}
-                                stroke={$darkMode ? 'rgba(148, 163, 184, 0.20)' : 'rgba(100, 116, 139, 0.20)'}
-                                stroke-width="1"
-                                filter="url(#avgLineGlow)"
-                            />
-                            <text
-                                x={ttX + ttW / 2} y={ttY + 14}
-                                text-anchor="middle" fill="var(--text-primary)"
-                                font-size="10" font-weight="700" font-family="JetBrains Mono, monospace"
-                                style="pointer-events: none"
-                            >{$privacyMode ? '$•••••' : ((tt.value >= 0 ? '+' : '') + formatCurrency(tt.value))}</text>
-                            <text
-                                x={ttX + ttW / 2} y={ttY + 28}
-                                text-anchor="middle" fill="var(--text-muted)"
-                                font-size="8" font-weight="500" font-family="Inter, system-ui, sans-serif"
-                                style="pointer-events: none"
-                            >{tt.label}</text>
-                        {/if}
-                    </svg>
-                </div>
-            {/if}
-
-            {#if monthlyNetStats}
-                <div class="monthly-net-stats">
-                    <div class="monthly-net-stat">
-                        <p class="monthly-net-stat-label">Surplus Months</p>
-                        <p class="monthly-net-stat-value" style="color: var(--positive)">
-                            {monthlyNetStats.surplusCount}/{monthlyNetStats.totalMonths}
-                        </p>
-                        <p class="monthly-net-stat-sub">Avg: {formatCurrency(monthlyNetStats.avgSurplus)}</p>
-                    </div>
-                    <div class="monthly-net-stat">
-                        <p class="monthly-net-stat-label">Deficit Months</p>
-                        <p class="monthly-net-stat-value" style="color: var(--negative)">
-                            {monthlyNetStats.deficitCount}/{monthlyNetStats.totalMonths}
-                        </p>
-                        <p class="monthly-net-stat-sub">Avg: {formatCurrency(monthlyNetStats.avgDeficit)}</p>
-                    </div>
-                    <div class="monthly-net-stat">
-                        <p class="monthly-net-stat-label">Eff. Save Rate</p>
-                        <p class="monthly-net-stat-value" style="color: var(--accent)">
-                            {formatPercent(monthlyNetStats.effectiveSaveRate)}
-                        </p>
-                        <p class="monthly-net-stat-sub">Avg net: {formatCurrency(monthlyNetStats.avgNet)}/mo</p>
-                    </div>
-                </div>
-            {/if}
-        </div>
-    </section>
-
-    <!-- ═══ S5: TWO-PANEL ROW (YoY + Balance Trajectory) ═══ -->
-    <section class="mb-10 fade-in-up" style="animation-delay: 240ms">
-        <div class="trends-two-panel">
-
-            <!-- ——— S5a: YoY Same-Period Comparison ——— -->
-            <div class="card" style="padding: 1.25rem">
-                <p class="section-header mb-3">Year-over-Year</p>
-
-                {#if yoyData}
-                    <div class="space-y-0">
-                        {#each yoyData.yearStats as ys, yi}
-                            {@const isCurrent = yi === yoyData.yearStats.length - 1}
-                            <div class="yoy-year-row">
-                                <span class="yoy-year-label">
-                                    {ys.year}
-                                    <span class="yoy-period-tag">{ys.periodLabel}</span>
-                                </span>
-                                <div class="yoy-bars">
-                                    <div class="yoy-bar-row">
-                                        <span class="yoy-bar-label">In</span>
-                                        <div class="yoy-bar-track">
-                                            <div class="yoy-bar-fill {isCurrent ? '' : 'yoy-bar-ghost'}" style="width: {(ys.totalIn / yoyData.maxVal) * 100}%; {isCurrent ? 'background: var(--positive)' : 'background: transparent; border: 1.5px solid var(--positive); box-shadow: inset 0 0 0 100px rgba(5, 150, 105, 0.12); box-sizing: border-box;'}"></div>
-                                        </div>
-                                        <span class="yoy-bar-value" style="{isCurrent ? '' : 'opacity: 0.6'}">{formatCompact(ys.totalIn)}</span>
-                                    </div>
-                                    <div class="yoy-bar-row">
-                                        <span class="yoy-bar-label">Out</span>
-                                        <div class="yoy-bar-track">
-                                            <div class="yoy-bar-fill {isCurrent ? '' : 'yoy-bar-ghost'}" style="width: {(ys.totalOut / yoyData.maxVal) * 100}%; {isCurrent ? 'background: var(--negative)' : 'background: transparent; border: 1.5px solid var(--negative); box-shadow: inset 0 0 0 100px rgba(225, 29, 72, 0.12); box-sizing: border-box;'}"></div>
-                                        </div>
-                                        <span class="yoy-bar-value" style="{isCurrent ? '' : 'opacity: 0.6'}">{formatCompact(ys.totalOut)}</span>
-                                    </div>
-                                </div>
-                                <span class="yoy-net" style="background: {ys.net >= 0 ? 'var(--positive-light)' : 'var(--negative-light)'}; color: {ys.net >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                    {ys.net >= 0 ? '+' : ''}{formatCompact(ys.net)}
-                                </span>
-                            </div>
-                        {/each}
-                    </div>
-
-                    {#if yoyData.delta}
-                        <div class="yoy-delta-callout">
-                            <span class="yoy-delta-icon">{yoyData.delta.amount >= 0 ? '📈' : '📉'}</span>
-                            <p class="yoy-delta-text">
-                                <span class="yoy-delta-value" style="color: {yoyData.delta.amount >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                    {yoyData.delta.amount >= 0 ? '+' : ''}{formatCurrency(yoyData.delta.amount)}
-                                </span>
-                                vs {yoyData.delta.note} in {yoyData.delta.prevYear}
-                            </p>
+            <div class="card" style="padding: 1.25rem 1.5rem">
+                <!-- Stacked bar -->
+                <div class="flex items-center gap-4 mb-4">
+                    <div class="flex-1">
+                        <div class="flex h-3 rounded-full overflow-hidden" style="background: var(--surface-200)">
+                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.fixedPct}%; background: var(--accent); border-radius: 8px 0 0 8px;"></div>
+                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.variablePct}%; background: var(--warning);"></div>
                         </div>
-                    {/if}
-                {:else}
-                    <p class="text-sm text-center py-6" style="color: var(--text-muted)">Not enough data for comparison</p>
-                {/if}
-            </div>
+                    </div>
+                </div>
 
-            <!-- ——— S5b: Net Worth Trajectory ——— -->
-            <div class="card" style="padding: 1.25rem">
-                <p class="section-header mb-3">Net Worth Trajectory</p>
-
-                {#if netWorthTrendData.length > 1}
-                    {#if trajectorySVG}
-                        {@const t = trajectorySVG}
-                        <div class="trajectory-chart-wrap">
-                            <svg viewBox="0 0 {t.W} {t.H}" preserveAspectRatio="xMidYMid meet" class="trajectory-svg">
-                                <defs>
-                                    <linearGradient id="trajAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stop-color={$darkMode ? 'rgba(56,189,248,0.15)' : 'rgba(56,189,248,0.18)'} />
-                                        <stop offset="100%" stop-color={$darkMode ? 'rgba(56,189,248,0.01)' : 'rgba(56,189,248,0.02)'} />
-                                    </linearGradient>
-                                </defs>
-
-                                <!-- Y grid + labels -->
-                                {#each t.yTicks as tick}
-                                    <line
-                                        x1={t.pad.left} x2={t.W - t.pad.right}
-                                        y1={tick.y} y2={tick.y}
-                                        stroke="var(--text-muted)" stroke-width="1" opacity="0.06"
-                                    />
-                                    <text
-                                        x={t.pad.left - 8} y={tick.y + 3.5}
-                                        text-anchor="end" fill="var(--text-muted)" font-size="10"
-                                        font-family="JetBrains Mono, monospace" opacity="0.7"
-                                    >{$privacyMode ? '$•••' : ('$' + (tick.value >= 1000 ? (tick.value / 1000).toFixed(0) + 'k' : tick.value.toFixed(0)))}</text>
-                                {/each}
-
-                                <!-- Area fill -->
-                                <path d={t.areaPath} fill="url(#trajAreaGrad)" />
-
-                                <!-- Line -->
-                                <path d={t.linePath} fill="none" stroke="#38BDF8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-
-                                <!-- End dot -->
-                                {#if t.points.length > 0}
-                                    {@const lastPt = t.points[t.points.length - 1]}
-                                    <circle cx={lastPt.x} cy={lastPt.y} r="4" fill="#E0F2FE" stroke="#38BDF8" stroke-width="2" />
+                <div class="analytics-fv-split">
+                    <!-- Fixed side -->
+                    <div class="analytics-fv-column">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--accent)"></span>
+                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Fixed (Recurring)</span>
+                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--accent)">
+                                {formatCurrency(fixedVsVariable.fixedTotal)}
+                            </span>
+                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.fixedPct)}</span>
+                        </div>
+                        {#each fixedVsVariable.fixedCats.slice(0, 5) as cat}
+                            <div class="analytics-fv-row" on:click|stopPropagation>
+                                {#if editingExpenseType === cat.category}
+                                    <div class="analytics-fv-toggle-controls">
+                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
+                                        <div class="analytics-fv-toggle-btns">
+                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Fixed</button>
+                                            <button class="analytics-fv-toggle-btn"
+                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'variable')}>Variable</button>
+                                        </div>
+                                    </div>
+                                {:else}
+                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
+                                    </button>
+                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
                                 {/if}
+                            </div>
+                        {/each}
+                        {#if fixedVsVariable.fixedCats.length === 0}
+                            <p class="text-[10px]" style="color: var(--text-muted)">No fixed expenses detected</p>
+                        {/if}
+                    </div>
 
-                                <!-- X-axis labels -->
-                                {#each t.xLabels as xl}
-                                    <text
-                                        x={xl.x} y={t.H - 8}
-                                        text-anchor="middle" fill="var(--text-muted)" font-size="9"
-                                        font-family="Inter, system-ui, sans-serif" opacity="0.6"
-                                    >{xl.label}</text>
-                                {/each}
-                            </svg>
-                        </div>
-                    {/if}
+                    <!-- Divider -->
+                    <div class="analytics-fv-divider"></div>
 
-                    {#if trajectoryStats}
-                        <div class="trajectory-stats">
-                            <div class="trajectory-stat">
-                                <span class="trajectory-stat-label">Change</span>
-                                <span class="trajectory-stat-value" style="color: {trajectoryStats.change >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                    {trajectoryStats.change >= 0 ? '▲' : '▼'} {formatCurrency(Math.abs(trajectoryStats.change))}
-                                </span>
-                            </div>
-                            <div class="trajectory-stat">
-                                <span class="trajectory-stat-label">Avg/mo</span>
-                                <span class="trajectory-stat-value" style="color: {trajectoryStats.avgGrowth >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                    {trajectoryStats.avgGrowth >= 0 ? '+' : ''}{formatCurrency(trajectoryStats.avgGrowth)}
-                                </span>
-                            </div>
-                            <div class="trajectory-stat">
-                                <span class="trajectory-stat-label">Peak</span>
-                                <span class="trajectory-stat-value" style="color: var(--text-secondary)">
-                                    {formatCompact(trajectoryStats.peak)} <span class="text-[8px] opacity-60">({trajectoryStats.peakDate})</span>
-                                </span>
-                            </div>
-                            <div class="trajectory-stat">
-                                <span class="trajectory-stat-label">Low</span>
-                                <span class="trajectory-stat-value" style="color: var(--text-secondary)">
-                                    {formatCompact(trajectoryStats.low)} <span class="text-[8px] opacity-60">({trajectoryStats.lowDate})</span>
-                                </span>
-                            </div>
+                    <!-- Variable side -->
+                    <div class="analytics-fv-column">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--warning)"></span>
+                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Variable (Discretionary)</span>
+                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--warning)">
+                                {formatCurrency(fixedVsVariable.variableTotal)}
+                            </span>
+                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.variablePct)}</span>
                         </div>
-                    {/if}
-                {:else}
-                    <p class="text-sm text-center py-6" style="color: var(--text-muted)">Not enough data</p>
-                {/if}
+                        {#each fixedVsVariable.variableCats.slice(0, 5) as cat}
+                            <div class="analytics-fv-row" on:click|stopPropagation>
+                                {#if editingExpenseType === cat.category}
+                                    <div class="analytics-fv-toggle-controls">
+                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
+                                        <div class="analytics-fv-toggle-btns">
+                                            <button class="analytics-fv-toggle-btn"
+                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'fixed')}>Fixed</button>
+                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Variable</button>
+                                        </div>
+                                    </div>
+                                {:else}
+                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
+                                    </button>
+                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
+                                {/if}
+                            </div>
+                        {/each}
+                    </div>
+                </div>
+
+                <!-- Temporal context -->
+                <div class="flex gap-4 mt-3 mb-2 px-1">
+                    <div class="flex items-center gap-2 flex-1">
+                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--accent)"></span>
+                        <span class="text-[11px]" style="color: var(--text-secondary)">
+                            Fixed: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.fixedTotal)}</span>
+                        </span>
+                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.fixedDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                            {fixedVsVariable.fixedDeltaPct > 0 ? '↑' : fixedVsVariable.fixedDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.fixedDeltaPct))} vs avg
+                        </span>
+                    </div>
+                    <div class="flex items-center gap-2 flex-1">
+                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--warning)"></span>
+                        <span class="text-[11px]" style="color: var(--text-secondary)">
+                            Variable: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.variableTotal)}</span>
+                        </span>
+                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.variableDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                            {fixedVsVariable.variableDeltaPct > 0 ? '↑' : fixedVsVariable.variableDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.variableDeltaPct))} vs avg
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Insight footer -->
+                <div class="analytics-fv-insight">
+                    <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">lightbulb</span>
+                    <p class="text-[11px]" style="color: var(--text-secondary)">
+                        Your fixed costs are <span class="font-bold" style="color: var(--text-primary)">{formatPercent(fixedVsVariable.fixedPct)}</span> of spending.
+                        {#if fixedVsVariable.variablePct > 50}
+                            You have significant room to optimize discretionary spend.
+                        {:else}
+                            Most of your budget is committed, focus on renegotiating recurring costs.
+                        {/if}
+                    </p>
+                </div>
             </div>
-
+        </section>
+    {/if}
+    
+    <!-- ═══════════════════════════════════════════════════════
+         S4b: INCOME vs SPENDING (Luminous Overlap)
+         ═══════════════════════════════════════════════════════ -->
+    {#if monthly && monthly.length >= 2}
+    <section class="mb-10 fade-in-up" style="animation-delay: 170ms">
+        <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+                <div class="section-accent-bar"></div>
+                <p class="section-header">Income vs Spending</p>
+                <span class="section-zone-label">Last 12 Months</span>
+            </div>
         </div>
+
+        <div class="ivs-theater">
+            <IncomeVsSpendingChart monthlyData={monthly} height={400} categoryData={monthlyCategoryBreakdown} />
+        </div>
+
+
+        {#if ivsStats}
+            <div class="ivs-stats">
+                <div class="ivs-stat">
+                    <div class="ivs-stat-icon" style="background: rgba(56, 189, 248, 0.10); color: #38BDF8;">
+                        <span class="material-symbols-outlined text-[13px]">trending_up</span>
+                    </div>
+                    <div class="ivs-stat-content">
+                        <p class="ivs-stat-label">Avg Income</p>
+                        <p class="ivs-stat-value" style="color: #38BDF8">{(void privacyKey, formatCurrency(ivsStats.avgIncome))}</p>
+                        <p class="ivs-stat-sub">/month over {ivsStats.monthCount}mo</p>
+                    </div>
+                </div>
+                <div class="ivs-stat">
+                    <div class="ivs-stat-icon" style="background: rgba(244, 114, 182, 0.10); color: #F472B6;">
+                        <span class="material-symbols-outlined text-[13px]">trending_down</span>
+                    </div>
+                    <div class="ivs-stat-content">
+                        <p class="ivs-stat-label">Avg Spending</p>
+                        <p class="ivs-stat-value" style="color: #F472B6">{(void privacyKey, formatCurrency(ivsStats.avgSpending))}</p>
+                        <p class="ivs-stat-sub">/month over {ivsStats.monthCount}mo</p>
+                    </div>
+                </div>
+                <div class="ivs-stat">
+                    <div class="ivs-stat-icon" style="background: {ivsStats.avgNet >= 0 ? 'var(--positive-light)' : 'var(--negative-light)'}; color: {ivsStats.avgNet >= 0 ? 'var(--positive)' : 'var(--negative)'};">
+                        <span class="material-symbols-outlined text-[13px]">equalizer</span>
+                    </div>
+                    <div class="ivs-stat-content">
+                        <p class="ivs-stat-label">Avg Net</p>
+                        <p class="ivs-stat-value" style="color: {ivsStats.avgNet >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                            {ivsStats.avgNet >= 0 ? '+' : ''}{(void privacyKey, formatCurrency(ivsStats.avgNet))}
+                        </p>
+                        <p class="ivs-stat-sub">/month</p>
+                    </div>
+                </div>
+                <div class="ivs-stat">
+                    <div class="ivs-stat-icon" style="background: rgba(52, 211, 153, 0.10); color: #34d399;">
+                        <span class="material-symbols-outlined text-[13px]">emoji_events</span>
+                    </div>
+                    <div class="ivs-stat-content">
+                        <p class="ivs-stat-label">Best Month</p>
+                        <p class="ivs-stat-value" style="color: var(--positive)">
+                            +{(void privacyKey, formatCurrency(ivsStats.bestSavingsVal))}
+                        </p>
+                        <p class="ivs-stat-sub">{formatMonthShort(ivsStats.bestSavingsMonth)}</p>
+                    </div>
+                </div>
+                <div class="ivs-stat">
+                    <div class="ivs-stat-icon" style="background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent);">
+                        <span class="material-symbols-outlined text-[13px]">bar_chart</span>
+                    </div>
+                    <div class="ivs-stat-content">
+                        <p class="ivs-stat-label">Surplus / Deficit</p>
+                        <p class="ivs-stat-value" style="color: var(--text-primary)">
+                            <span style="color: var(--positive)">{ivsChartData.filter(d => d.net >= 0).length}</span>
+                            <span style="color: var(--text-muted); font-size: 0.6875rem"> / </span>
+                            <span style="color: var(--negative)">{ivsChartData.filter(d => d.net < 0).length}</span>
+                            <span class="ivs-stat-sub" style="display: inline; margin-left: 2px;">months</span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+        {/if}
     </section>
+    {/if}
 </div>
 {/if}

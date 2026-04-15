@@ -37,6 +37,90 @@ TRANSFER_CATEGORIES = ("Savings Transfer", "Personal Transfer", "Credit Card Pay
 NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES + ("Income",)
 
 
+# Valid transfer sub-classification values
+TRANSFER_INTERNAL = "transfer_internal"
+TRANSFER_HOUSEHOLD = "transfer_household"
+TRANSFER_EXTERNAL = "transfer_external"
+TRANSFER_CC_PAYMENT = "transfer_cc_payment"
+
+
+def _build_account_lookup(conn) -> dict:
+    """
+    Build a lookup structure mapping account last-four digits to a set of
+    profile IDs that own accounts with those digits.
+
+    Returns:
+        dict[str, set[str]] — e.g. {"1234": {"primary", "wife"}, "5678": {"primary"}}
+    """
+    rows = conn.execute(
+        """SELECT account_name, id, profile_id FROM accounts WHERE is_active = 1"""
+    ).fetchall()
+
+    lookup: dict[str, set[str]] = {}
+    for row in rows:
+        acct_name = row[0] or ""
+        acct_id = row[1] or ""
+        profile_id = row[2] or ""
+
+        # Extract last 4 digits from account name (e.g., "Checking ...1234")
+        for source in (acct_name, acct_id):
+            digits = re.findall(r'\d{4,}', source)
+            for d in digits:
+                last4 = d[-4:]
+                if last4 not in lookup:
+                    lookup[last4] = set()
+                lookup[last4].add(profile_id)
+
+    return lookup
+
+
+def _classify_transfer_type(
+    tx: dict,
+    account_lookup: dict[str, set[str]],
+) -> str:
+    """
+    Sub-classify a transfer transaction as internal, household, external,
+    or cc_payment.
+
+    Only called for transactions where category == one of TRANSFER_CATEGORIES
+    (Savings Transfer, Personal Transfer, Credit Card Payment).
+
+    Args:
+        tx: transaction dict with at least 'description', 'profile' or 'profile_id',
+            and 'category'
+        account_lookup: {last4_digits: set_of_profile_ids} from _build_account_lookup
+
+    Returns:
+        One of: TRANSFER_INTERNAL, TRANSFER_HOUSEHOLD, TRANSFER_EXTERNAL, TRANSFER_CC_PAYMENT
+    """
+    # Credit Card Payment is always its own type — never internal/household/external
+    category = tx.get("category", "")
+    if category == "Credit Card Payment":
+        return TRANSFER_CC_PAYMENT
+
+    tx_profile = tx.get("profile") or tx.get("profile_id") or "primary"
+    description = (tx.get("description") or "") + " " + (tx.get("raw_description") or "")
+
+    # Extract all 4-digit sequences from description that could be account fragments
+    fragments = re.findall(r'\b\d{4}\b', description)
+
+    for frag in fragments:
+        owning_profiles = account_lookup.get(frag)
+        if owning_profiles is None:
+            continue
+
+        # If any owning profile is the same as the transaction's profile → internal
+        if tx_profile in owning_profiles:
+            # Check if OTHER profiles also own this fragment — ambiguous,
+            # but same-profile match takes priority
+            return TRANSFER_INTERNAL
+
+        # Fragment matches an account in a different profile → household
+        return TRANSFER_HOUSEHOLD
+
+    # No account fragment matched → external
+    return TRANSFER_EXTERNAL
+
 # ══════════════════════════════════════════════════════════════════════════════
 # READ OPERATIONS — TARGETED QUERIES (preferred)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -113,7 +197,7 @@ def get_transactions_paginated(
                               counterparty_name, counterparty_type, teller_category,
                               account_name, account_type, merchant_name, merchant_domain,
                               merchant_industry, merchant_city, merchant_state,
-                              enriched, is_excluded
+                              enriched, is_excluded, expense_type
                        FROM transactions{where_sql}
                        ORDER BY date DESC
                        LIMIT ? OFFSET ?"""
@@ -142,7 +226,8 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
     def _query(c):
         profile_clause = ""
         profile_params = []
-        if profile and profile != "household":
+        is_household = not profile or profile == "household"
+        if not is_household:
             profile_clause = " AND profile_id = ?"
             profile_params = [profile]
 
@@ -150,21 +235,36 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
         non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
         transfer_ph = ",".join("?" * len(TRANSFER_CATEGORIES))
 
+        # Transfer exclusion clause for expenses:
+        # Household view: exclude transfer_internal AND transfer_household
+        # Individual view: exclude only transfer_internal
+        if is_household:
+            transfer_excl = " AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))"
+        else:
+            transfer_excl = " AND (expense_type IS NULL OR expense_type != 'transfer_internal')"
+
+        # Transfer exclusion clause for income (receiving side):
+        # Same logic — internal transfers showing as income should be excluded
+        if is_household:
+            income_transfer_excl = " AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))"
+        else:
+            income_transfer_excl = " AND (expense_type IS NULL OR expense_type != 'transfer_internal')"
+
         # Income: category='Income' AND amount > 0
         income = c.execute(
-            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE category = 'Income' AND amount > 0{profile_clause}",
+            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE category = 'Income' AND amount > 0{income_transfer_excl}{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         # Expenses: amount < 0 AND category NOT IN non_spending
         expenses = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE amount < 0 AND category NOT IN ({non_spending_ph}){profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE amount < 0 AND category NOT IN ({non_spending_ph}){transfer_excl}{profile_clause}",
             list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
 
         # Refunds: amount > 0 AND category NOT IN non_spending AND NOT income
         refunds = c.execute(
-            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{profile_clause}",
+            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{transfer_excl}{profile_clause}",
             list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
 
@@ -188,7 +288,7 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
         # Account balances
         acct_profile_clause = ""
         acct_params = []
-        if profile and profile != "household":
+        if not is_household:
             acct_profile_clause = " AND profile_id = ?"
             acct_params = [profile]
 
@@ -206,14 +306,27 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
         last_row = c.execute("SELECT MAX(last_synced_at) FROM accounts").fetchone()
         last_updated = last_row[0] if last_row and last_row[0] else None
 
+        # CC Repaid: sum of Credit Card Payment outflows (transfer_cc_payment)
+        cc_repaid = c.execute(
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE category = 'Credit Card Payment' AND amount < 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+
+        # External transfers (Zelle/Venmo to other people) — included in net flow
+        external_transfers = c.execute(
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE expense_type = 'transfer_external' AND amount < 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+
         net_spending = expenses - refunds
+        net_flow = income - net_spending - external_transfers
         return {
             "income": round(income, 2),
             "expenses": round(expenses, 2),
             "refunds": round(refunds, 2),
             "net_spending": round(net_spending, 2),
             "savings": round(savings, 2),
-            "net_flow": round(income - net_spending, 2),
+            "net_flow": round(net_flow, 2),
             "savings_rate": round(savings / income * 100, 1) if income > 0 else 0,
             "total_assets": round(total_assets, 2),
             "total_owed": round(total_owed, 2),
@@ -221,6 +334,8 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
             "last_updated": last_updated,
             "transaction_count": tx_count,
             "enriched_count": enriched_count,
+            "cc_repaid": round(cc_repaid, 2),
+            "external_transfers": round(external_transfers, 2),
         }
 
     if conn is not None:
@@ -232,23 +347,36 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
 def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[dict]:
     """
     Compute monthly income/expense/refund/savings aggregation using SQL GROUP BY.
+    Transfer sub-classification aware: excludes internal (and household in
+    household view) transfers from expense/refund totals.
     """
     def _query(c):
         profile_clause = ""
         profile_params = []
-        if profile and profile != "household":
+        is_household = not profile or profile == "household"
+        if not is_household:
             profile_clause = " AND profile_id = ?"
             profile_params = [profile]
 
         non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
 
+        # Transfer exclusion CASE conditions embedded in conditional aggregation.
+        # A transaction is "transfer-excluded" if its expense_type should be hidden
+        # in this view context.
+        if is_household:
+            # Household: exclude transfer_internal and transfer_household
+            transfer_ok = "AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))"
+        else:
+            # Individual: exclude only transfer_internal
+            transfer_ok = "AND (expense_type IS NULL OR expense_type != 'transfer_internal')"
+
         # One query using conditional aggregation
         sql = f"""
             SELECT
                 SUBSTR(date, 1, 7) as month,
-                COALESCE(SUM(CASE WHEN category = 'Income' AND amount > 0 THEN amount ELSE 0 END), 0) as income,
-                COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) THEN ABS(amount) ELSE 0 END), 0) as expenses,
-                COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' THEN amount ELSE 0 END), 0) as refunds,
+                COALESCE(SUM(CASE WHEN category = 'Income' AND amount > 0 {transfer_ok} THEN amount ELSE 0 END), 0) as income,
+                COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok} THEN ABS(amount) ELSE 0 END), 0) as expenses,
+                COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' {transfer_ok} THEN amount ELSE 0 END), 0) as refunds,
                 COALESCE(SUM(CASE WHEN category = 'Savings Transfer' THEN ABS(amount) ELSE 0 END), 0) as savings
             FROM transactions
             WHERE LENGTH(date) >= 7{profile_clause}
@@ -273,6 +401,35 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
                 "savings": round(sav, 2),
                 "net": round(inc - exp + ref, 2),
             })
+
+        # Compute CC repaid and external transfers per month
+        cc_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month,
+                   COALESCE(SUM(ABS(amount)), 0) as cc_repaid
+            FROM transactions
+            WHERE category = 'Credit Card Payment' AND amount < 0
+              AND LENGTH(date) >= 7{profile_clause}
+            GROUP BY SUBSTR(date, 1, 7)
+        """
+        cc_rows = c.execute(cc_sql, profile_params).fetchall()
+        cc_by_month = {row[0]: row[1] for row in cc_rows}
+
+        ext_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month,
+                   COALESCE(SUM(ABS(amount)), 0) as ext_transfers
+            FROM transactions
+            WHERE expense_type = 'transfer_external' AND amount < 0
+              AND LENGTH(date) >= 7{profile_clause}
+            GROUP BY SUBSTR(date, 1, 7)
+        """
+        ext_rows = c.execute(ext_sql, profile_params).fetchall()
+        ext_by_month = {row[0]: row[1] for row in ext_rows}
+
+        for entry in result:
+            m = entry["month"]
+            entry["cc_repaid"] = round(cc_by_month.get(m, 0), 2)
+            entry["external_transfers"] = round(ext_by_month.get(m, 0), 2)
+
         return result
 
     if conn is not None:
@@ -284,17 +441,26 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
 def get_category_analytics_data(month: str | None = None, profile: str | None = None, conn=None) -> list[dict]:
     """
     Compute per-category spending breakdown using SQL GROUP BY.
+    Transfer sub-classification aware: excludes internal (and household in
+    household view) transfers from the breakdown.
     """
     def _query(c):
         where_clauses = []
         params = []
+        is_household = not profile or profile == "household"
 
-        if profile and profile != "household":
+        if not is_household:
             where_clauses.append("profile_id = ?")
             params.append(profile)
         if month:
             where_clauses.append("date LIKE ?")
             params.append(month + "%")
+
+        # Transfer exclusion
+        if is_household:
+            where_clauses.append("(expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))")
+        else:
+            where_clauses.append("(expense_type IS NULL OR expense_type != 'transfer_internal')")
 
         where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -347,6 +513,126 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
                 "percent": round(amt / total * 100, 1) if total > 0 else 0,
                 "expense_type": expense_type_map.get(cat, "variable"),
             })
+
+        # Compute transfer totals using the same profile + expense_type filtering
+        savings_total = c.execute(
+            f"""SELECT COALESCE(SUM(ABS(amount)), 0)
+                FROM transactions
+                WHERE category = 'Savings Transfer' AND amount < 0{" AND " + " AND ".join(where_clauses) if where_clauses else ""}""",
+            params,
+        ).fetchone()[0]
+
+        personal_transfer_total = c.execute(
+            f"""SELECT COALESCE(SUM(ABS(amount)), 0)
+                FROM transactions
+                WHERE category = 'Personal Transfer' AND amount < 0{" AND " + " AND ".join(where_clauses) if where_clauses else ""}""",
+            params,
+        ).fetchone()[0]
+
+        return {
+            "categories": result,
+            "savings_transfer_total": round(savings_total, 2),
+            "personal_transfer_total": round(personal_transfer_total, 2),
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+    
+def get_monthly_category_breakdown(profile: str | None = None, months: int = 12, conn=None) -> list[dict]:
+    """
+    Return the top spending categories for each of the last N months.
+    Used by the Income vs Spending chart tooltip (Layer 6).
+
+    Returns:
+        List of { month: "YYYY-MM", categories: [{ category, total }, ...] }
+        Each month includes up to 5 categories (top 4 + "Other" bucket).
+    """
+    def _query(c):
+        where_clauses = []
+        params = []
+        is_household = not profile or profile == "household"
+
+        if not is_household:
+            where_clauses.append("profile_id = ?")
+            params.append(profile)
+
+        # Transfer exclusion
+        if is_household:
+            where_clauses.append("(expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))")
+        else:
+            where_clauses.append("(expense_type IS NULL OR expense_type != 'transfer_internal')")
+
+        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
+
+        # Get gross expenses grouped by month + category
+        expense_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month, category, SUM(ABS(amount)) as total
+            FROM transactions
+            WHERE amount < 0 AND category NOT IN ({non_spending_ph}){where_sql}
+            GROUP BY SUBSTR(date, 1, 7), category
+            ORDER BY month DESC, total DESC
+        """
+        expense_params = list(NON_SPENDING_CATEGORIES) + params
+        expense_rows = c.execute(expense_sql, expense_params).fetchall()
+
+        # Get refunds grouped by month + category
+        refund_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month, category, SUM(amount) as total
+            FROM transactions
+            WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{where_sql}
+            GROUP BY SUBSTR(date, 1, 7), category
+        """
+        refund_params = list(NON_SPENDING_CATEGORIES) + params
+        refund_rows = c.execute(refund_sql, refund_params).fetchall()
+
+        # Build refund lookup: { "YYYY-MM": { "category": refund_total } }
+        refund_lookup = {}
+        for row in refund_rows:
+            m = row[0]
+            cat = row[1]
+            if m not in refund_lookup:
+                refund_lookup[m] = {}
+            refund_lookup[m][cat] = row[2]
+
+        # Build per-month category data
+        month_cats = {}  # { "YYYY-MM": { "category": net_total } }
+        for row in expense_rows:
+            m = row[0]
+            cat = row[1]
+            gross = row[2]
+            refund = refund_lookup.get(m, {}).get(cat, 0)
+            net = gross - refund
+            if net <= 0:
+                continue
+            if m not in month_cats:
+                month_cats[m] = {}
+            month_cats[m][cat] = net
+
+        # Sort months descending, take last N
+        sorted_months = sorted(month_cats.keys(), reverse=True)[:months]
+
+        result = []
+        for m in sorted(sorted_months):
+            cats = month_cats[m]
+            sorted_cats = sorted(cats.items(), key=lambda x: -x[1])
+
+            top_4 = sorted_cats[:4]
+            others = sorted_cats[4:]
+            other_total = sum(v for _, v in others)
+
+            categories = [{"category": cat, "total": round(total, 2)} for cat, total in top_4]
+            if other_total > 0:
+                categories.append({"category": "Other", "total": round(other_total, 2)})
+
+            result.append({
+                "month": m,
+                "categories": categories,
+            })
+
         return result
 
     if conn is not None:
@@ -503,15 +789,21 @@ def get_dashboard_bundle_data(
         summary_out = get_summary_data(profile=profile, conn=c)
         accounts_out = get_accounts_filtered(profile=profile, conn=c)
         monthly_sorted = get_monthly_analytics_data(profile=profile, conn=c)
-        categories_out = get_category_analytics_data(profile=profile, conn=c)
+        cat_result = get_category_analytics_data(profile=profile, conn=c)
         nw_series = get_net_worth_series_data(interval=nw_interval, profile=profile, conn=c)
+        monthly_cat_breakdown = get_monthly_category_breakdown(profile=profile, months=12, conn=c)
 
         return {
             "summary": summary_out,
             "accounts": accounts_out,
             "monthly": monthly_sorted,
-            "categories": categories_out,
+            "categories": cat_result["categories"],
+            "savingsTransferTotal": cat_result["savings_transfer_total"],
+            "personalTransferTotal": cat_result["personal_transfer_total"],
             "netWorthSeries": nw_series,
+            "ccRepaid": summary_out.get("cc_repaid", 0),
+            "externalTransfers": summary_out.get("external_transfers", 0),
+            "monthlyCategoryBreakdown": monthly_cat_breakdown,
         }
 
     if conn is not None:
@@ -989,7 +1281,7 @@ def get_data(force_refresh: bool = False) -> dict:
                       counterparty_name, counterparty_type, teller_category,
                       account_name, account_type, merchant_name, merchant_domain,
                       merchant_industry, merchant_city, merchant_state,
-                      enriched, is_excluded
+                      enriched, is_excluded, expense_type
                FROM transactions
                ORDER BY date DESC"""
         ).fetchall()
@@ -1138,6 +1430,15 @@ def fetch_fresh_data(incremental: bool = True) -> dict:
                 else:
                     logger.info("    No new transactions for %s", name)
 
+            # Build account lookup once for transfer classification
+            account_lookup = _build_account_lookup(conn)
+
+            # Classify transfer sub-types before insertion
+            for tx in all_new_transactions:
+                category = tx.get("category", "Other")
+                if category in TRANSFER_CATEGORIES:
+                    tx["expense_type"] = _classify_transfer_type(tx, account_lookup)
+
             # Insert new transactions
             for tx in all_new_transactions:
                 _insert_transaction(conn, tx)
@@ -1194,6 +1495,12 @@ def fetch_fresh_data(incremental: bool = True) -> dict:
 
             except Exception as e:
                 logger.warning("Incremental recurring detection failed (non-fatal): %s", e)
+
+        # Re-classify all transfers (new accounts may change internal/household/external)
+        try:
+            reclassify_transfers()
+        except Exception as e:
+            logger.warning("Transfer reclassification failed (non-fatal): %s", e)
 
         total_count_row = None
         with get_db() as conn:
@@ -1254,8 +1561,8 @@ def _insert_transaction(conn, tx: dict):
             counterparty_name, counterparty_type, teller_category,
             account_name, account_type, merchant_name, merchant_domain,
             merchant_industry, merchant_city, merchant_state,
-            enriched, confidence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            enriched, confidence, expense_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             tx_id,
             account_id,
@@ -1279,6 +1586,7 @@ def _insert_transaction(conn, tx: dict):
             tx.get("merchant_state", ""),
             1 if tx.get("enriched") else 0,
             tx.get("confidence", ""),
+            tx.get("expense_type"),
         ),
     )
 
@@ -1496,3 +1804,77 @@ def get_category_rules(source: str | None = None) -> list[dict]:
                    FROM category_rules ORDER BY priority DESC"""
             ).fetchall()
         return dicts_from_rows(rows)
+
+
+def reclassify_transfers(conn=None) -> int:
+    """
+    Re-classify all transfer transactions' expense_type using the current
+    account lookup. Handles:
+      - Backfill: transfers with expense_type = NULL
+      - Re-evaluation: transfers whose classification may have changed
+        (e.g., a new account was linked, turning an 'external' into 'household')
+
+    Returns the number of transactions updated.
+
+    Called:
+      - On application startup (backfill NULL expense_types)
+      - After new account enrollment (re-evaluate all transfers)
+    """
+    def _reclassify(c):
+        account_lookup = _build_account_lookup(c)
+
+        # Fetch all transfer transactions
+        transfer_ph = ",".join("?" * len(TRANSFER_CATEGORIES))
+        rows = c.execute(
+            f"""SELECT id, profile_id, description, raw_description, expense_type
+                FROM transactions
+                WHERE category IN ({transfer_ph})""",
+            list(TRANSFER_CATEGORIES),
+        ).fetchall()
+
+        updated = 0
+        for row in rows:
+            tx_id = row[0]
+            tx_dict = {
+                "profile_id": row[1],
+                "description": row[2] or "",
+                "raw_description": row[3] or "",
+            }
+            current_type = row[4]
+            new_type = _classify_transfer_type(tx_dict, account_lookup)
+
+            if new_type != current_type:
+                c.execute(
+                    "UPDATE transactions SET expense_type = ?, updated_at = datetime('now') WHERE id = ?",
+                    (new_type, tx_id),
+                )
+                updated += 1
+
+        if updated > 0:
+            logger.info("Reclassified %d transfer transactions.", updated)
+        return updated
+
+    if conn is not None:
+        return _reclassify(conn)
+    with get_db() as c:
+        return _reclassify(c)
+
+
+def backfill_transfer_types() -> int:
+    """
+    Startup-safe backfill: only runs if there are transfer-category
+    transactions with NULL expense_type. Returns count of updated rows.
+    """
+    with get_db() as c:
+        transfer_ph = ",".join("?" * len(TRANSFER_CATEGORIES))
+        null_count = c.execute(
+            f"""SELECT COUNT(*) FROM transactions
+                WHERE category IN ({transfer_ph}) AND expense_type IS NULL""",
+            list(TRANSFER_CATEGORIES),
+        ).fetchone()[0]
+
+        if null_count == 0:
+            return 0
+
+        logger.info("Backfilling expense_type for %d transfer transactions...", null_count)
+        return reclassify_transfers(conn=c)    

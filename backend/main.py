@@ -86,6 +86,10 @@ def startup():
     from database import sync_subscription_seeds, sync_enrichment_cache_from_seeds
     sync_subscription_seeds()
     sync_enrichment_cache_from_seeds()
+    # Backfill transfer sub-classification for any existing transfers with NULL expense_type.
+    # Only does work on first deploy or if new transfer transactions were inserted without classification.
+    from data_manager import backfill_transfer_types
+    backfill_transfer_types()
 
 
 @app.on_event("shutdown")

@@ -27,7 +27,7 @@
                 api.getCategoryAnalytics()
             ]);
             monthly = m;
-            categories = c;
+            categories = Array.isArray(c) ? c : (c?.categories || []);
 
             if (monthly.length > 0) {
                 selectedMonth = monthly[monthly.length - 1].month;
@@ -43,7 +43,10 @@
     let monthCategories = [];
 
     async function loadMonth() {
-        try { monthCategories = await api.getCategoryAnalytics(selectedMonth); } catch (e) { console.error(e); }
+        try {
+            const result = await api.getCategoryAnalytics(selectedMonth);
+            monthCategories = Array.isArray(result) ? result : (result?.categories || []);
+        } catch (e) { console.error(e); }
     }
 
     $: if (selectedMonth) loadMonth();
@@ -97,7 +100,7 @@
                 api.getCategoryAnalytics()
             ]);
             monthly = m;
-            categories = c;
+            categories = Array.isArray(c) ? c : (c?.categories || []);
             if (monthly.length > 0) {
                 const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
                 if (!sorted.some(s => s.month === selectedMonth)) {

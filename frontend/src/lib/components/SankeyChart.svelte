@@ -8,6 +8,7 @@ export let income = 0;
 export let expenses = 0;
 export let savingsTransfer = 0;
 export let personalTransfer = 0;
+export let ccRepaid = 0;
 export let categories = [];
 export let selectedCategory = null;
 export let height = 400;
@@ -51,6 +52,7 @@ const FLOW_COLORS = {
     personal_transfer: { color: 'var(--flow-transfer)',     glow: 'var(--flow-transfer-glow)' },
     from_balance:      { color: 'var(--flow-from-balance)', glow: 'var(--flow-from-balance-glow)' },
     to_balance:        { color: 'var(--flow-to-balance)',   glow: 'var(--flow-to-balance-glow)' },
+    cc_repaid:         { color: '#D97706',                  glow: '#FBBF24' },
     _default:          { color: 'var(--flow-default)',      glow: 'var(--flow-default-glow)' },
 };
 
@@ -75,23 +77,77 @@ function getFlowColor(nodeId) {
     let prevGraphKey = '';
     let graphData = null;
 
+    // ── Ghost Flow state ──
+    let ghostFlowPath = null;
+    let ghostNode = null;
+    let ghostComputedHeight = 0;
+
     $: {
         // Build a lightweight key from the data that actually affects layout.
-        // selectedCategory and theme changes do NOT affect layout â only visual props.
+        // selectedCategory and theme changes do NOT affect layout — only visual props.
         // Privacy mode is included to force label re-render (layout stays the same).
-        const key = `${income}|${expenses}|${savingsTransfer}|${personalTransfer}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
+        const key = `${income}|${expenses}|${savingsTransfer}|${personalTransfer}|${ccRepaid}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
 
         if (key !== prevGraphKey) {
             prevGraphKey = key;
-            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories);
+            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories, ccRepaid);
             if (containerEl && graphData && mounted) {
                 layoutSankey(graphData);
             }
         }
     }
 
-function buildGraph(inc, exp, savTotal, ptTotal, cats) {
-    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0) return null;
+    // ── Ghost Flow geometry (recomputes when nodes or ccRepaid change) ──
+    $: {
+        if (nodes.length > 0 && ccRepaid > 0.01) {
+            const ccPaid = ccRepaid;
+            const incomeNode = nodes.find(n => n.id === 'income');
+            const maxDepth = nodes.reduce((mx, n) => Math.max(mx, n.depth || 0), 0);
+            const destNodes = nodes.filter(n => n.depth === maxDepth && !n.isGhost);
+            const maxX = destNodes.length > 0 ? Math.max(...destNodes.map(n => n.x0)) : (svgWidth - 120);
+            const maxY = nodes.filter(n => !n.isGhost).reduce((mx, n) => Math.max(mx, n.y1 || 0), 0);
+
+            if (incomeNode) {
+                const ghostY0 = maxY + 36;
+                const incomeHeight = incomeNode.y1 - incomeNode.y0;
+                const ghostHeight = Math.max(18, Math.min(40, ccPaid / (incomeNode.value || 1) * incomeHeight));
+                ghostNode = {
+                    x0: maxX,
+                    x1: maxX + NODE_WIDTH,
+                    y0: ghostY0,
+                    y1: ghostY0 + ghostHeight,
+                    name: 'CC Repaid',
+                    value: ccPaid,
+                    color: '#f472b6'
+                };
+
+                const srcX = incomeNode.x1;
+                const srcY0 = incomeNode.y1 - ghostHeight;
+                const srcY1 = incomeNode.y1;
+                const tgtX = ghostNode.x0;
+                const tgtY0 = ghostNode.y0;
+                const tgtY1 = ghostNode.y1;
+                const midX = (srcX + tgtX) / 2;
+
+                ghostFlowPath = {
+                    d: `M${srcX},${srcY0} C${midX},${srcY0} ${midX},${tgtY0} ${tgtX},${tgtY0} L${tgtX},${tgtY1} C${midX},${tgtY1} ${midX},${srcY1} ${srcX},${srcY1} Z`,
+                    value: ccPaid
+                };
+                ghostComputedHeight = ghostNode.y1 + 50;
+            } else {
+                ghostFlowPath = null;
+                ghostNode = null;
+                ghostComputedHeight = 0;
+            }
+        } else {
+            ghostFlowPath = null;
+            ghostNode = null;
+            ghostComputedHeight = 0;
+        }
+    }
+
+function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
+    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0 && ccRepaidAmt === 0) return null;
 
     const top = (cats || []).slice(0, 10);
     const categoryTotal = top.reduce((s, c) => s + (c.total || 0), 0);
@@ -120,6 +176,11 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats) {
         'to_balance': surplus
     };
     top.forEach(c => { realValues[c.category] = c.total; });
+
+    // Store ccRepaid in realValues for display (ghost node uses this)
+    if (ccRepaidAmt > 0.01) {
+        realValues['cc_repaid'] = ccRepaidAmt;
+    }
 
     const nodeList = [];
 
@@ -154,6 +215,9 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats) {
     if (surplus > 0.01) {
         nodeList.push({ id: 'to_balance', label: 'To Balance', color: FLOW_COLORS.to_balance.color });
     }
+
+    // NOTE: Ghost node (CC Repaid) is NO LONGER added to the D3 Sankey node list.
+    // It is rendered entirely outside the layout as a manual SVG overlay (see ghostNode reactive block).
 
     top.forEach(c => {
         const catId = c.category.trim();
@@ -256,6 +320,11 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats) {
             id: 'income-to_balance'
         });
     }
+
+    //    Ghost: CC Repaid (visual only, does not affect Sankey balance)   
+    // This link is injected AFTER the Sankey layout as a visual overlay.
+    // We store the data here but render it separately to avoid breaking d3-sankey's
+    // flow conservation constraint.
 
     // ── Expenses → Category leaf nodes ──
     top.forEach(c => {
@@ -470,11 +539,13 @@ function getNodeLabelOpacity(node) {
 
 function isLeafNode(node) {
     if (isHiddenNode(node)) return false;
+    if (node.isGhost) return false;
     return node.id !== 'income' && node.id !== 'expenses' && node.id !== '_unallocated' && node.id !== 'from_balance' && node.id !== 'to_balance';
 }
 
 function isClickable(node) {
     if (isHiddenNode(node)) return false;
+    if (node.isGhost) return false;
     return node.id !== 'income' && node.id !== 'expenses' && node.id !== '_unallocated' && node.id !== 'from_balance' && node.id !== 'to_balance';
 }
 
@@ -592,9 +663,9 @@ onMount(() => {
 });
 </script>
 
-<div bind:this={containerEl} class="sankey-container" class:animate-in={animateIn} style="height: {computedHeight}px; position: relative;">
+<div bind:this={containerEl} class="sankey-container" class:animate-in={animateIn} style="height: {ghostComputedHeight > computedHeight ? ghostComputedHeight : computedHeight}px; position: relative;">
     {#if nodes.length > 0}
-        <svg width={svgWidth} height={computedHeight} class="sankey-svg">
+        <svg width={svgWidth} height={ghostComputedHeight > computedHeight ? ghostComputedHeight : computedHeight} class="sankey-svg">
             <defs>
                 <!-- ── Node outer glow (luminous halo) ── -->
                 <filter id="nodeGlow" x="-60%" y="-60%" width="220%" height="220%">
@@ -722,8 +793,8 @@ onMount(() => {
             <!-- ── Nodes with luminous glow ── -->
             <g class="sankey-nodes">
                 {#each nodes as node (node.id + '_' + selectedCategory)}
-                    {#if !isHiddenNode(node)}
-                        <!-- Outer ambient glow – filter only on hover/selected for perf -->
+                    {#if !isHiddenNode(node) && !node.isGhost}
+                        <!-- Outer ambient glow — filter only on hover/selected for perf -->
                         <rect
                             x={node.x0 - 5} y={node.y0 - 5}
                             width={node.x1 - node.x0 + 10}
@@ -803,6 +874,70 @@ onMount(() => {
                     {/if}
                 {/each}
             </g>
+
+            <!-- ── Ghost Flow Layer (CC Repaid) ── -->
+            {#if ghostFlowPath && ghostNode}
+                <g class="ghost-flow-layer" opacity="0.6">
+                    <defs>
+                        <linearGradient id="ghost-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.45" />
+                            <stop offset="100%" stop-color="#f472b6" stop-opacity="0.55" />
+                        </linearGradient>
+                    </defs>
+
+                    <!-- Ghost link (filled ribbon, dashed outline) -->
+                    <path
+                        d={ghostFlowPath.d}
+                        fill="url(#ghost-grad)"
+                        fill-opacity="0.16"
+                        stroke="#f472b6"
+                        stroke-width="1.5"
+                        stroke-dasharray="8 4"
+                        stroke-opacity="0.6"
+                    >
+                        <title>CC Repaid: {formatCurrency(ghostNode.value)}</title>
+                    </path>
+
+                    <!-- Ghost destination node -->
+                    <rect
+                        x={ghostNode.x0}
+                        y={ghostNode.y0}
+                        width={ghostNode.x1 - ghostNode.x0}
+                        height={ghostNode.y1 - ghostNode.y0}
+                        rx="6"
+                        fill="#f472b6"
+                        fill-opacity="0.30"
+                        stroke="#f472b6"
+                        stroke-width="1.5"
+                        stroke-dasharray="6 3"
+                        on:mouseenter={(e) => {
+                            tooltip = {
+                                show: true,
+                                x: e.offsetX,
+                                y: e.offsetY - 10,
+                                text: 'CC Repaid',
+                                subtext: formatCurrency(ccRepaid) + ' — Payment toward prior month\'s credit card charges. Not counted as new spending.'
+                            };
+                        }}
+                        on:mouseleave={() => { tooltip = { ...tooltip, show: false }; }}
+                        style="cursor: help;"
+                    />
+
+                    <!-- Ghost node label (single line, matching other leaf nodes) -->
+                    <text
+                        x={ghostNode.x0 - 10}
+                        y={(ghostNode.y0 + ghostNode.y1) / 2}
+                        dy="0.35em"
+                        text-anchor="end"
+                        fill="#f472b6"
+                        opacity="0.85"
+                        style="font-style: italic;"
+                    >
+                        <tspan font-family="'Inter', system-ui, sans-serif" font-size="11.5" font-weight="600">CC Repaid</tspan>
+                        <tspan dx="6" font-family="'DM Mono', 'Cascadia Code', monospace" font-size="10.5" font-weight="500" opacity="0.85" fill="#ffffff">{formatCompact(ghostNode.value)}</tspan>
+                    </text>
+                </g>
+            {/if}
         </svg>
 
         {#if tooltip.show}
@@ -1019,4 +1154,16 @@ onMount(() => {
 
     /* Light mode dark island: also use screen blend for luminous flows */
     :global(:root:not(.dark)) .sankey-flow-pulse { mix-blend-mode: screen; }
+
+    /* Ghost Flow Layer */
+    .ghost-flow-layer {
+        transition: opacity 0.4s ease;
+    }
+    .ghost-flow-layer path {
+        animation: ghostPulse 3s ease-in-out infinite alternate;
+    }
+    @keyframes ghostPulse {
+        0%   { stroke-opacity: 0.4; fill-opacity: 0.10; }
+        100% { stroke-opacity: 0.7; fill-opacity: 0.22; }
+    }
 </style>

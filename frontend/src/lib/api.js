@@ -98,7 +98,7 @@ function appendProfileParam(endpoint, method) {
     // Don't append to mutation endpoints EXCEPT copilot (which benefits from context)
     // Note: subscription endpoints that need profile pass it manually in their method definitions
     if (isMutation(method) && !endpoint.startsWith('/copilot')) return endpoint;
-    
+
     try {
         const profile = get(profileParam);
         if (!profile) return endpoint; // household or empty = no filter
@@ -254,8 +254,15 @@ export function createApi(fetchFn = fetch) {
         getNetWorthSeries: (interval = 'weekly') =>
             request(`/analytics/net-worth-series?interval=${interval}`),
 
-        getDashboardBundle: (nwInterval = 'biweekly') =>
-            request(`/dashboard-bundle?nw_interval=${nwInterval}`),
+        getDashboardBundle: (nwInterval = 'biweekly', month = null) => {
+            const params = new URLSearchParams();
+            params.set('nw_interval', nwInterval);
+            if (month) params.set('month', month);
+            return request(`/dashboard-bundle?${params.toString()}`);
+        },
+
+        getSankeyData: (month) =>
+            request(`/analytics/sankey${month ? '?month=' + month : ''}`),
 
         getMerchants: (month) =>
             request(`/merchants${month ? '?month=' + month : ''}`),
@@ -362,3 +369,4 @@ export function createApi(fetchFn = fetch) {
 
 /** Default client-side API instance (uses window.fetch) */
 export const api = createApi();
+

@@ -34,5 +34,10 @@ export async function load({ fetch }) {
         monthly: bundle.monthly || [],
         categories: bundle.categories || [],
         netWorthSeries: Array.isArray(bundle.netWorthSeries) ? bundle.netWorthSeries : [],
+        savingsTransferTotal: bundle.savingsTransferTotal || 0,
+        personalTransferTotal: bundle.personalTransferTotal || 0,
+        monthlyCategoryBreakdown: Array.isArray(bundle.monthlyCategoryBreakdown) ? bundle.monthlyCategoryBreakdown : [],
+        ccRepaid: bundle.ccRepaid || 0,
+        externalTransfers: bundle.externalTransfers || 0,
     };
 }
