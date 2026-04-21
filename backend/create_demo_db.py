@@ -81,6 +81,13 @@ VARIABLE_SPEND = [
     MerchantSeed("RIVER PHARMACY", "River Pharmacy", "Healthcare", "riverpharmacy.example", "Pharmacy", "Seattle", "WA", 12, 58),
 ]
 
+SPECIAL_PURCHASES = [
+    MerchantSeed("SKYLINE AIR", "Skyline Air", "Transportation", "skylineair.example", "Travel", "San Diego", "CA", 220, 540),
+    MerchantSeed("HEARTH HOME", "Hearth Home", "Shopping", "hearthhome.example", "Home Goods", "Seattle", "WA", 140, 420),
+    MerchantSeed("PEAK OUTDOOR", "Peak Outdoor", "Shopping", "peakoutdoor.example", "Outdoor Retail", "Bend", "OR", 120, 360),
+    MerchantSeed("NOVA MEDICAL", "Nova Medical", "Healthcare", "novamedical.example", "Healthcare", "Seattle", "WA", 90, 260),
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create a synthetic Folio demo database.")
@@ -219,6 +226,13 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
     for months_ago in range(months - 1, -1, -1):
         anchor = month_anchor(months_ago)
         year, month = anchor.year, anchor.month
+        progress = months - months_ago - 1
+
+        # Give each month a different personality so charts feel less synthetic.
+        month_profile = [0.84, 0.92, 1.05, 0.97, 1.18, 0.89, 1.27, 1.01][progress % 8]
+        grocery_profile = [0.88, 0.95, 1.02, 1.08, 1.16, 0.93, 1.24, 0.98][progress % 8]
+        dining_profile = [0.82, 0.9, 1.12, 0.96, 1.22, 0.92, 1.3, 1.04][progress % 8]
+        transit_profile = [0.9, 1.0, 1.05, 0.93, 1.15, 0.94, 1.18, 0.97][progress % 8]
 
         # Income
         for payday in (1, 15):
@@ -266,28 +280,86 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
         # Variable weekly spend
         for week_start in (5, 12, 19, 26):
             grocery = VARIABLE_SPEND[0]
-            insert_tx(rows, f"demo_tx_{tx_counter:04d}", shared_checking, clamp_day(year, month, week_start), -rng.uniform(grocery.amount_min, grocery.amount_max), grocery.category, grocery, grocery.display)
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                shared_checking,
+                clamp_day(year, month, week_start),
+                -rng.uniform(grocery.amount_min, grocery.amount_max) * grocery_profile,
+                grocery.category,
+                grocery,
+                grocery.display,
+            )
             tx_counter += 1
 
             cafe = VARIABLE_SPEND[1]
-            insert_tx(rows, f"demo_tx_{tx_counter:04d}", primary_credit, clamp_day(year, month, week_start + 1), -rng.uniform(cafe.amount_min, cafe.amount_max), cafe.category, cafe, cafe.display)
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                primary_credit,
+                clamp_day(year, month, week_start + 1),
+                -rng.uniform(cafe.amount_min, cafe.amount_max) * dining_profile,
+                cafe.category,
+                cafe,
+                cafe.display,
+            )
             tx_counter += 1
 
             ride = VARIABLE_SPEND[3]
-            insert_tx(rows, f"demo_tx_{tx_counter:04d}", primary_credit, clamp_day(year, month, week_start + 2), -rng.uniform(ride.amount_min, ride.amount_max), ride.category, ride, ride.display)
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                primary_credit,
+                clamp_day(year, month, week_start + 2),
+                -rng.uniform(ride.amount_min, ride.amount_max) * transit_profile,
+                ride.category,
+                ride,
+                ride.display,
+            )
             tx_counter += 1
 
         # Rotating fun/retail/health spend
         for merchant, day in zip(VARIABLE_SPEND[2:], (8, 14, 17, 22, 24), strict=True):
+            account = primary_credit if merchant.category in {"Food & Dining", "Shopping", "Entertainment"} else primary_checking
+            amount = -rng.uniform(merchant.amount_min, merchant.amount_max) * month_profile
             insert_tx(
                 rows,
                 f"demo_tx_{tx_counter:04d}",
-                primary_credit if merchant.category in {"Food & Dining", "Shopping", "Entertainment"} else primary_checking,
+                account,
                 clamp_day(year, month, day),
-                -rng.uniform(merchant.amount_min, merchant.amount_max),
+                amount,
                 merchant.category,
                 merchant,
                 merchant.display,
+            )
+            tx_counter += 1
+
+        # A couple of months should look meaningfully heavier or lighter.
+        if progress % 4 == 0:
+            purchase = SPECIAL_PURCHASES[(progress // 4) % len(SPECIAL_PURCHASES)]
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                primary_credit if purchase.category in {"Shopping", "Transportation"} else primary_checking,
+                clamp_day(year, month, 21),
+                -rng.uniform(purchase.amount_min, purchase.amount_max),
+                purchase.category,
+                purchase,
+                purchase.display,
+            )
+            tx_counter += 1
+
+        if progress % 5 == 2:
+            merchant = VARIABLE_SPEND[2]
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                primary_credit,
+                clamp_day(year, month, 23),
+                -rng.uniform(merchant.amount_min + 40, merchant.amount_max + 120),
+                merchant.category,
+                merchant,
+                f"{merchant.display} Group Dinner",
             )
             tx_counter += 1
 
