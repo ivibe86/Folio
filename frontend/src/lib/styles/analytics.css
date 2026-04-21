@@ -1588,3 +1588,100 @@ details > summary {
 .dark .analytics-sub-summary-badge {
     background: color-mix(in srgb, var(--badge-color, var(--text-muted)) 14%, transparent);
 }
+
+@media (max-width: 640px) {
+    .analytics-month-picker {
+        width: 100%;
+    }
+
+    .analytics-month-picker-btn {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .analytics-month-picker-dropdown {
+        left: 0;
+        right: auto;
+        min-width: 0;
+        width: min(100%, calc(100vw - 2rem));
+        max-width: calc(100vw - 2rem);
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
+
+    .analytics-recurring-header {
+        display: none;
+    }
+
+    .analytics-recurring-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.625rem 0.75rem;
+        align-items: start;
+        padding: 0.875rem 1rem;
+    }
+
+    .analytics-recurring-row > :first-child {
+        grid-column: 1 / -1;
+    }
+
+    .analytics-recurring-meta {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;
+        gap: 0.2rem;
+        min-width: 0;
+        width: auto !important;
+        text-align: left !important;
+    }
+
+    .analytics-recurring-meta::before {
+        font-size: 0.5625rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        opacity: 0.8;
+    }
+
+    .analytics-recurring-meta-frequency::before {
+        content: 'Freq';
+    }
+
+    .analytics-recurring-meta-amount::before {
+        content: 'Amount';
+    }
+
+    .analytics-recurring-meta-annual::before {
+        content: 'Annual';
+    }
+
+    .analytics-recurring-meta-status::before {
+        content: 'Status';
+    }
+
+    .analytics-recurring-meta-confidence::before {
+        content: 'Confidence';
+    }
+
+    .analytics-recurring-actions {
+        width: auto !important;
+        min-width: 0;
+        justify-self: end;
+    }
+
+    .analytics-recurring-row > .analytics-recurring-actions:last-child {
+        grid-column: 2;
+    }
+
+    .analytics-recurring-action-btn {
+        opacity: 0.72;
+    }
+
+    .analytics-recurring-inactive-trigger {
+        align-items: flex-start;
+        gap: 0.75rem;
+        flex-direction: column;
+    }
+}

@@ -1113,6 +1113,97 @@ h1, h2, h3, h4, h5, h6 {
 
 .rotate-180 { transform: rotate(180deg); }
 
+@media (max-width: 640px) {
+    .period-toggle-track {
+        width: 100%;
+    }
+
+    .period-toggle-thumb {
+        transition: transform 180ms ease-out;
+    }
+
+    .period-toggle-label {
+        padding: 6px 8px;
+        font-size: 0.6875rem;
+    }
+
+    .month-dropdown-wrapper {
+        width: 100%;
+    }
+
+    .month-dropdown-trigger {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .month-dropdown-menu {
+        top: calc(100% + 6px);
+        bottom: auto;
+        left: 0;
+        right: auto;
+        min-width: 0;
+        width: min(100%, calc(100vw - 2rem));
+        max-width: calc(100vw - 2rem);
+        box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18),
+                    0 2px 8px rgba(0, 0, 0, 0.08);
+        animation: monthDropDownMobile 0.16s ease-out;
+    }
+
+    .metric-ribbon {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .metric-ribbon-item {
+        padding: 0.75rem 0.875rem;
+    }
+
+    .metric-ribbon-item + .metric-ribbon-item {
+        border-left: none;
+    }
+
+    .metric-ribbon-item:nth-child(odd) {
+        border-right: 1px solid var(--card-border);
+    }
+
+    .metric-ribbon-item:nth-child(n + 3) {
+        border-top: 1px solid var(--card-border);
+    }
+
+    .metric-ribbon-item.metric-derived-first {
+        border-left: none !important;
+    }
+
+    .metric-ribbon-item.metric-derived-first::after {
+        display: none;
+    }
+
+    .metric-ribbon-item:last-child {
+        grid-column: 1 / -1;
+        border-right: none;
+    }
+
+    .metric-ribbon-value,
+    .metric-ribbon-item.metric-derived .metric-ribbon-value {
+        font-size: 1rem;
+    }
+
+    .metric-ribbon-sub {
+        font-size: 0.5625rem;
+    }
+}
+
+@keyframes monthDropDownMobile {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
 /* ———————————————————————————————————————————
    DELTA BADGES
    ——————————————————————————————————————————— */

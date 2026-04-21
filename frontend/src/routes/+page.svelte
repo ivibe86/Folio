@@ -1,7 +1,6 @@
 <script>
     import '$lib/styles/dashboard.css';
     import '$lib/styles/transactions.css';
-    import { page } from '$app/stores';
     import { onMount, onDestroy, tick } from 'svelte';
     import { api, invalidateCacheByPrefix, invalidateCache } from '$lib/api.js';
     import {
@@ -130,15 +129,10 @@
     // Sankey theater mouse-tracking glow
     let sankeyTheaterEl = null;
     let sankeyGlowOpacity = 0;
-    let debugLoadingMode = '';
-
-    $: debugLoadingMode = $page.url.searchParams.get('debugLoading') || '';
-    $: forceDashboardEnrollmentLoading = ['1', 'dashboard', 'enrollment'].includes(debugLoadingMode);
-    $: forceSankeyLoadingOnly = debugLoadingMode === 'sankey';
-    $: enrollmentLoadingActive = forceDashboardEnrollmentLoading || ($syncing.active && $syncing.context === 'enrollment');
+    $: enrollmentLoadingActive = $syncing.active && $syncing.context === 'enrollment';
     $: heroLoading = isRefreshing || enrollmentLoadingActive;
     $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive;
-    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceSankeyLoadingOnly;
+    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive;
 
     function handleTheaterMouseMove(e) {
         if (!sankeyTheaterEl) return;
@@ -1994,9 +1988,9 @@
          S2: COMPACT METRIC RIBBON
          ═══════════════════════════════════════════════════════ -->
     <section class="mb-6 fade-in-up" style="animation-delay: 100ms">
-        <div class="flex items-center justify-between mb-3">
+        <div class="flex flex-col gap-3 mb-3 sm:flex-row sm:items-center sm:justify-between">
             <p class="section-header">Income & Spending</p>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <div class="period-toggle-track" style="--seg-count: {periodOptions.length}; --active-idx: {activePeriodIdx};">
                     <div class="period-toggle-thumb"></div>
                     {#each periodOptions as p}
@@ -2124,12 +2118,6 @@
             <div class="flex items-center gap-2">
                 <div class="section-accent-bar"></div>
                 <p class="section-header">Money Flow</p>
-                {#if debugLoadingMode}
-                    <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
-                        style="background: rgba(59, 130, 246, 0.10); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.18);">
-                        Debug loading: {debugLoadingMode}
-                    </span>
-                {/if}
                 {#if periodSummary && periodSummary.income < periodSummary.expenses + sankeySavingsTotal + sankeyPersonalTransferTotal}
                     <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
                         style="background: rgba(251, 191, 36, 0.12); color: var(--warning); border: 1px solid rgba(251, 191, 36, 0.20);">
@@ -2153,182 +2141,9 @@
              on:mouseleave={handleTheaterMouseLeave}>
             {#if sankeyLoading}
                 <div class="shimmer-overlay"></div>
-                <div class="sankey-loading-skeleton" aria-hidden="true">
-                    <svg class="sankey-loading-svg" viewBox="0 0 1000 340" preserveAspectRatio="none">
-                        <defs>
-                            <path id="sankeyTubePathA" d="M110 104 C 240 104, 305 122, 418 136" />
-                            <path id="sankeyTubePathB" d="M110 238 C 230 238, 302 220, 418 204" />
-                            <path id="sankeyTubePathC" d="M446 122 C 600 104, 700 84, 840 70" />
-                            <path id="sankeyTubePathD" d="M446 146 C 610 142, 706 134, 840 124" />
-                            <path id="sankeyTubePathE" d="M446 180 C 604 190, 710 202, 840 216" />
-                            <path id="sankeyTubePathF" d="M446 214 C 602 236, 704 256, 840 286" />
-
-                            <linearGradient id="sankeySkeletonSourceGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.26" />
-                                <stop offset="48%" stop-color="#38BDF8" stop-opacity="0.52" />
-                                <stop offset="100%" stop-color="#93C5FD" stop-opacity="0.46" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonReserveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#34D399" stop-opacity="0.20" />
-                                <stop offset="44%" stop-color="#60A5FA" stop-opacity="0.40" />
-                                <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.34" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonOutflowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.28" />
-                                <stop offset="50%" stop-color="#BAE6FD" stop-opacity="0.82" />
-                                <stop offset="100%" stop-color="#60A5FA" stop-opacity="0.34" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonOutflowSoftGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.18" />
-                                <stop offset="50%" stop-color="#7DD3FC" stop-opacity="0.56" />
-                                <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.24" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonPacketGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.00" />
-                                <stop offset="20%" stop-color="#E0F2FE" stop-opacity="0.45" />
-                                <stop offset="50%" stop-color="#FFFFFF" stop-opacity="0.98" />
-                                <stop offset="80%" stop-color="#BAE6FD" stop-opacity="0.45" />
-                                <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.00" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonTubeCoreGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#07111F" stop-opacity="0.94" />
-                                <stop offset="48%" stop-color="#0D1A2B" stop-opacity="0.86" />
-                                <stop offset="100%" stop-color="#111A31" stop-opacity="0.92" />
-                            </linearGradient>
-                            <linearGradient id="sankeySkeletonParticleStreamGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#34D399" stop-opacity="0.00" />
-                                <stop offset="22%" stop-color="#67E8F9" stop-opacity="0.30" />
-                                <stop offset="50%" stop-color="#E0F2FE" stop-opacity="0.72" />
-                                <stop offset="78%" stop-color="#93C5FD" stop-opacity="0.26" />
-                                <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.00" />
-                            </linearGradient>
-
-                            <mask id="sankeyTubeMaskA" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathA" stroke="white" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                            <mask id="sankeyTubeMaskB" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathB" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                            <mask id="sankeyTubeMaskC" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathC" stroke="white" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                            <mask id="sankeyTubeMaskD" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathD" stroke="white" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                            <mask id="sankeyTubeMaskE" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathE" stroke="white" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                            <mask id="sankeyTubeMaskF" maskUnits="userSpaceOnUse">
-                                <rect width="1000" height="340" fill="black" />
-                                <use href="#sankeyTubePathF" stroke="white" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                            </mask>
-                        </defs>
-
-                        <g class="sankey-skeleton-node-aura-group">
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--primary" x="56" y="62" width="62" height="116" rx="22" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--secondary" x="62" y="214" width="50" height="52" rx="18" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--hub" x="408" y="86" width="54" height="160" rx="24" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="40" width="36" height="62" rx="16" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="102" width="36" height="50" rx="16" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="188" width="36" height="56" rx="16" />
-                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="256" width="36" height="72" rx="16" />
-                        </g>
-
-                        <g class="sankey-skeleton-flow-glow-group">
-                            <use href="#sankeyTubePathA" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--a" />
-                            <use href="#sankeyTubePathB" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--b" />
-                            <use href="#sankeyTubePathC" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--c" />
-                            <use href="#sankeyTubePathD" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--d" />
-                            <use href="#sankeyTubePathE" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--e" />
-                            <use href="#sankeyTubePathF" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--f" />
-                        </g>
-
-                        <g class="sankey-skeleton-tube-group">
-                            <use href="#sankeyTubePathA" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--a" />
-                            <use href="#sankeyTubePathB" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--b" />
-                            <use href="#sankeyTubePathC" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--c" />
-                            <use href="#sankeyTubePathD" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--d" />
-                            <use href="#sankeyTubePathE" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--e" />
-                            <use href="#sankeyTubePathF" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--f" />
-
-                            <use href="#sankeyTubePathA" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--a" />
-                            <use href="#sankeyTubePathB" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--b" />
-                            <use href="#sankeyTubePathC" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--c" />
-                            <use href="#sankeyTubePathD" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--d" />
-                            <use href="#sankeyTubePathE" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--e" />
-                            <use href="#sankeyTubePathF" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--f" />
-                        </g>
-
-                        <g class="sankey-skeleton-particle-group">
-                            <g mask="url(#sankeyTubeMaskA)">
-                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--a" />
-                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle sankey-skeleton-particle--a sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle sankey-skeleton-particle--a sankey-skeleton-particle--trail" />
-                            </g>
-                            <g mask="url(#sankeyTubeMaskB)">
-                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--b" />
-                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle sankey-skeleton-particle--b sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle sankey-skeleton-particle--b sankey-skeleton-particle--trail" />
-                            </g>
-                            <g mask="url(#sankeyTubeMaskC)">
-                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--c" />
-                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle sankey-skeleton-particle--c sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle sankey-skeleton-particle--c sankey-skeleton-particle--trail" />
-                            </g>
-                            <g mask="url(#sankeyTubeMaskD)">
-                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--d" />
-                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle sankey-skeleton-particle--d sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle sankey-skeleton-particle--d sankey-skeleton-particle--trail" />
-                            </g>
-                            <g mask="url(#sankeyTubeMaskE)">
-                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--e" />
-                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle sankey-skeleton-particle--e sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle sankey-skeleton-particle--e sankey-skeleton-particle--trail" />
-                            </g>
-                            <g mask="url(#sankeyTubeMaskF)">
-                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--f" />
-                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle sankey-skeleton-particle--f sankey-skeleton-particle--lead" />
-                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle sankey-skeleton-particle--f sankey-skeleton-particle--trail" />
-                            </g>
-                        </g>
-
-                        <g class="sankey-skeleton-junction-group">
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--source sankey-skeleton-port--a" cx="112" cy="104" r="8" />
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--source sankey-skeleton-port--b" cx="112" cy="238" r="7" />
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--c" cx="434" cy="136" r="8" />
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--d" cx="434" cy="164" r="7" />
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--e" cx="434" cy="196" r="7" />
-                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--f" cx="434" cy="224" r="8" />
-                            <circle class="sankey-skeleton-hub-ring sankey-skeleton-hub-ring--a" cx="435" cy="165" r="18" />
-                            <circle class="sankey-skeleton-hub-ring sankey-skeleton-hub-ring--b" cx="435" cy="207" r="18" />
-                        </g>
-
-                        <g class="sankey-skeleton-arrival-group">
-                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--a" cx="844" cy="71" r="7" />
-                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--b" cx="844" cy="127" r="6" />
-                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--c" cx="844" cy="216" r="7" />
-                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--d" cx="844" cy="287" r="8" />
-                        </g>
-
-                        <g class="sankey-skeleton-node-group">
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--primary" x="74" y="74" width="30" height="92" rx="12" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--secondary" x="78" y="218" width="22" height="40" rx="10" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--hub" x="420" y="98" width="30" height="136" rx="12" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="48" width="20" height="46" rx="9" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="110" width="20" height="34" rx="9" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="196" width="20" height="40" rx="9" />
-                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="264" width="20" height="56" rx="9" />
-                        </g>
-                    </svg>
-                </div>
             {/if}
             <div class="sankey-theater-glow" style="opacity: {sankeyGlowOpacity};"></div>
-            {#if !sankeyLoading && periodSummary}
+            {#if periodSummary}
                 <SankeyChart
                     income={periodSummary.income}
                     expenses={periodSummary.expenses}

@@ -1094,12 +1094,12 @@
 
     {#if waterfallData && waterfallGeometry}
         <section class="mb-10 fade-in-up" style="animation-delay: 60ms">
-            <div class="flex items-center justify-between mb-1" style="position: relative; z-index: 90;">
+            <div class="flex flex-col gap-3 mb-1 sm:flex-row sm:items-center sm:justify-between" style="position: relative; z-index: 90;">
                 <div class="flex items-center gap-2">
                     <div class="section-accent-bar"></div>
                     <p class="section-header">Cash Flow Waterfall</p>
                 </div>
-                <div class="flex items-center gap-3">
+                <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-3">
                     <!-- iOS-style period toggle (relocated from header) -->
                     <div class="period-toggle-track" style="--seg-count: {analyticsPeriods.length}; --active-idx: {activeAnalyticsPeriodIdx};">
                         <div class="period-toggle-thumb"></div>
@@ -1527,15 +1527,15 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="w-16 flex justify-center">
+                        <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
                             <span class="text-[9px] font-mono font-medium" style="color: var(--text-muted)">{item.frequency}</span>
                         </div>
-                        <span class="text-[12px] font-bold font-mono w-20 text-right" style="color: var(--text-primary)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                        <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                        <div class="w-16 flex justify-center">
+                        <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-bold font-mono w-20 text-right" style="color: var(--text-primary)">{formatCurrency(item.amount || item.avg_amount)}</span>
+                        <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
+                        <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
                             <span class="analytics-recurring-badge-active">Active</span>
                         </div>
-                        <div class="w-16 flex justify-center">
+                        <div class="analytics-recurring-meta analytics-recurring-meta-confidence w-16 flex justify-center">
                             {#if item.confidence === 'user'}
                                 <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
                                     style="background: color-mix(in srgb, #8b5cf6 12%, transparent); color: #8b5cf6">
@@ -1553,7 +1553,7 @@
                                 </span>
                             {/if}
                         </div>
-                        <div class="w-8 flex justify-center">
+                        <div class="analytics-recurring-actions w-8 flex justify-center">
                             <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
                                 title="Not a subscription — dismiss"
                                 on:click|stopPropagation={() => handleDismissSubscription(item)}>
@@ -1628,22 +1628,22 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="w-16 flex justify-center">
+                                    <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
                                         <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
                                     </div>
-                                    <span class="text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                                    <div class="w-16 flex justify-center">
+                                    <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
+                                    <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
                                         <span class="analytics-recurring-badge-inactive">Inactive</span>
                                     </div>
-                                    <div class="w-16 flex justify-center">
+                                    <div class="analytics-recurring-actions w-16 flex justify-center">
                                         <button class="analytics-recurring-action-btn analytics-recurring-cancel-btn"
                                             title="Confirm cancelled"
                                             on:click|stopPropagation={() => handleCancelSubscription(item)}>
                                             <span class="text-[8px] font-bold whitespace-nowrap">Cancel</span>
                                         </button>
                                     </div>
-                                    <div class="w-8 flex justify-center">
+                                    <div class="analytics-recurring-actions w-8 flex justify-center">
                                         <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
                                             title="Not a subscription — dismiss"
                                             on:click|stopPropagation={() => handleDismissSubscription(item)}>
@@ -1704,16 +1704,16 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="w-16 flex justify-center">
+                                    <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
                                         <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
                                     </div>
-                                    <span class="text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                                    <div class="w-16 flex justify-center">
+                                    <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
+                                    <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
                                         <span class="analytics-recurring-badge-cancelled">Cancelled</span>
                                     </div>
-                                    <div class="w-16"></div>
-                                    <div class="w-8"></div>
+                                    <div class="analytics-recurring-actions w-16"></div>
+                                    <div class="analytics-recurring-actions w-8"></div>
                                 </div>
                             {/each}
                         </div>
@@ -1760,7 +1760,7 @@
                                             {/if}
                                         </div>
                                     </div>
-                                    <div class="flex-shrink-0">
+                                    <div class="analytics-recurring-actions flex-shrink-0">
                                         <button class="analytics-recurring-restore-btn"
                                             on:click|stopPropagation={() => handleRestoreSubscription(item)}>
                                             <span class="material-symbols-outlined text-[12px]">undo</span>
