@@ -154,9 +154,9 @@
 .dark .analytics-waterfall-theater::after {
     background: linear-gradient(90deg,
         transparent,
-        rgba(90, 159, 212, 0.08) 30%,
-        rgba(56, 189, 248, 0.12) 50%,
-        rgba(90, 159, 212, 0.08) 70%,
+        rgba(56, 189, 248, 0.045) 30%,
+        rgba(56, 189, 248, 0.075) 50%,
+        rgba(56, 189, 248, 0.045) 70%,
         transparent
     );
 }

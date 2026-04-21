@@ -6,7 +6,7 @@ FastAPI backend for Folio personal finance tracker.
 from pathlib import Path as FilePath
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
@@ -16,19 +16,32 @@ from bank import validate_teller_config, close_all_clients
 import os
 
 from log_config import get_logger, setup_logging
+from sync_status import start_sync, finish_sync, get_sync_status, update_phase
 
 # Ensure logging is configured before anything else
 setup_logging()
 
 logger = get_logger(__name__)
 
+DEMO_MODE = os.getenv("DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
 from data_manager import (
-    get_data, fetch_fresh_data, update_transaction_category,
-    add_category, get_categories, get_category_rules,
+    get_data, fetch_fresh_data, fetch_simplefin_data,
+    update_transaction_category,
+    add_category, get_categories, get_categories_meta, get_category_rules,
     get_accounts_filtered, get_transactions_paginated,
     get_summary_data, get_monthly_analytics_data,
     get_category_analytics_data, get_merchant_insights_data,
     get_net_worth_series_data, get_dashboard_bundle_data,
+    update_category_parent, update_category_rule,
+    get_copilot_conversations, get_data_browser_rows,
+    get_category_budgets, update_category_budget,
+    get_merchant_directory, update_merchant_directory_entry,
+    update_transaction_excluded, get_transactions_for_merchant,
+    get_category_rule_impact,
+    explain_category_assignment, find_merchants_missing_category,
+    bulk_recategorize_preview, preview_rule_creation,
+    rename_merchant_variants, repair_polluted_merchant_categories,
 )
 from categorizer import get_active_categories
 from database import init_db, get_db, get_db_session, close_thread_local_connection
@@ -79,17 +92,25 @@ async def health_redirect():
 
 @app.on_event("startup")
 def startup():
-    validate_teller_config()
+    if not DEMO_MODE:
+        validate_teller_config()
     init_db()
     # These were previously auto-called at database.py import time.
     # Moved here for explicit, single-point initialization.
     from database import sync_subscription_seeds, sync_enrichment_cache_from_seeds
     sync_subscription_seeds()
     sync_enrichment_cache_from_seeds()
-    # Backfill transfer sub-classification for any existing transfers with NULL expense_type.
-    # Only does work on first deploy or if new transfer transactions were inserted without classification.
-    from data_manager import backfill_transfer_types
-    backfill_transfer_types()
+    # Repair legacy non-spending misclassifications before the UI reads totals.
+    from data_manager import (
+        repair_non_spending_transaction_categories,
+        repair_polluted_merchant_categories,
+        repair_cc_income_misclassifications,
+        reclassify_transfers,
+    )
+    repair_non_spending_transaction_categories()
+    repair_polluted_merchant_categories()
+    repair_cc_income_misclassifications()
+    reclassify_transfers()
 
 
 @app.on_event("shutdown")
@@ -105,7 +126,7 @@ app.middleware("http")(rate_limit_middleware)
 # [FIX M1] Trusted Host — blocks DNS rebinding attacks
 # Only requests with Host header matching these values are accepted
 _trusted_hosts = os.getenv(
-    "TRUSTED_HOSTS", "localhost,127.0.0.1,backend"
+    "TRUSTED_HOSTS", "*" if DEMO_MODE else "localhost,127.0.0.1,backend"
 ).split(",")
 app.add_middleware(
     TrustedHostMiddleware,
@@ -168,11 +189,30 @@ def _invalidate_profile_cache():
     _VALID_PROFILES = None
 
 
+def _require_live_mode(detail: str = "This action is disabled in demo mode.") -> None:
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail=detail)
+
+
+def _app_config_payload() -> dict:
+    return {
+        "demoMode": DEMO_MODE,
+        "bankLinkingEnabled": not DEMO_MODE,
+        "manualSyncEnabled": not DEMO_MODE,
+        "demoPersistence": "ephemeral" if DEMO_MODE else "persistent",
+    }
+
+
 # ── Models ──
 
 
 class CategoryUpdate(BaseModel):
     category: str
+    one_off: bool = False
+
+
+class TransactionExcludeUpdate(BaseModel):
+    is_excluded: bool
 
 
 class CopilotRequest(BaseModel):
@@ -220,6 +260,12 @@ def profiles():
     return _get_profile_list()
 
 
+@app.get("/api/app-config")
+def app_config():
+    """Frontend-safe runtime flags for demo/public deployments."""
+    return _app_config_payload()
+
+
 @app.get("/api/accounts")
 def accounts(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
     return get_accounts_filtered(profile=profile, conn=db)
@@ -258,14 +304,15 @@ def update_category(tx_id: str, body: CategoryUpdate):
             status_code=400,
             detail="Category cannot be empty.",
         )
-    result = update_transaction_category(tx_id, body.category)
+    result = update_transaction_category(tx_id, body.category, one_off=body.one_off)
     if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
     response = {"status": "updated", "tx_id": tx_id, "category": body.category}
 
-    # Enhancement 7: Pass through subscription prompt signal
     if isinstance(result, dict):
+        response["retroactive_count"] = result.get("retroactive_count", 0)
+        # Enhancement 7: Pass through subscription prompt signal
         if result.get("subscription_prompt"):
             response["subscription_prompt"] = True
             response["merchant"] = result.get("merchant", "")
@@ -273,6 +320,14 @@ def update_category(tx_id: str, body: CategoryUpdate):
             response["transaction_id"] = result.get("transaction_id", tx_id)
 
     return response
+
+
+@app.patch("/api/transactions/{tx_id}/exclude")
+def update_transaction_exclusion(tx_id: str, body: TransactionExcludeUpdate, db=Depends(get_db_session)):
+    result = update_transaction_excluded(tx_id=tx_id, is_excluded=body.is_excluded, conn=db)
+    if not result:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return {"status": "updated", "transaction": result}
 
 
 @app.get("/api/categories")
@@ -297,6 +352,10 @@ def create_category(body: NewCategory):
 
 class ExpenseTypeUpdate(BaseModel):
     expense_type: str
+
+
+class CategoryParentUpdate(BaseModel):
+    parent_category: str | None = None
 
 
 @app.patch("/api/categories/{category_name}/expense-type")
@@ -330,10 +389,66 @@ def update_expense_type(category_name: str, body: ExpenseTypeUpdate, db=Depends(
     }
 
 
+@app.get("/api/categories/meta")
+def categories_meta():
+    return get_categories_meta()
+
+
+@app.patch("/api/categories/{category_name}/parent")
+def update_category_parent_endpoint(category_name: str, body: CategoryParentUpdate, db=Depends(get_db_session)):
+    try:
+        result = update_category_parent(category_name, body.parent_category, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Category not found.")
+
+    return {"status": "updated", "category": result}
+
+
 @app.get("/api/category-rules")
 def list_category_rules(source: str | None = Query(None)):
     """List category rules, optionally filtered by source ('user' or 'system')."""
     return get_category_rules(source)
+
+
+class CategoryRuleUpdate(BaseModel):
+    category: str | None = None
+    priority: int | None = None
+    is_active: bool | None = None
+
+
+@app.patch("/api/category-rules/{rule_id}")
+def update_category_rule_endpoint(rule_id: int, body: CategoryRuleUpdate, db=Depends(get_db_session)):
+    try:
+        result = update_category_rule(
+            rule_id=rule_id,
+            category=body.category,
+            priority=body.priority,
+            is_active=body.is_active,
+            conn=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Rule not found.")
+
+    return {"status": "updated", "rule": result}
+
+
+@app.get("/api/category-rules/{rule_id}/impact")
+def category_rule_impact(
+    rule_id: int,
+    profile: str | None = Depends(validate_profile),
+    limit: int = Query(20, ge=1, le=100),
+    db=Depends(get_db_session),
+):
+    result = get_category_rule_impact(rule_id=rule_id, profile=profile, limit=limit, conn=db)
+    if not result:
+        raise HTTPException(status_code=404, detail="Rule not found.")
+    return result
 
 
 @app.get("/api/analytics/monthly")
@@ -612,14 +727,26 @@ def redetect_subscriptions(profile: str | None = Depends(validate_profile)):
 
 @app.post("/api/sync")
 def sync(profile: str | None = Query(None)):
+    _require_live_mode("Manual sync is disabled in demo mode.")
     # Currently syncs all profiles. Profile param reserved for future selective sync.
-    data = fetch_fresh_data()
-    return {
-        "status": "synced",
-        "accounts": len(data["accounts"]),
-        "transactions": len(data["transactions"]),
-        "last_updated": data["last_updated"],
-    }
+    job_id = start_sync("manual-sync", phase="starting", detail="Starting manual sync")
+    try:
+        data = fetch_fresh_data(sync_job_id=job_id)
+        finish_sync(job_id, status="completed")
+        return {
+            "status": "synced",
+            "accounts": len(data["accounts"]),
+            "transactions": len(data["transactions"]),
+            "last_updated": data["last_updated"],
+        }
+    except Exception as exc:
+        finish_sync(job_id, status="failed", error=str(exc))
+        raise
+
+
+@app.get("/api/sync-status")
+def sync_status():
+    return get_sync_status()
 
 
 class CopilotConfirm(BaseModel):
@@ -659,6 +786,365 @@ async def copilot_confirm(body: CopilotConfirm, profile: str | None = Query(None
         pending_sql=pending["sql"],
     )
     return result
+
+
+@app.get("/api/copilot/history")
+def copilot_history(
+    profile: str | None = Depends(validate_profile),
+    limit: int = Query(40, ge=1, le=200),
+    db=Depends(get_db_session),
+):
+    return {"items": get_copilot_conversations(limit=limit, profile=profile, conn=db)}
+
+
+@app.get("/api/copilot/explain-category")
+def copilot_explain_category(
+    merchant: str = Query(..., description="Merchant name or description fragment"),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """
+    Deterministic tool: explain why a merchant is categorized the way it is.
+    Backed by real transaction + rule data — no LLM.
+    """
+    data = explain_category_assignment(merchant_query=merchant, profile=profile, conn=db)
+    count = data["transaction_count"]
+    dominant_cat = data["dominant_category"] or "an unknown category"
+    dominant_src = data["dominant_source"] or "unknown"
+    pattern = data["normalized_pattern"]
+    rule = data["rule"]
+
+    source_label = {
+        "user": "a manual override",
+        "user-rule": "a user-defined rule",
+        "llm": "AI categorization",
+        "rule": "a built-in rule",
+        "fallback": "the fallback default",
+        "teller": "the bank's own category",
+        "enricher": "merchant enrichment",
+        "merchant-memory": "merchant memory",
+    }.get(dominant_src, dominant_src)
+
+    if count == 0:
+        answer = f'No transactions found matching "{merchant}" (normalized: {pattern}).'
+    else:
+        rule_detail = ""
+        if rule:
+            rule_detail = (
+                f" A {'user' if rule['source'] == 'user' else 'built-in'} rule exists "
+                f"for pattern **{rule['pattern']}** (priority {rule['priority']})."
+            )
+        answer = (
+            f'**{merchant}** is categorized as **{dominant_cat}** '
+            f"across {count} transaction{'s' if count != 1 else ''}. "
+            f"Assigned by {source_label}.{rule_detail}"
+        )
+
+    return {
+        "answer": answer,
+        "operation": "read",
+        "distribution": data["distribution"],
+        "samples": data["samples"],
+        "rule": rule,
+        "transaction_count": count,
+    }
+
+
+@app.get("/api/copilot/merchants-missing-category")
+def copilot_merchants_missing_category(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """
+    Deterministic tool: find merchant patterns with uncategorized transactions.
+    """
+    items = find_merchants_missing_category(profile=profile, conn=db)
+    total_tx = sum(item["transaction_count"] for item in items)
+    if not items:
+        answer = "No uncategorized transactions found. Your data looks clean!"
+    else:
+        patterns = ", ".join(item["pattern"] for item in items[:5])
+        more = f" and {len(items) - 5} more" if len(items) > 5 else ""
+        answer = (
+            f"Found **{len(items)}** merchant pattern{'s' if len(items) != 1 else ''} "
+            f"with {total_tx} uncategorized transaction{'s' if total_tx != 1 else ''}: "
+            f"{patterns}{more}."
+        )
+    return {"answer": answer, "operation": "read", "items": items}
+
+
+class BulkRecategorizePreviewRequest(BaseModel):
+    merchant_query: str
+    new_category: str
+
+
+@app.post("/api/copilot/bulk-recategorize-preview")
+def copilot_bulk_recategorize_preview(
+    body: BulkRecategorizePreviewRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """
+    Deterministic tool: preview moving all transactions for a merchant to a new category.
+    Returns a confirmation_id so the existing /copilot/confirm route can execute it.
+    """
+    from copilot import store_pending_sql
+
+    data = bulk_recategorize_preview(
+        merchant_query=body.merchant_query,
+        new_category=body.new_category,
+        profile=profile,
+        conn=db,
+    )
+    count = data["count"]
+
+    if count == 0:
+        return {
+            "answer": (
+                f'No transactions found for "{body.merchant_query}" that aren\'t already '
+                f'categorized as **{body.new_category}**.'
+            ),
+            "operation": "read",
+            "count": 0,
+            "preview_changes": [],
+            "needs_confirmation": False,
+        }
+
+    confirmation_id = store_pending_sql(data["update_sql"], profile)
+
+    preview_changes = [
+        {"column": "category", "raw_value": body.new_category, "new_value": body.new_category}
+    ]
+
+    answer = (
+        f"Found **{count}** {body.merchant_query} transaction{'s' if count != 1 else ''} "
+        f"to move to **{body.new_category}**. Confirm to apply."
+    )
+
+    return {
+        "answer": answer,
+        "operation": "write_preview",
+        "count": count,
+        "samples": data["samples"],
+        "preview_changes": preview_changes,
+        "confirmation_id": confirmation_id,
+        "needs_confirmation": True,
+        "rows_affected": count,
+    }
+
+
+class PreviewRuleRequest(BaseModel):
+    pattern: str
+    category: str
+
+
+@app.post("/api/copilot/preview-rule")
+def copilot_preview_rule(
+    body: PreviewRuleRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """
+    Deterministic tool: preview creating a new user category rule.
+    Returns a confirmation_id so the existing /copilot/confirm route can execute the INSERT.
+    """
+    from copilot import store_pending_sql
+
+    data = preview_rule_creation(
+        raw_pattern=body.pattern,
+        category=body.category,
+        profile=profile,
+        conn=db,
+    )
+    count = data["count"]
+    existing = data["existing_rule"]
+    pattern = data["pattern"]
+
+    confirmation_id = store_pending_sql(data["insert_sql"], profile)
+
+    preview_changes = [
+        {"column": "rule", "raw_value": f"{pattern} → {body.category}", "new_value": body.category}
+    ]
+
+    if existing:
+        existing_note = (
+            f" Note: a rule for **{pattern}** already exists "
+            f"(currently → {existing['category']}) — this will replace it."
+        )
+    else:
+        existing_note = ""
+
+    answer = (
+        f"Creating rule **{pattern}** → **{body.category}** will apply to "
+        f"**{count}** existing transaction{'s' if count != 1 else ''} "
+        f"and all future matches.{existing_note} Confirm to create."
+    )
+
+    return {
+        "answer": answer,
+        "operation": "write_preview",
+        "count": count,
+        "samples": data["samples"],
+        "preview_changes": preview_changes,
+        "confirmation_id": confirmation_id,
+        "needs_confirmation": True,
+        "rows_affected": count,
+        "existing_rule": existing,
+    }
+
+
+class RenameMerchantRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+
+@app.post("/api/copilot/rename-merchant-preview")
+def copilot_rename_merchant_preview(
+    body: RenameMerchantRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """
+    Deterministic tool: preview renaming a merchant across all matching transactions.
+    Returns a confirmation_id so the existing /copilot/confirm route can execute both UPDATEs.
+    """
+    from copilot import store_pending_sql
+
+    data = rename_merchant_variants(
+        old_pattern=body.old_name,
+        new_name=body.new_name,
+        profile=profile,
+        conn=db,
+    )
+    count = data["count"]
+
+    if count == 0:
+        return {
+            "answer": f'No transactions found matching "{body.old_name}".',
+            "operation": "read",
+            "count": 0,
+            "preview_changes": [],
+            "needs_confirmation": False,
+        }
+
+    confirmation_id = store_pending_sql(data["update_sql"], profile)
+    preview_changes = [
+        {"column": "merchant_name", "raw_value": body.new_name, "new_value": body.new_name}
+    ]
+
+    return {
+        "answer": (
+            f"Found **{count}** transaction{'s' if count != 1 else ''} for "
+            f"**{body.old_name}** to rename to **{body.new_name}**. Confirm to apply."
+        ),
+        "operation": "write_preview",
+        "count": count,
+        "samples": data["samples"],
+        "preview_changes": preview_changes,
+        "confirmation_id": confirmation_id,
+        "needs_confirmation": True,
+        "rows_affected": count,
+    }
+
+
+@app.get("/api/copilot/data-browser")
+def copilot_data_browser(
+    table: str = Query(..., description="Safe allowlisted table name"),
+    search: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=250),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    try:
+        rows = get_data_browser_rows(table=table, profile=profile, search=search, limit=limit, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"table": table, "items": rows}
+
+
+@app.get("/api/budgets")
+def budgets(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return {"items": get_category_budgets(profile=profile, conn=db)}
+
+
+class BudgetUpdate(BaseModel):
+    amount: float | None = None
+
+
+@app.patch("/api/budgets/{category_name}")
+def update_budget_endpoint(
+    category_name: str,
+    body: BudgetUpdate,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    try:
+        result = update_category_budget(category=category_name, amount=body.amount, profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "updated", "budget": result}
+
+
+@app.get("/api/merchant-directory")
+def merchant_directory(
+    search: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=250),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    items = get_merchant_directory(profile=profile, search=search, limit=limit, conn=db)
+    return {"items": items}
+
+
+@app.get("/api/merchant-directory/{merchant_key}/transactions")
+def merchant_directory_transactions(
+    merchant_key: str,
+    profile_id: str | None = Query(None),
+    profile: str | None = Depends(validate_profile),
+    limit: int = Query(25, ge=1, le=100),
+    db=Depends(get_db_session),
+):
+    effective_profile = profile_id or (profile if profile and profile != "household" else None)
+    items = get_transactions_for_merchant(
+        merchant_key=merchant_key,
+        profile_id=effective_profile,
+        limit=limit,
+        conn=db,
+    )
+    return {"items": items}
+
+
+class MerchantDirectoryUpdate(BaseModel):
+    profile_id: str
+    clean_name: str | None = None
+    category: str | None = None
+    domain: str | None = None
+    industry: str | None = None
+
+
+@app.patch("/api/merchant-directory/{merchant_key}")
+def update_merchant_directory_endpoint(
+    merchant_key: str,
+    body: MerchantDirectoryUpdate,
+    db=Depends(get_db_session),
+):
+    try:
+        result = update_merchant_directory_entry(
+            merchant_key=merchant_key,
+            profile_id=body.profile_id,
+            clean_name=body.clean_name,
+            category=body.category,
+            domain=body.domain,
+            industry=body.industry,
+            conn=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Merchant not found.")
+
+    return {"status": "updated", "merchant": result}
 
 
 @app.get("/api/dashboard-bundle")
@@ -706,6 +1192,14 @@ def teller_config():
     Return the Teller application ID and environment so the frontend
     can initialize Teller Connect without hardcoding secrets.
     """
+    if DEMO_MODE:
+        return {
+            **_app_config_payload(),
+            "enabled": False,
+            "applicationId": "",
+            "environment": "sandbox",
+        }
+
     app_id = os.getenv("TELLER_APPLICATION_ID", "")
     env = os.getenv("TELLER_ENVIRONMENT", "sandbox")
     if not app_id:
@@ -713,11 +1207,17 @@ def teller_config():
             status_code=503,
             detail="TELLER_APPLICATION_ID not configured on the server.",
         )
-    return {"applicationId": app_id, "environment": env}
+    return {
+        **_app_config_payload(),
+        "enabled": True,
+        "applicationId": app_id,
+        "environment": env,
+    }
 
 
 @app.post("/api/enroll")
 def enroll_account(req: EnrollRequest):
+    _require_live_mode("Bank enrollment is disabled in demo mode.")
     """
     Handle a new Teller Connect enrollment.
 
@@ -774,13 +1274,16 @@ def enroll_account(req: EnrollRequest):
 
     # 5. Sync the new accounts into the transaction database
     sync_result = {"accounts": 0, "transactions": 0}
+    job_id = start_sync("enrollment", phase="starting", detail="Starting account enrollment sync")
     try:
-        data = fetch_fresh_data()
+        data = fetch_fresh_data(sync_job_id=job_id)
         sync_result = {
             "accounts": len(data.get("accounts", [])),
             "transactions": len(data.get("transactions", [])),
         }
+        finish_sync(job_id, status="completed")
     except Exception as e:
+        finish_sync(job_id, status="failed", error=str(e))
         logger.warning("Post-enrollment sync failed (non-fatal): %s", e)
 
     institution = req.institutionName or accounts[0].get("institution", {}).get("name", "Unknown")
@@ -798,6 +1301,8 @@ def enroll_account(req: EnrollRequest):
 @app.get("/api/enrollments")
 def list_enrollments():
     """Return all active Teller Connect enrollments (metadata only, no tokens)."""
+    if DEMO_MODE:
+        return []
     from token_store import load_all_enrollments
     return load_all_enrollments()
 
@@ -809,6 +1314,7 @@ class DeactivateEnrollment(BaseModel):
 @app.post("/api/enrollments/deactivate")
 def deactivate_enrollment(body: DeactivateEnrollment):
     """Soft-delete an enrollment. The token will no longer be used on next reload."""
+    _require_live_mode("Bank enrollment changes are disabled in demo mode.")
     from token_store import deactivate_token
     from bank import reload_tokens_and_profiles
 
@@ -820,3 +1326,189 @@ def deactivate_enrollment(body: DeactivateEnrollment):
     _invalidate_profile_cache()
 
     return {"status": "deactivated", "id": body.id}
+
+
+# ── Provider Migration ────────────────────────────────────────────────────────
+
+@app.get("/api/migration/status")
+def migration_status(db=Depends(get_db_session)):
+    """
+    Lightweight check: do both Teller and SimpleFIN have active data?
+    Returns {needs_migration, overlap_days, simplefin_window_start}.
+    Used by the dashboard to decide whether to show the migration banner.
+    """
+    if DEMO_MODE:
+        return {"needs_migration": False, "overlap_days": 0, "simplefin_window_start": None}
+
+    teller_count = db.execute(
+        "SELECT COUNT(*) FROM enrolled_tokens WHERE is_active = 1"
+    ).fetchone()[0]
+
+    sf_count = db.execute(
+        "SELECT COUNT(*) FROM simplefin_connections WHERE is_active = 1"
+    ).fetchone()[0]
+
+    if not teller_count or not sf_count:
+        return {"needs_migration": False, "overlap_days": 0, "simplefin_window_start": None}
+
+    sf_start = db.execute(
+        "SELECT MIN(date) FROM transactions WHERE id LIKE 'sf_%' AND is_excluded = 0"
+    ).fetchone()[0]
+
+    teller_end = db.execute(
+        "SELECT MAX(date) FROM transactions WHERE id NOT LIKE 'sf_%' AND is_excluded = 0"
+    ).fetchone()[0]
+
+    if not sf_start or not teller_end:
+        return {"needs_migration": False, "overlap_days": 0, "simplefin_window_start": sf_start}
+
+    from datetime import date as _date
+    try:
+        d1 = _date.fromisoformat(sf_start)
+        d2 = _date.fromisoformat(teller_end)
+        overlap_days = max(0, (d2 - d1).days)
+    except ValueError:
+        overlap_days = 0
+
+    return {
+        "needs_migration": overlap_days > 0,
+        "overlap_days": overlap_days,
+        "simplefin_window_start": sf_start,
+    }
+
+
+@app.get("/api/migration/preview")
+def migration_preview(db=Depends(get_db_session)):
+    _require_live_mode("Provider migration is disabled in demo mode.")
+    from migration import analyze_migration
+    return analyze_migration(db)
+
+
+class MigrationExecuteRequest(BaseModel):
+    mappings: list[dict]  # [{"teller_account_id": "...", "sf_account_id": "..." | None}]
+    deactivate_teller: bool = True
+
+
+@app.post("/api/migration/execute")
+def migration_execute(
+    req: MigrationExecuteRequest,
+    db=Depends(get_db_session),
+):
+    _require_live_mode("Provider migration is disabled in demo mode.")
+    from migration import execute_migration
+    try:
+        result = execute_migration(req.mappings, req.deactivate_teller, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _invalidate_profile_cache()
+    return result
+
+
+# ── SimpleFIN Bridge ─────────────────────────────────────────────────────────
+
+class SimpleFINClaimRequest(BaseModel):
+    setupToken: str
+    profile: str
+    displayName: str = ""
+
+
+@app.post("/api/simplefin/claim")
+def simplefin_claim(req: SimpleFINClaimRequest, background_tasks: BackgroundTasks):
+    _require_live_mode("SimpleFIN connection is disabled in demo mode.")
+    """
+    Exchange a SimpleFIN Setup Token for an Access URL.
+
+    1. base64-decode → claim URL → POST to get permanent Access URL.
+    2. Encrypt and store in simplefin_connections table.
+    3. Kick off initial sync in the background (LLM categorization can take
+       30-120 s — running it synchronously causes the frontend proxy to timeout).
+    """
+    import simplefin
+
+    profile = req.profile.lower().strip() or "primary"
+
+    # 1. Claim
+    try:
+        access_url = simplefin.claim_setup_token(req.setupToken)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # 2. Store
+    try:
+        conn_id = simplefin.save_connection(
+            profile=profile,
+            access_url=access_url,
+            display_name=req.displayName,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    _invalidate_profile_cache()
+
+    # 3. Initial sync runs in the background so this endpoint returns immediately
+    job_id = start_sync("simplefin", phase="queued", detail="Queued SimpleFIN initial sync")
+
+    def _bg_sync():
+        try:
+            update_phase(job_id, "starting", "Starting SimpleFIN initial sync")
+            fetch_simplefin_data(sync_job_id=job_id)
+            finish_sync(job_id, status="completed")
+        except Exception as e:
+            finish_sync(job_id, status="failed", error=str(e))
+            logger.warning("Post-claim SimpleFIN background sync failed: %s", e)
+
+    background_tasks.add_task(_bg_sync)
+
+    return {
+        "status": "connected",
+        "connection_id": conn_id,
+        "profile": profile,
+        "displayName": req.displayName,
+        "syncing": True,
+    }
+
+
+@app.get("/api/simplefin/connections")
+def simplefin_connections():
+    """Return all active SimpleFIN connections (metadata only, no access URLs)."""
+    if DEMO_MODE:
+        return []
+    import simplefin
+    return simplefin.load_all_connections()
+
+
+class SimpleFINDeactivate(BaseModel):
+    id: int
+
+
+@app.post("/api/simplefin/connections/deactivate")
+def simplefin_deactivate(body: SimpleFINDeactivate):
+    """Soft-delete a SimpleFIN connection."""
+    _require_live_mode("SimpleFIN connection changes are disabled in demo mode.")
+    import simplefin
+
+    success = simplefin.deactivate_connection(body.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Connection not found or already inactive.")
+
+    _invalidate_profile_cache()
+    return {"status": "deactivated", "id": body.id}
+
+
+@app.post("/api/simplefin/sync")
+def simplefin_sync():
+    """Trigger a SimpleFIN-only sync (does not touch Teller)."""
+    _require_live_mode("SimpleFIN sync is disabled in demo mode.")
+    job_id = start_sync("simplefin", phase="starting", detail="Starting SimpleFIN sync")
+    try:
+        data = fetch_simplefin_data(sync_job_id=job_id)
+        finish_sync(job_id, status="completed")
+        return {
+            "status": "synced",
+            "accounts": len(data.get("accounts", [])),
+            "transactions": len(data.get("transactions", [])),
+            "last_updated": data.get("last_updated"),
+        }
+    except Exception as exc:
+        finish_sync(job_id, status="failed", error=str(exc))
+        raise

@@ -13,21 +13,16 @@
     let selectedMonth = '';
     let budgets = {};
 
-    function budgetStorageKey(profile) {
-        return `Folio_budgets_${profile || 'household'}`;
-    }
-
     onMount(async () => {
-        const saved = localStorage.getItem(budgetStorageKey($activeProfile));
-        if (saved) budgets = JSON.parse(saved);
-
         try {
-            const [m, c] = await Promise.all([
+            const [m, c, budgetResult] = await Promise.all([
                 api.getMonthlyAnalytics(),
-                api.getCategoryAnalytics()
+                api.getCategoryAnalytics(),
+                api.getBudgets()
             ]);
             monthly = m;
             categories = Array.isArray(c) ? c : (c?.categories || []);
+            budgets = Object.fromEntries((budgetResult?.items || []).map(item => [item.category, item.amount]));
 
             if (monthly.length > 0) {
                 selectedMonth = monthly[monthly.length - 1].month;
@@ -51,12 +46,20 @@
 
     $: if (selectedMonth) loadMonth();
 
-    function saveBudget(category, value) {
+    async function saveBudget(category, value) {
         const num = parseFloat(value);
-        if (!isNaN(num) && num > 0) { budgets[category] = num; }
-        else { delete budgets[category]; }
-        budgets = budgets;
-        localStorage.setItem(budgetStorageKey($activeProfile), JSON.stringify(budgets));
+        const nextBudgets = { ...budgets };
+        if (!isNaN(num) && num > 0) nextBudgets[category] = num;
+        else delete nextBudgets[category];
+        budgets = nextBudgets;
+
+        const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+        try {
+            await api.updateBudget(category, !isNaN(num) && num > 0 ? num : null, profile);
+        } catch (e) {
+            console.error('Failed to save budget:', e);
+            reloadBudgetsForProfile();
+        }
     }
 
     $: budgetItems = monthCategories.map(cat => {
@@ -76,8 +79,8 @@
         editValue = currentBudget > 0 ? currentBudget.toString() : '';
     }
 
-    function commitEdit(cat) {
-        saveBudget(cat, editValue);
+    async function commitEdit(cat) {
+        await saveBudget(cat, editValue);
         editingCategory = null;
     }
 
@@ -92,15 +95,15 @@
 
     async function reloadBudgetsForProfile() {
         profileSwitching = true;
-        const saved = localStorage.getItem(budgetStorageKey($activeProfile));
-        budgets = saved ? JSON.parse(saved) : {};
         try {
-            const [m, c] = await Promise.all([
+            const [m, c, budgetResult] = await Promise.all([
                 api.getMonthlyAnalytics(),
-                api.getCategoryAnalytics()
+                api.getCategoryAnalytics(),
+                api.getBudgets()
             ]);
             monthly = m;
             categories = Array.isArray(c) ? c : (c?.categories || []);
+            budgets = Object.fromEntries((budgetResult?.items || []).map(item => [item.category, item.amount]));
             if (monthly.length > 0) {
                 const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
                 if (!sorted.some(s => s.month === selectedMonth)) {

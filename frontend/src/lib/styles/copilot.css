@@ -217,3 +217,557 @@
     max-height: 200px;
     scrollbar-width: thin;
 }
+
+.copilot-hero-icon {
+    background: linear-gradient(135deg, var(--accent), #7c5cbf);
+    box-shadow: 0 4px 16px rgba(74, 144, 217, 0.25);
+}
+
+.copilot-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.copilot-tab {
+    padding: 8px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.copilot-tab:hover {
+    transform: translateY(-1px);
+    color: var(--text-primary);
+}
+
+.copilot-tab-active {
+    background: color-mix(in srgb, var(--accent) 12%, var(--card-bg));
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--card-border));
+    box-shadow: 0 8px 24px rgba(74, 144, 217, 0.12);
+}
+
+.copilot-notice {
+    padding: 10px 14px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--positive) 10%, var(--card-bg));
+    color: var(--text-primary);
+    border: 1px solid color-mix(in srgb, var(--positive) 20%, var(--card-border));
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.copilot-chat-shell {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.copilot-workspace {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 1rem;
+}
+
+.copilot-panel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+}
+
+.copilot-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 1rem;
+}
+
+.copilot-panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.copilot-panel-header h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--text-primary);
+}
+
+.copilot-panel-header p {
+    margin: 3px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.copilot-quick-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+}
+
+.copilot-action-card {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 52px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid var(--card-border);
+    background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 12%, transparent), transparent 55%),
+        var(--card-bg);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.copilot-action-card:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent) 24%, var(--card-border));
+    box-shadow: 0 12px 28px rgba(74, 144, 217, 0.10);
+}
+
+.copilot-action-card .material-symbols-outlined {
+    font-size: 18px;
+    color: var(--accent);
+}
+
+.copilot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.copilot-list-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent);
+    background: color-mix(in srgb, var(--surface-100) 70%, transparent);
+}
+
+.copilot-list-row-stack {
+    align-items: flex-start;
+}
+
+.copilot-row-title {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.copilot-row-subtitle {
+    margin: 3px 0 0;
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.copilot-button-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.copilot-inline-btn,
+.copilot-primary-btn {
+    border: none;
+    cursor: pointer;
+    transition: transform 0.18s ease, opacity 0.18s ease, box-shadow 0.18s ease;
+}
+
+.copilot-inline-btn:disabled,
+.copilot-primary-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.copilot-inline-btn {
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--surface-200);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.copilot-inline-btn:hover:not(:disabled),
+.copilot-primary-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+}
+
+.copilot-inline-btn-active {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-200));
+    color: var(--accent);
+}
+
+.copilot-inline-btn-danger {
+    background: rgba(248, 113, 113, 0.12);
+    color: #f87171;
+}
+
+.copilot-primary-btn {
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: 0 6px 20px rgba(74, 144, 217, 0.22);
+}
+
+.copilot-search,
+.copilot-form-fields input,
+.copilot-form-fields select,
+.copilot-panel-header select {
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    padding: 9px 11px;
+    font-size: 12px;
+    min-width: 0;
+}
+
+.copilot-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.copilot-form-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 1rem;
+}
+
+.copilot-form-fields {
+    display: grid;
+    gap: 10px;
+}
+
+.copilot-form-fields label {
+    display: grid;
+    gap: 6px;
+}
+
+.copilot-form-fields label span {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.copilot-checkbox {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+}
+
+.copilot-checkbox span {
+    font-size: 11px !important;
+    letter-spacing: 0 !important;
+    text-transform: none !important;
+}
+
+.copilot-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.copilot-history-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 1rem;
+    background: var(--card-bg-flat);
+    border: 1px solid var(--card-border);
+    box-shadow: none;
+}
+
+.copilot-history-response {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+}
+
+.copilot-data-help {
+    margin: -4px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.copilot-data-help code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+}
+
+.copilot-empty-state {
+    padding: 16px;
+    border-radius: 14px;
+    border: 1px dashed var(--card-border);
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    background: color-mix(in srgb, var(--surface-100) 70%, transparent);
+}
+
+.copilot-mini-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.copilot-change-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.copilot-change-chip {
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: rgba(245, 158, 11, 0.10);
+    color: #d97706;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.copilot-user-bubble {
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    color: #ffffff;
+    box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25);
+}
+
+.copilot-suggestion-btn {
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    transition: all 0.18s ease;
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-shadow);
+}
+
+.copilot-suggestion-btn:hover {
+    transform: translateY(-1px);
+    color: var(--text-primary);
+}
+
+.copilot-send-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25);
+}
+
+.copilot-chat-layout {
+    display: block;
+}
+
+.copilot-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.copilot-side-pill {
+    padding: 0.68rem 0.95rem;
+    border-radius: 999px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.copilot-side-pill:hover {
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+.copilot-side-pill-active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--card-border));
+    box-shadow: 0 10px 24px rgba(74, 144, 217, 0.12);
+}
+
+.copilot-side-card {
+    padding: 1rem;
+}
+
+.copilot-history-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.copilot-history-backdrop {
+    flex: 1;
+    border: none;
+    background: rgba(5, 10, 18, 0.48);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+}
+
+.copilot-history-drawer {
+    width: min(440px, calc(100vw - 2rem));
+    height: 100vh;
+    margin: 0;
+    border-radius: 0;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    background: var(--card-bg);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-left: 1px solid var(--card-border);
+    box-shadow: -16px 0 48px rgba(5, 10, 18, 0.35);
+    animation: copilot-history-slide-in 180ms ease-out;
+    isolation: isolate;
+}
+
+.dark .copilot-history-drawer {
+    background: var(--bg-level-2);
+}
+
+.dark .copilot-history-card {
+    background: var(--bg-level-1);
+}
+
+.copilot-history-drawer-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.copilot-history-drawer-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+    scrollbar-width: thin;
+}
+
+.copilot-history-close {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.copilot-history-close:hover {
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+@keyframes copilot-history-slide-in {
+    from {
+        transform: translateX(18px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@media (max-width: 768px) {
+    .copilot-toolbar {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 4px;
+    }
+
+    .copilot-panel,
+    .copilot-workspace {
+        padding: 0.875rem;
+    }
+
+    .copilot-list-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .copilot-action-card {
+        justify-content: flex-start;
+    }
+
+    .copilot-header-actions {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .copilot-history-overlay {
+        align-items: flex-end;
+    }
+
+    .copilot-history-backdrop {
+        position: absolute;
+        inset: 0;
+    }
+
+    .copilot-history-drawer {
+        width: 100%;
+        max-width: none;
+        height: min(78vh, 680px);
+        border-left: 1px solid var(--card-border);
+        border-right: 1px solid var(--card-border);
+        border-bottom: 1px solid var(--card-border);
+        border-top-left-radius: 22px;
+        border-top-right-radius: 22px;
+        box-shadow: 0 -16px 48px rgba(5, 10, 18, 0.35);
+        animation: none;
+    }
+}

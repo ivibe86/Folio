@@ -10,6 +10,7 @@ import secrets
 from collections import defaultdict
 from fastapi import Request, HTTPException, Security
 from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,6 +67,7 @@ async def verify_api_key(api_key: str | None = Security(_api_key_header)):
 # Rate limit configuration (per-client IP)
 # Format: {route_prefix: (max_requests, window_seconds)}
 RATE_LIMITS = {
+    "/api/sync-status": (240, 60),  # frequent lightweight polling while a sync is active
     "/api/copilot": (20, 60),     # 20 requests per minute
     "/api/sync": (5, 300),        # 5 syncs per 5 minutes
     "default": (120, 60),         # 120 requests per minute for everything else
@@ -119,19 +121,24 @@ async def rate_limit_middleware(request: Request, call_next):
     if len(_request_log) > _MAX_LOG_KEYS:
         _global_cleanup()
 
-    # Find matching rate limit config
+    # Find the most specific matching rate limit config so
+    # /api/sync-status does not get bucketed into /api/sync.
+    matched_prefix = None
     limit_config = RATE_LIMITS.get("default")
-    for prefix, config in RATE_LIMITS.items():
-        if prefix != "default" and path.startswith(prefix):
-            limit_config = config
+    specific_prefixes = sorted(
+        (prefix for prefix in RATE_LIMITS if prefix != "default"),
+        key=len,
+        reverse=True,
+    )
+    for prefix in specific_prefixes:
+        if path.startswith(prefix):
+            matched_prefix = prefix
+            limit_config = RATE_LIMITS[prefix]
             break
 
     if limit_config:
         max_requests, window_seconds = limit_config
-        prefix = next(
-            (p for p in RATE_LIMITS if p != "default" and path.startswith(p)),
-            "default",
-        )
+        prefix = matched_prefix or "default"
         client_key = _get_client_key(request, prefix)
 
         # Clean up old entries
@@ -140,9 +147,11 @@ async def rate_limit_middleware(request: Request, call_next):
         )
 
         if len(_request_log[client_key]) >= max_requests:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=429,
-                detail=f"Rate limit exceeded. Max {max_requests} requests per {window_seconds}s.",
+                content={
+                    "detail": f"Rate limit exceeded. Max {max_requests} requests per {window_seconds}s."
+                },
             )
 
         _request_log[client_key].append(time.time())

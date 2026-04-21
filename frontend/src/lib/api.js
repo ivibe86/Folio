@@ -62,7 +62,21 @@ export function invalidateCacheByPrefix(substring) {
  */
 const PROFILE_EXEMPT_ENDPOINTS = new Set([
     '/sync',
+    '/sync-status',
     '/profiles',
+    '/copilot/explain-category',
+    '/copilot/merchants-missing-category',
+    '/simplefin/claim',
+    '/simplefin/connections',
+    '/simplefin/connections/deactivate',
+    '/simplefin/sync',
+    '/migration/status',
+    '/migration/preview',
+    '/migration/execute',
+]);
+
+const UNCACHED_ENDPOINTS = new Set([
+    '/sync-status',
 ]);
 
 /**
@@ -73,6 +87,11 @@ function isProfileExempt(endpoint) {
     // Extract path before query string
     const path = endpoint.split('?')[0];
     return PROFILE_EXEMPT_ENDPOINTS.has(path);
+}
+
+function isUncached(endpoint) {
+    const path = endpoint.split('?')[0];
+    return UNCACHED_ENDPOINTS.has(path);
 }
 
 /**
@@ -125,7 +144,7 @@ function createRequest(fetchFn = fetch) {
 
         // Build cache key from the profiled endpoint (includes ?profile=X)
         // so switching profiles naturally cache-misses
-        const cacheKey = method === 'GET' ? profiledEndpoint : null;
+        const cacheKey = method === 'GET' && !isUncached(profiledEndpoint) ? profiledEndpoint : null;
 
         if (cacheKey) {
             const cached = getCached(cacheKey);
@@ -182,13 +201,21 @@ export function createApi(fetchFn = fetch) {
             return request(`/transactions${qs ? '?' + qs : ''}`);
         },
 
-        updateCategory: (txId, category) =>
+        updateCategory: (txId, category, oneOff = false) =>
             request(`/transactions/${txId}/category`, {
                 method: 'PATCH',
-                body: JSON.stringify({ category })
+                body: JSON.stringify({ category, one_off: oneOff })
+            }),
+
+        updateTransactionExcluded: (txId, isExcluded) =>
+            request(`/transactions/${txId}/exclude`, {
+                method: 'PATCH',
+                body: JSON.stringify({ is_excluded: isExcluded })
             }),
 
         getCategories: () => request('/categories'),
+
+        getCategoriesMeta: () => request('/categories/meta'),
 
         createCategory: (name) =>
             request('/categories', {
@@ -196,8 +223,26 @@ export function createApi(fetchFn = fetch) {
                 body: JSON.stringify({ name })
             }),
 
+        updateCategoryParent: (categoryName, parentCategory) =>
+            request(`/categories/${encodeURIComponent(categoryName)}/parent`, {
+                method: 'PATCH',
+                body: JSON.stringify({ parent_category: parentCategory || null })
+            }),
+
         getCategoryRules: (source) =>
             request(`/category-rules${source ? '?source=' + source : ''}`),
+
+        updateCategoryRule: (ruleId, payload) =>
+            request(`/category-rules/${ruleId}`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            }),
+
+        getCategoryRuleImpact: (ruleId, limit = 20) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            return request(`/category-rules/${ruleId}/impact?${params.toString()}`);
+        },
 
         getMonthlyAnalytics: () => request('/analytics/monthly'),
         getCategoryAnalytics: (month) =>
@@ -207,7 +252,11 @@ export function createApi(fetchFn = fetch) {
 
         getProfiles: () => request('/profiles'),
 
+        getAppConfig: () => request('/app-config'),
+
         sync: () => request('/sync', { method: 'POST' }),
+
+        getSyncStatus: () => request('/sync-status'),
 
         askCopilot: (question, profile) => {
             // Build endpoint with profile param for copilot context
@@ -232,6 +281,65 @@ export function createApi(fetchFn = fetch) {
             return request(`/copilot/confirm${qs ? '?' + qs : ''}`, {
                 method: 'POST',
                 body: JSON.stringify({ question, confirmation_id: confirmationId })
+            });
+        },
+
+        getCopilotHistory: (limit = 40) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            return request(`/copilot/history?${params.toString()}`);
+        },
+
+        getCopilotDataBrowser: (table, search = '', limit = 100) => {
+            const params = new URLSearchParams();
+            params.set('table', table);
+            params.set('limit', String(limit));
+            if (search) params.set('search', search);
+            return request(`/copilot/data-browser?${params.toString()}`);
+        },
+
+        // ── Deterministic copilot tools (chip prompts) ──
+
+        explainCategory: (merchant, profile) => {
+            const params = new URLSearchParams();
+            params.set('merchant', merchant);
+            if (profile && profile !== 'household') params.set('profile', profile);
+            return request(`/copilot/explain-category?${params.toString()}`);
+        },
+
+        getMerchantsMissingCategory: (profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            return request(`/copilot/merchants-missing-category?${params.toString()}`);
+        },
+
+        bulkRecategorizePreview: (merchantQuery, newCategory, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/bulk-recategorize-preview${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({ merchant_query: merchantQuery, new_category: newCategory })
+            });
+        },
+
+        previewRuleCreation: (pattern, category, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/preview-rule${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({ pattern, category })
+            });
+        },
+
+        renameMerchantPreview: (oldName, newName, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/rename-merchant-preview${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({ old_name: oldName, new_name: newName })
             });
         },
 
@@ -353,6 +461,38 @@ export function createApi(fetchFn = fetch) {
             });
         },
 
+        getBudgets: () => request('/budgets'),
+
+        updateBudget: (categoryName, amount, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/budgets/${encodeURIComponent(categoryName)}${qs ? '?' + qs : ''}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ amount })
+            });
+        },
+
+        getMerchantDirectory: (search = '', limit = 50) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            if (search) params.set('search', search);
+            return request(`/merchant-directory?${params.toString()}`);
+        },
+
+        getMerchantTransactions: (merchantKey, profileId = null, limit = 25) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            if (profileId) params.set('profile_id', profileId);
+            return request(`/merchant-directory/${encodeURIComponent(merchantKey)}/transactions?${params.toString()}`);
+        },
+
+        updateMerchantDirectory: (merchantKey, payload) =>
+            request(`/merchant-directory/${encodeURIComponent(merchantKey)}`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            }),
+
         getTellerConfig: () => request('/teller-config'),
 
         enrollAccount: (accessToken, institutionName, enrollmentId) =>
@@ -364,9 +504,47 @@ export function createApi(fetchFn = fetch) {
                     enrollmentId: enrollmentId || null,
                 }),
             }),
+
+        getEnrollments: () => request('/enrollments'),
+
+        deactivateEnrollment: (id) =>
+            request('/enrollments/deactivate', {
+                method: 'POST',
+                body: JSON.stringify({ id })
+            }),
+
+        // ── SimpleFIN Bridge ──
+
+        claimSimpleFIN: (setupToken, profile, displayName = '') =>
+            request('/simplefin/claim', {
+                method: 'POST',
+                body: JSON.stringify({ setupToken, profile, displayName }),
+            }),
+
+        getSimpleFINConnections: () => request('/simplefin/connections'),
+
+        deactivateSimpleFINConnection: (id) =>
+            request('/simplefin/connections/deactivate', {
+                method: 'POST',
+                body: JSON.stringify({ id }),
+            }),
+
+        syncSimpleFIN: () =>
+            request('/simplefin/sync', { method: 'POST' }),
+
+        // ── Provider Migration ──
+
+        getMigrationStatus: () => request('/migration/status'),
+
+        getMigrationPreview: () => request('/migration/preview'),
+
+        executeMigration: (mappings, deactivateTeller = true) =>
+            request('/migration/execute', {
+                method: 'POST',
+                body: JSON.stringify({ mappings, deactivate_teller: deactivateTeller }),
+            }),
     };
 }
 
 /** Default client-side API instance (uses window.fetch) */
 export const api = createApi();
-

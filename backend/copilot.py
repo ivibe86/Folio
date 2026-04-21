@@ -8,13 +8,12 @@ All PII is anonymized before sending to the LLM.
 import json
 import re
 import os
-import httpx
-import certifi
 from datetime import date as dt_date
 from dotenv import load_dotenv
 from database import get_db, dicts_from_rows, _extract_merchant_pattern
 from log_config import get_logger
 from privacy import sanitize_rows_for_llm
+import llm_client
 import secrets as _secrets
 import time as _time
 import threading as _threading
@@ -22,9 +21,6 @@ import threading as _threading
 load_dotenv()
 
 logger = get_logger(__name__)
-
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 # Maximum rows a single copilot write operation can affect
 COPILOT_MAX_WRITE_ROWS = int(os.getenv("COPILOT_MAX_WRITE_ROWS", "5000"))
@@ -39,6 +35,7 @@ COPILOT_MAX_WRITE_ROWS = int(os.getenv("COPILOT_MAX_WRITE_ROWS", "5000"))
 _PENDING_SQL_TTL = 300  # 5 minutes
 _pending_sql_lock = _threading.Lock()
 _pending_sql_store: dict[str, dict] = {}  # {nonce: {"sql": ..., "profile": ..., "expires": ...}}
+READ_TRANSACTIONS_TABLE = "transactions_visible"
 
 
 def store_pending_sql(sql: str, profile: str | None) -> str:
@@ -72,12 +69,13 @@ def retrieve_pending_sql(nonce: str) -> dict | None:
 # SQL SAFETY VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ALLOWED_READ_TABLES = {"transactions", "accounts", "categories", "category_rules", "net_worth_history"}
+_ALLOWED_READ_TABLES = {"transactions", "transactions_visible", "accounts", "categories", "category_rules", "net_worth_history"}
 _ALLOWED_WRITE_CONFIGS = {
-    ("transactions", "UPDATE"): {"category", "categorization_source", "is_excluded", "updated_at", "original_category", "confidence"},
+    ("transactions", "UPDATE"): {"category", "categorization_source", "is_excluded", "updated_at", "original_category", "confidence", "merchant_name"},
     ("category_rules", "INSERT"): None,
     ("category_rules", "UPDATE"): {"category", "priority", "is_active"},
     ("categories", "INSERT"): None,
+    ("merchants", "UPDATE"): {"clean_name", "updated_at"},
 }
 
 _FORBIDDEN_KEYWORDS = {
@@ -85,6 +83,14 @@ _FORBIDDEN_KEYWORDS = {
     "PRAGMA", "REINDEX", "ANALYZE", "EXPLAIN",
     "CREATE TABLE", "CREATE INDEX", "DROP TABLE", "DROP INDEX",
 }
+_REPAIRABLE_SQLITE_ERROR_MARKERS = (
+    "no such function",
+    "syntax error",
+    "no such column",
+    "ambiguous column name",
+    "misuse of aggregate",
+    "wrong number of arguments",
+)
 
 
 def _validate_read_sql(sql: str) -> tuple[bool, str]:
@@ -95,8 +101,8 @@ def _validate_read_sql(sql: str) -> tuple[bool, str]:
     if len(statements) > 1:
         return False, "Multiple statements are not allowed in read queries."
 
-    if not upper.startswith("SELECT"):
-        return False, "Read queries must be SELECT statements."
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        return False, "Read queries must start with SELECT or a read-only WITH clause."
 
     for keyword in _FORBIDDEN_KEYWORDS:
         if keyword in upper:
@@ -107,6 +113,15 @@ def _validate_read_sql(sql: str) -> tuple[bool, str]:
             return False, f"Write operation '{write_op}' not allowed in read queries."
 
     return True, ""
+
+
+def _rewrite_transaction_read_sources(sql: str) -> str:
+    """Route read-only transaction queries through the canonical visible view."""
+    return re.sub(
+        r"(?i)\b(FROM|JOIN)\s+transactions\b",
+        lambda match: f"{match.group(1)} {READ_TRANSACTIONS_TABLE}",
+        sql,
+    )
 
 
 def _validate_write_sql(sql: str) -> tuple[bool, str]:
@@ -178,36 +193,11 @@ def _extract_update_columns(stmt: str) -> set[str] | None:
         return None
 
     columns = set()
-    # Split on commas that are outside parentheses and quotes
-    depth = 0
-    in_sq = False
-    in_dq = False
-    current = []
-    for ch in set_clause:
-        if ch == "'" and not in_dq:
-            in_sq = not in_sq
-        elif ch == '"' and not in_sq:
-            in_dq = not in_dq
-        elif not in_sq and not in_dq:
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-            elif ch == "," and depth == 0:
-                part = "".join(current).strip()
-                col = part.split("=")[0].strip().lower() if "=" in part else None
-                if col:
-                    columns.add(col)
-                current = []
-                continue
-        current.append(ch)
-
-    # Last assignment
-    part = "".join(current).strip()
-    if "=" in part:
-        col = part.split("=")[0].strip().lower()
-        if col:
-            columns.add(col)
+    for part in _split_assignments(set_clause):
+        if "=" in part:
+            col = part.split("=")[0].strip().lower()
+            if col:
+                columns.add(col)
 
     return columns if columns else None
 
@@ -240,6 +230,36 @@ def _extract_set_clause(stmt: str) -> str | None:
     if where_pos:
         return stmt[start:where_pos].strip()
     return stmt[start:].strip()
+
+
+def _split_assignments(set_clause: str) -> list[str]:
+    """Split a SQL SET clause into individual assignments."""
+    parts = []
+    depth = 0
+    in_sq = False
+    in_dq = False
+    current = []
+    for ch in set_clause:
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif not in_sq and not in_dq:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
 
 
 def _split_sql_statements(sql: str) -> list[str]:
@@ -343,6 +363,14 @@ def _deanoymize_sql(sql: str, alias_to_real: dict) -> str:
     return result
 
 
+def _anonymize_sql_text(sql: str, real_to_alias: dict[str, str]) -> str:
+    result = sql
+    for real_id, alias in real_to_alias.items():
+        result = result.replace(f"'{real_id}'", f"'{alias}'")
+        result = result.replace(f'"{real_id}"', f'"{alias}"')
+    return result
+
+
 def _sanitize_profile_filter(sql: str) -> str:
     patterns = [
         r"\s*AND\s+profile_id\s+IN\s*\(\s*'household'\s*\)",
@@ -377,7 +405,9 @@ def _build_schema_context(real_to_alias: dict) -> str:
 
     return f"""SQLite database schema:
 
-TABLE: transactions
+TABLE: transactions_visible
+  - read-only filtered view over transactions
+  - contains only rows where is_excluded = 0
   - id (TEXT, PK) — transaction ID
   - account_id (TEXT, FK → accounts.id)
   - profile_id (TEXT) — owner profile
@@ -391,6 +421,10 @@ TABLE: transactions
   - merchant_name (TEXT)
   - enriched (INTEGER, 0 or 1)
   - is_excluded (INTEGER, 0 or 1)
+
+TABLE: transactions
+  - base table backing transactions_visible
+  - use this only for write operations
 
 TABLE: accounts
   - id (TEXT, PK)
@@ -448,6 +482,12 @@ DESCRIPTION MATCHING:
 - Always use UPPER(description) LIKE UPPER('%pattern%') for case-insensitive matching.
 - When the user mentions a merchant name partially (e.g. "beverages"), use a broad LIKE pattern: UPPER(description) LIKE UPPER('%beverages%')
 - Do NOT guess full merchant descriptions. Use only the keywords the user provides.
+
+SQLITE COMPATIBILITY:
+- Use SQLite-compatible SQL only.
+- Prefer LIKE, CASE WHEN, COALESCE, ABS, and strftime for date/time work.
+- Do NOT use database-specific functions that SQLite doesn't support.
+- This app supports the infix REGEXP operator, but prefer LIKE unless regex matching is truly required.
 """
 
 
@@ -455,15 +495,247 @@ DESCRIPTION MATCHING:
 # CORE: Ask the Copilot
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INTENT EXTRACTION + DETERMINISTIC DISPATCH
+# For known structured operations (recategorize, rename, explain, rule creation),
+# we classify intent from the user's text, then call the deterministic Python tool.
+# This avoids LLM SQL generation for known operations — more reliable, faster.
+# A regex keyword pre-filter skips the LLM call entirely for analytics questions.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_INTENT_KEYWORDS = re.compile(
+    r"\b(why\s+is|how\s+is|categorized|missing\s+categor|uncategorized\s+merchant|"
+    r"move\s+all|recategorize|reclassify|rename|create\s+(a\s+)?rule)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_intent(question: str) -> dict | None:
+    """
+    Two-phase intent extraction:
+    1. Regex keyword pre-filter — skips LLM for pure analytics questions (zero latency).
+    2. Lightweight LLM call (max 80 tokens) to classify intent + extract params.
+    Returns a dict {intent, params} or None (fall through to SQL path).
+    """
+    if not _INTENT_KEYWORDS.search(question):
+        return None  # clearly analytics — no added latency
+
+    if not llm_client.is_available():
+        return None
+
+    prompt = (
+        'Classify this message into one intent. Return JSON only, no explanation.\n\n'
+        'Intents:\n'
+        '- explain_category: why/how is a merchant categorized. params: {"merchant": "name"}\n'
+        '- find_missing_categories: find merchants/transactions with no category. params: {}\n'
+        '- bulk_recategorize: move/recategorize/change transactions for a merchant to a new category. '
+        'params: {"merchant": "name", "category": "name"}\n'
+        '- create_rule: create a categorization rule for a merchant/pattern. '
+        'params: {"pattern": "name", "category": "name"}\n'
+        '- rename_merchant: rename/clean up a merchant display name. '
+        'params: {"old_name": "current", "new_name": "desired"}\n'
+        '- free_form: analytics, spending reports, balance queries, or anything else. params: {}\n\n'
+        'Example: {"intent": "bulk_recategorize", "params": {"merchant": "Netflix", "category": "Entertainment"}}\n\n'
+        f'Message: "{question}"\n\nJSON:'
+    )
+
+    try:
+        raw = llm_client.complete(prompt, max_tokens=80, purpose="copilot")
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"```[a-z]*\n?", "", raw).strip("`\n ")
+        result = json.loads(raw)
+        if isinstance(result, dict) and result.get("intent"):
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _dispatch_intent(intent_result: dict, profile: str | None, question: str) -> dict | None:
+    """
+    Route a classified intent to the appropriate deterministic data_manager tool.
+    Returns a copilot response dict, or None to fall through to LLM SQL.
+    Any exception also falls through — intent routing is best-effort.
+    """
+    from data_manager import (
+        explain_category_assignment, find_merchants_missing_category,
+        bulk_recategorize_preview, preview_rule_creation, rename_merchant_variants,
+    )
+
+    intent = intent_result.get("intent")
+    params = intent_result.get("params") or {}
+
+    _SOURCE_LABELS = {
+        "user": "a manual override",
+        "user-rule": "a user-defined rule",
+        "llm": "AI categorization",
+        "rule": "a built-in rule",
+        "fallback": "the fallback default",
+        "teller": "the bank's own category",
+        "enricher": "merchant enrichment",
+        "merchant-memory": "merchant memory",
+    }
+
+    try:
+        if intent == "explain_category":
+            merchant = (params.get("merchant") or "").strip()
+            if not merchant:
+                return None
+            with get_db() as conn:
+                data = explain_category_assignment(merchant, profile, conn)
+            count = data["transaction_count"]
+            dominant_cat = data["dominant_category"] or "an unknown category"
+            dominant_src = data["dominant_source"] or "unknown"
+            rule = data["rule"]
+            source_label = _SOURCE_LABELS.get(dominant_src, dominant_src)
+            if count == 0:
+                answer = f'No transactions found matching "{merchant}" (pattern: {data["normalized_pattern"]}).'
+            else:
+                rule_detail = ""
+                if rule:
+                    rule_detail = (
+                        f" A {'user' if rule['source'] == 'user' else 'built-in'} rule exists "
+                        f"for pattern **{rule['pattern']}** (priority {rule['priority']})."
+                    )
+                answer = (
+                    f'**{merchant}** is categorized as **{dominant_cat}** '
+                    f"across {count} transaction{'s' if count != 1 else ''}. "
+                    f"Assigned by {source_label}.{rule_detail}"
+                )
+            _log_conversation(profile, question, "", answer, answer, "read", 0)
+            return {
+                "answer": answer, "sql": "", "operation": "read",
+                "data": data["samples"], "rows_affected": count, "needs_confirmation": False,
+            }
+
+        elif intent == "find_missing_categories":
+            with get_db() as conn:
+                items = find_merchants_missing_category(profile, conn)
+            total_tx = sum(item["transaction_count"] for item in items)
+            if not items:
+                answer = "No uncategorized transactions found. Your data looks clean!"
+            else:
+                top = ", ".join(item["pattern"] for item in items[:5])
+                more = f" and {len(items) - 5} more" if len(items) > 5 else ""
+                answer = (
+                    f"Found **{len(items)}** merchant pattern{'s' if len(items) != 1 else ''} "
+                    f"with {total_tx} uncategorized transaction{'s' if total_tx != 1 else ''}: "
+                    f"{top}{more}."
+                )
+            _log_conversation(profile, question, "", answer, answer, "read", 0)
+            return {
+                "answer": answer, "sql": "", "operation": "read",
+                "data": items, "rows_affected": len(items), "needs_confirmation": False,
+            }
+
+        elif intent == "bulk_recategorize":
+            merchant = (params.get("merchant") or "").strip()
+            category = (params.get("category") or "").strip()
+            if not merchant or not category:
+                return None
+            with get_db() as conn:
+                data = bulk_recategorize_preview(merchant, category, profile, conn)
+            count = data["count"]
+            if count == 0:
+                answer = (
+                    f'No transactions found for "{merchant}" that aren\'t already '
+                    f'categorized as **{category}**.'
+                )
+                _log_conversation(profile, question, "", answer, answer, "read", 0)
+                return {
+                    "answer": answer, "sql": "", "operation": "read",
+                    "data": None, "rows_affected": 0, "needs_confirmation": False,
+                }
+            confirmation_id = store_pending_sql(data["update_sql"], profile)
+            answer = (
+                f"Found **{count}** {merchant} transaction{'s' if count != 1 else ''} "
+                f"to move to **{category}**. Confirm to apply."
+            )
+            _log_conversation(profile, question, data["update_sql"], answer, answer, "write", 0)
+            return {
+                "answer": answer, "sql": data["update_sql"], "operation": "write_preview",
+                "data": data["samples"],
+                "preview_changes": [{"column": "category", "raw_value": category, "new_value": category}],
+                "confirmation_id": confirmation_id,
+                "needs_confirmation": True, "rows_affected": count,
+            }
+
+        elif intent == "create_rule":
+            pattern = (params.get("pattern") or "").strip()
+            category = (params.get("category") or "").strip()
+            if not pattern or not category:
+                return None
+            with get_db() as conn:
+                data = preview_rule_creation(pattern, category, profile, conn)
+            count = data["count"]
+            existing = data["existing_rule"]
+            confirmation_id = store_pending_sql(data["insert_sql"], profile)
+            existing_note = ""
+            if existing:
+                existing_note = (
+                    f" Note: a rule for **{data['pattern']}** already exists "
+                    f"(→ {existing['category']}) — this will replace it."
+                )
+            answer = (
+                f"Creating rule **{data['pattern']}** → **{category}** will apply to "
+                f"**{count}** existing transaction{'s' if count != 1 else ''} "
+                f"and all future matches.{existing_note} Confirm to create."
+            )
+            _log_conversation(profile, question, data["insert_sql"], answer, answer, "write", 0)
+            return {
+                "answer": answer, "sql": data["insert_sql"], "operation": "write_preview",
+                "data": data["samples"],
+                "preview_changes": [{"column": "rule", "raw_value": f"{data['pattern']} → {category}", "new_value": category}],
+                "confirmation_id": confirmation_id,
+                "needs_confirmation": True, "rows_affected": count,
+            }
+
+        elif intent == "rename_merchant":
+            old_name = (params.get("old_name") or "").strip()
+            new_name = (params.get("new_name") or "").strip()
+            if not old_name or not new_name:
+                return None
+            with get_db() as conn:
+                data = rename_merchant_variants(old_name, new_name, profile, conn)
+            count = data["count"]
+            if count == 0:
+                answer = f'No transactions found matching "{old_name}".'
+                _log_conversation(profile, question, "", answer, answer, "read", 0)
+                return {
+                    "answer": answer, "sql": "", "operation": "read",
+                    "data": None, "rows_affected": 0, "needs_confirmation": False,
+                }
+            confirmation_id = store_pending_sql(data["update_sql"], profile)
+            answer = (
+                f"Found **{count}** transaction{'s' if count != 1 else ''} for "
+                f"**{old_name}** to rename to **{new_name}**. Confirm to apply."
+            )
+            _log_conversation(profile, question, data["update_sql"], answer, answer, "write", 0)
+            return {
+                "answer": answer, "sql": data["update_sql"], "operation": "write_preview",
+                "data": data["samples"],
+                "preview_changes": [{"column": "merchant_name", "raw_value": new_name, "new_value": new_name}],
+                "confirmation_id": confirmation_id,
+                "needs_confirmation": True, "rows_affected": count,
+            }
+
+    except Exception as e:
+        logger.warning("Intent dispatch failed for intent '%s': %s", intent, e)
+        return None  # fall through to LLM SQL
+
+    return None
+
+
 def ask_copilot(
     question: str,
     profile: str | None = None,
     confirm_write: bool = False,
     pending_sql: str | None = None,
 ) -> dict:
-    if not ANTHROPIC_API_KEY:
+    if not llm_client.is_available():
         return {
-            "answer": "Copilot is not configured. Please set ANTHROPIC_API_KEY.",
+            "answer": "Copilot is not configured. Set ANTHROPIC_API_KEY (Anthropic) or OLLAMA_BASE_URL (Ollama).",
             "sql": "",
             "data": None,
             "operation": "error",
@@ -474,6 +746,16 @@ def ask_copilot(
     # ── Handle write confirmation ──
     if confirm_write and pending_sql:
         return _execute_write(pending_sql, profile, question)
+
+    # ── Try deterministic intent routing before LLM SQL ──
+    # Keyword pre-filter avoids any LLM call for pure analytics questions.
+    # For matched intents, the deterministic tool runs instead of SQL generation.
+    # Falls through transparently on any failure or free_form classification.
+    intent_result = _extract_intent(question)
+    if intent_result and intent_result.get("intent") not in (None, "free_form"):
+        dispatched = _dispatch_intent(intent_result, profile, question)
+        if dispatched is not None:
+            return dispatched
 
     # ── Build anonymized context ──
     real_to_alias, alias_to_real = _build_profile_map()
@@ -503,33 +785,12 @@ Generate a single SQLite query to answer this question.
 - If the question cannot be answered with SQL, respond with: CANNOT: <explanation>
 """
 
-    # ── Call Claude ──
+    # ── Call LLM ──
     try:
-        resp = httpx.post(
-            ANTHROPIC_URL,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-3-haiku-20240307",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30.0,
-            verify=certifi.where(),
-        )
-
-        result = resp.json()
-        if "content" not in result:
-            return _error_response(f"API error: {result}")
-
-        raw_sql = result["content"][0]["text"].strip()
-
+        raw_sql = llm_client.complete(prompt, max_tokens=1024, purpose="copilot")
     except Exception as e:
-        logger.exception("Failed to reach Claude for copilot query")
-        return _error_response(f"Failed to reach Claude: {e}")
+        logger.exception("Failed to reach LLM for copilot query")
+        return _error_response(f"Failed to reach LLM: {e}")
 
     # ── Handle CANNOT responses ──
     if raw_sql.startswith("CANNOT:"):
@@ -553,7 +814,8 @@ Generate a single SQLite query to answer this question.
 
         is_valid, validation_error = _validate_write_sql(real_sql)
         if not is_valid:
-            return _error_response(f"Write validation failed: {validation_error}")
+            logger.warning("Copilot write validation failed | SQL: %s | Error: %s", real_sql, validation_error)
+            return _error_response(f"Write validation failed: {validation_error}", sql=real_sql)
 
         preview = _preview_write(real_sql, profile)
 
@@ -567,33 +829,73 @@ Generate a single SQLite query to answer this question.
             "sql": real_sql,
             "confirmation_id": confirmation_id,
             "data": preview.get("sample", []),
+            "preview_changes": preview.get("changes", []),
             "operation": "write_preview",
             "rows_affected": preview["count"],
             "needs_confirmation": True,
         }
     # ── Handle READ operations ──
-    sql = raw_sql.strip()
-    sql = re.sub(r"^```\w*\n?", "", sql)
-    sql = re.sub(r"\n?```$", "", sql)
+    sql = _clean_sql_response(raw_sql)
 
     real_sql = _deanoymize_sql(sql, alias_to_real)
     if not profile or profile == "household":
         real_sql = _sanitize_profile_filter(real_sql)
+    real_sql = _rewrite_transaction_read_sources(real_sql)
 
     is_valid, validation_error = _validate_read_sql(real_sql)
     if not is_valid:
-        return _error_response(f"SQL validation failed: {validation_error}")
+        logger.warning("Copilot read validation failed | SQL: %s | Error: %s", real_sql, validation_error)
+        return _error_response(f"SQL validation failed: {validation_error}", sql=real_sql)
 
     try:
-        with get_db() as conn:
-            conn.execute("PRAGMA query_only = ON")
-            try:
-                rows = dicts_from_rows(conn.execute(real_sql).fetchall())
-            finally:
-                conn.execute("PRAGMA query_only = OFF")
+        rows = _run_read_query(real_sql)
     except Exception as e:
         logger.error("Copilot SQL execution error: %s | SQL: %s", e, real_sql)
-        return _error_response(f"SQL execution error: {e}")
+
+        repaired_sql = None
+        if _is_repairable_sqlite_error(e):
+            anonymized_failed_sql = _anonymize_sql_text(real_sql, real_to_alias)
+            repaired_alias_sql = _repair_read_sql(
+                question=question,
+                failed_sql=anonymized_failed_sql,
+                error_message=str(e),
+                schema_context=schema_context,
+                profile_alias=profile_alias,
+            )
+            if repaired_alias_sql:
+                candidate_sql = _deanoymize_sql(repaired_alias_sql, alias_to_real)
+                if not profile or profile == "household":
+                    candidate_sql = _sanitize_profile_filter(candidate_sql)
+                candidate_sql = _rewrite_transaction_read_sources(candidate_sql)
+
+                is_valid, validation_error = _validate_read_sql(candidate_sql)
+                if is_valid:
+                    try:
+                        rows = _run_read_query(candidate_sql)
+                        repaired_sql = candidate_sql
+                        logger.info(
+                            "Copilot repaired failing read SQL | Error: %s | Original: %s | Repaired: %s",
+                            e,
+                            real_sql,
+                            candidate_sql,
+                        )
+                    except Exception as repair_error:
+                        logger.error(
+                            "Copilot SQL repair attempt failed: %s | Repaired SQL: %s",
+                            repair_error,
+                            candidate_sql,
+                        )
+                else:
+                    logger.warning(
+                        "Copilot SQL repair produced invalid SQL | SQL: %s | Error: %s",
+                        candidate_sql,
+                        validation_error,
+                    )
+
+        if repaired_sql is None:
+            return _error_response(f"SQL execution error: {e}", sql=real_sql)
+
+        real_sql = repaired_sql
 
     # ── Send results back to Claude for natural language answer ──
     anon_rows = _anonymize_sql_result(rows, real_to_alias)
@@ -674,27 +976,9 @@ Do not mention SQL, databases, or queries in your answer.
 Do not reveal any personal names — use generic terms like "your account" instead."""
 
     try:
-        resp = httpx.post(
-            ANTHROPIC_URL,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-3-haiku-20240307",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30.0,
-            verify=certifi.where(),
-        )
-
-        result = resp.json()
-        if "content" in result:
-            return result["content"][0]["text"].strip()
+        return llm_client.complete(prompt, max_tokens=1024, purpose="copilot")
     except Exception:
-        logger.exception("Failed to generate natural language answer from Claude")
+        logger.exception("Failed to generate natural language answer from LLM")
 
     if len(rows) == 1 and len(rows[0]) == 1:
         val = list(rows[0].values())[0]
@@ -703,6 +987,115 @@ Do not reveal any personal names — use generic terms like "your account" inste
         return str(val)
 
     return f"Found {len(rows)} results."
+
+
+def _clean_sql_response(raw_sql: str) -> str:
+    sql = raw_sql.strip()
+    sql = re.sub(r"^```\w*\n?", "", sql)
+    sql = re.sub(r"\n?```$", "", sql)
+    return sql.strip()
+
+
+def _run_read_query(sql: str) -> list[dict]:
+    sql = _rewrite_transaction_read_sources(sql)
+    with get_db() as conn:
+        conn.execute("PRAGMA query_only = ON")
+        try:
+            return dicts_from_rows(conn.execute(sql).fetchall())
+        finally:
+            conn.execute("PRAGMA query_only = OFF")
+
+
+def _is_repairable_sqlite_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _REPAIRABLE_SQLITE_ERROR_MARKERS)
+
+
+def _repair_read_sql(
+    question: str,
+    failed_sql: str,
+    error_message: str,
+    schema_context: str,
+    profile_alias: str,
+) -> str | None:
+    prompt = f"""{schema_context}
+
+The user's currently active profile is: '{profile_alias}'
+Original user question: {question}
+
+The previous SQLite query failed.
+
+SQLite error:
+{error_message}
+
+Failed SQL:
+{failed_sql}
+
+Return one corrected SQLite read query that answers the original question.
+
+Rules:
+- Return only raw SQL. No markdown.
+- Return only a SELECT query or a read-only WITH query.
+- Use SQLite-compatible SQL only.
+- Prefer LIKE for text matching unless regex is truly necessary.
+- This app supports the infix REGEXP operator.
+- If the active profile is 'all_profiles', do not add any profile_id filter.
+"""
+
+    try:
+        repaired_sql = llm_client.complete(prompt, max_tokens=1024, purpose="copilot")
+    except Exception:
+        logger.exception("Failed to repair copilot SQL after execution error")
+        return None
+
+    cleaned = _clean_sql_response(repaired_sql)
+    if not cleaned or cleaned.startswith("CANNOT:") or cleaned.startswith("WRITE:"):
+        return None
+    return cleaned
+
+
+def _parse_sql_literal(value: str):
+    """Parse simple SQL literal values for preview rendering."""
+    raw = value.strip().rstrip(";")
+    upper = raw.upper()
+
+    if upper == "NULL":
+        return None
+    if upper == "TRUE":
+        return True
+    if upper == "FALSE":
+        return False
+    if raw.startswith("'") and raw.endswith("'") and len(raw) >= 2:
+        return raw[1:-1].replace("''", "'")
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        return raw[1:-1]
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if re.fullmatch(r"-?\d+\.\d+", raw):
+        return float(raw)
+    return raw
+
+
+def _parse_update_assignments(stmt: str) -> list[dict]:
+    """Parse UPDATE assignments into preview-friendly change objects."""
+    set_clause = _extract_set_clause(stmt)
+    if not set_clause:
+        return []
+
+    changes = []
+    for part in _split_assignments(set_clause):
+        if "=" not in part:
+            continue
+        left, right = part.split("=", 1)
+        column = left.strip().lower()
+        if "." in column:
+            column = column.split(".")[-1]
+        changes.append({
+            "column": column,
+            "raw_value": right.strip(),
+            "new_value": _parse_sql_literal(right),
+        })
+    return changes
 
 
 def _preview_write(sql: str, profile: str | None) -> dict:
@@ -720,24 +1113,27 @@ def _preview_write(sql: str, profile: str | None) -> dict:
                 break
 
         if not update_stmt:
-            return {"count": 0, "sample": []}
+            return {"count": 0, "sample": [], "changes": []}
 
         # Extract WHERE clause safely using quote-aware parsing
         where_clause = _extract_where_clause(update_stmt)
         if not where_clause:
-            return {"count": 0, "sample": []}
+            return {"count": 0, "sample": [], "changes": []}
 
         # Build and validate preview queries
-        preview_sql = f"SELECT id, description, amount, category, date FROM transactions {where_clause} LIMIT 20"
-        count_sql = f"SELECT COUNT(*) as cnt FROM transactions {where_clause}"
+        preview_sql = (
+            "SELECT id, description, amount, category, date, is_excluded, categorization_source "
+            f"FROM {READ_TRANSACTIONS_TABLE} {where_clause} LIMIT 20"
+        )
+        count_sql = f"SELECT COUNT(*) as cnt FROM {READ_TRANSACTIONS_TABLE} {where_clause}"
 
         # Validate both as read queries
         is_valid, _ = _validate_read_sql(preview_sql)
         if not is_valid:
-            return {"count": 0, "sample": []}
+            return {"count": 0, "sample": [], "changes": []}
         is_valid, _ = _validate_read_sql(count_sql)
         if not is_valid:
-            return {"count": 0, "sample": []}
+            return {"count": 0, "sample": [], "changes": []}
 
         with get_db() as conn:
             conn.execute("PRAGMA query_only = ON")
@@ -747,11 +1143,20 @@ def _preview_write(sql: str, profile: str | None) -> dict:
             finally:
                 conn.execute("PRAGMA query_only = OFF")
 
-        return {"count": count, "sample": rows}
+        changes = _parse_update_assignments(update_stmt)
+        preview_rows = []
+        for row in rows:
+            preview_row = dict(row)
+            for change in changes:
+                preview_row[f"current_{change['column']}"] = row.get(change["column"])
+                preview_row[f"new_{change['column']}"] = change["new_value"]
+            preview_rows.append(preview_row)
+
+        return {"count": count, "sample": preview_rows, "changes": changes}
     except Exception:
         logger.debug("Write preview failed, returning empty preview", exc_info=True)
 
-    return {"count": 0, "sample": []}
+    return {"count": 0, "sample": [], "changes": []}
 
 
 def _extract_where_clause(stmt: str) -> str | None:
@@ -786,7 +1191,8 @@ def _execute_write(sql: str, profile: str | None, original_question: str) -> dic
     try:
         is_valid, validation_error = _validate_write_sql(sql)
         if not is_valid:
-            return _error_response(f"Write validation failed: {validation_error}")
+            logger.warning("Copilot write execution validation failed | SQL: %s | Error: %s", sql, validation_error)
+            return _error_response(f"Write validation failed: {validation_error}", sql=sql)
 
         statements = _split_sql_statements(sql)
 
@@ -814,7 +1220,8 @@ def _execute_write(sql: str, profile: str | None, original_question: str) -> dic
                                         return _error_response(
                                             f"This operation would affect {count} rows, "
                                             f"exceeding the safety limit of {COPILOT_MAX_WRITE_ROWS}. "
-                                            f"Please narrow your query."
+                                            f"Please narrow your query.",
+                                            sql=sql,
                                         )
                                 except Exception:
                                     logger.debug("Row count pre-check failed for copilot write", exc_info=True)
@@ -825,7 +1232,8 @@ def _execute_write(sql: str, profile: str | None, original_question: str) -> dic
                             if count > COPILOT_MAX_WRITE_ROWS:
                                 return _error_response(
                                     f"UPDATE without WHERE would affect {count} rows, "
-                                    f"exceeding the safety limit of {COPILOT_MAX_WRITE_ROWS}."
+                                    f"exceeding the safety limit of {COPILOT_MAX_WRITE_ROWS}.",
+                                    sql=sql,
                                 )
                         except Exception:
                             logger.debug("Row count pre-check failed for copilot write", exc_info=True)
@@ -849,7 +1257,7 @@ def _execute_write(sql: str, profile: str | None, original_question: str) -> dic
 
     except Exception as e:
         logger.exception("Copilot write execution failed")
-        return _error_response(f"Write failed: {e}")
+        return _error_response(f"Write failed: {e}", sql=sql)
 
 
 def _auto_create_rules_from_update(conn, update_sql: str):
@@ -864,7 +1272,7 @@ def _auto_create_rules_from_update(conn, update_sql: str):
         if not where_clause:
             return
 
-        select_sql = f"SELECT DISTINCT description FROM transactions {where_clause}"
+        select_sql = f"SELECT DISTINCT description FROM {READ_TRANSACTIONS_TABLE} {where_clause}"
         is_valid, _ = _validate_read_sql(select_sql)
         if not is_valid:
             return
@@ -906,10 +1314,10 @@ def _log_conversation(
         logger.debug("Failed to log copilot conversation", exc_info=True)
 
 
-def _error_response(message: str) -> dict:
+def _error_response(message: str, sql: str = "") -> dict:
     return {
         "answer": message,
-        "sql": "",
+        "sql": sql,
         "data": None,
         "operation": "error",
         "rows_affected": 0,

@@ -34,6 +34,8 @@ export async function load({ fetch }) {
         monthly: bundle.monthly || [],
         categories: bundle.categories || [],
         netWorthSeries: Array.isArray(bundle.netWorthSeries) ? bundle.netWorthSeries : [],
+        netWorthMomDelta: bundle.netWorthMomDelta ?? null,
+        netWorthYtdDelta: bundle.netWorthYtdDelta ?? null,
         savingsTransferTotal: bundle.savingsTransferTotal || 0,
         personalTransferTotal: bundle.personalTransferTotal || 0,
         monthlyCategoryBreakdown: Array.isArray(bundle.monthlyCategoryBreakdown) ? bundle.monthlyCategoryBreakdown : [],

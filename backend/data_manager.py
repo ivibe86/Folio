@@ -11,7 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
-from categorizer import categorize_transactions
+from categorizer import categorize_transactions, _rule_based_categorize
 from database import get_db, dicts_from_rows, _extract_merchant_pattern
 from log_config import get_logger
 
@@ -20,6 +20,17 @@ load_dotenv()
 logger = get_logger(__name__)
 
 _lock = threading.Lock()
+
+
+def _set_sync_phase(sync_job_id: str | None, phase: str, detail: str | None = None):
+    if not sync_job_id:
+        return
+    try:
+        from sync_status import update_phase
+        update_phase(sync_job_id, phase, detail)
+    except Exception:
+        logger.debug("Could not update sync phase to %s", phase)
+
 
 def _escape_like(pattern: str) -> str:
     """Escape SQL LIKE wildcards in a pattern to prevent unintended matches."""
@@ -42,6 +53,49 @@ TRANSFER_INTERNAL = "transfer_internal"
 TRANSFER_HOUSEHOLD = "transfer_household"
 TRANSFER_EXTERNAL = "transfer_external"
 TRANSFER_CC_PAYMENT = "transfer_cc_payment"
+
+TRANSACTIONS_TABLE = "transactions"
+VISIBLE_TRANSACTIONS_VIEW = "transactions_visible"
+
+
+def _transactions_source(include_excluded: bool = False, alias: str | None = None) -> str:
+    """Return the canonical transaction relation for reads or raw-table writes."""
+    source = TRANSACTIONS_TABLE if include_excluded else VISIBLE_TRANSACTIONS_VIEW
+    return f"{source} {alias}" if alias else source
+
+
+def _canonical_merchant_key_sql(tx_alias: str = "t") -> str:
+    """SQL expression for the canonical merchant key used by UI grouping."""
+    return (
+        f"UPPER(TRIM(COALESCE(NULLIF({tx_alias}.merchant_name,''), "
+        f"{tx_alias}.description_normalized, {tx_alias}.description, '')))"
+    )
+
+
+def _canonical_merchant_label_sql(tx_alias: str = "t") -> str:
+    """SQL expression for the canonical merchant display fallback."""
+    return (
+        f"COALESCE(NULLIF({tx_alias}.merchant_name,''), "
+        f"{tx_alias}.description_normalized, {tx_alias}.description)"
+    )
+
+
+def _merchant_alias_join_sql(tx_alias: str = "t", merchant_alias: str = "merchant_alias") -> str:
+    """LEFT JOIN merchant_aliases on the canonical transaction merchant key."""
+    return (
+        f"LEFT JOIN merchant_aliases {merchant_alias} "
+        f"ON {merchant_alias}.profile_id = {tx_alias}.profile_id "
+        f"AND UPPER(TRIM(COALESCE({merchant_alias}.merchant_key, ''))) = {_canonical_merchant_key_sql(tx_alias)}"
+    )
+
+
+def _merchant_metadata_join_sql(tx_alias: str = "t", merchant_meta: str = "merchant_meta") -> str:
+    """LEFT JOIN canonical merchant metadata keyed by profile + merchant_key."""
+    return (
+        f"LEFT JOIN merchants {merchant_meta} "
+        f"ON {merchant_meta}.profile_id = {tx_alias}.profile_id "
+        f"AND UPPER(TRIM(COALESCE({merchant_meta}.merchant_key, ''))) = {_canonical_merchant_key_sql(tx_alias)}"
+    )
 
 
 def _build_account_lookup(conn) -> dict:
@@ -118,6 +172,11 @@ def _classify_transfer_type(
         # Fragment matches an account in a different profile → household
         return TRANSFER_HOUSEHOLD
 
+    # Savings transfers are internal by default even when the bank description
+    # does not expose account fragments.
+    if category == "Savings Transfer":
+        return TRANSFER_INTERNAL
+
     # No account fragment matched → external
     return TRANSFER_EXTERNAL
 
@@ -131,7 +190,8 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
         sql = """SELECT id, account_name as name, account_subtype as type,
                         CASE WHEN account_type IN ('credit', 'loan') THEN 1 ELSE 0 END as is_credit,
                         account_type,
-                        current_balance as balance, currency, profile_id as profile
+                        current_balance as balance, currency, profile_id as profile,
+                        COALESCE(provider, 'teller') as provider
                  FROM accounts WHERE is_active = 1"""
         params = []
         if profile and profile != "household":
@@ -164,42 +224,67 @@ def get_transactions_paginated(
     Returns {"data": [...], "total_count": int, "limit": int, "offset": int}.
     """
     def _query(c):
+        tx_source = _transactions_source(alias="t")
+        merchant_key_sql = _canonical_merchant_key_sql("t")
+        merchant_label_sql = _canonical_merchant_label_sql("t")
+        alias_join_sql = _merchant_alias_join_sql("t", "merchant_alias")
+        metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
         where_clauses = []
         params = []
 
         if profile and profile != "household":
-            where_clauses.append("profile_id = ?")
+            where_clauses.append("t.profile_id = ?")
             params.append(profile)
         if month:
-            where_clauses.append("date LIKE ?")
+            where_clauses.append("t.date LIKE ?")
             params.append(month + "%")
         if category:
-            where_clauses.append("category = ?")
+            where_clauses.append("t.category = ?")
             params.append(category)
         if account:
-            where_clauses.append("account_name = ?")
+            where_clauses.append("t.account_name = ?")
             params.append(account)
         if search:
             escaped = _escape_like(search.upper())
-            where_clauses.append("UPPER(description) LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
+            where_clauses.append(
+                """(
+                    UPPER(COALESCE(t.description, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.raw_description, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.merchant_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(merchant_alias.display_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(merchant_meta.clean_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.category, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.account_name, '')) LIKE ? ESCAPE '\\'
+                )"""
+            )
+            params.extend([f"%{escaped}%"] * 7)
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
         # Count query
-        count_sql = f"SELECT COUNT(*) FROM transactions{where_sql}"
+        count_sql = f"""SELECT COUNT(*)
+                        FROM {tx_source}
+                        {alias_join_sql}
+                        {metadata_join_sql}
+                        {where_sql}"""
         total_count = c.execute(count_sql, params).fetchone()[0]
 
         # Data query with pagination
-        data_sql = f"""SELECT id as original_id, profile_id as profile, date, description,
-                              raw_description, amount, category, categorization_source,
-                              confidence, transaction_type as type,
-                              counterparty_name, counterparty_type, teller_category,
-                              account_name, account_type, merchant_name, merchant_domain,
-                              merchant_industry, merchant_city, merchant_state,
-                              enriched, is_excluded, expense_type
-                       FROM transactions{where_sql}
-                       ORDER BY date DESC
+        data_sql = f"""SELECT t.id as original_id, t.profile_id as profile, t.date, t.description,
+                              t.raw_description, t.amount, t.category, t.original_category,
+                              t.categorization_source, t.confidence, t.transaction_type as type,
+                              t.counterparty_name, t.counterparty_type, t.teller_category,
+                              t.account_name, t.account_type, t.merchant_name, t.merchant_domain,
+                              t.merchant_industry, t.merchant_city, t.merchant_state,
+                              t.enriched, t.is_excluded, t.expense_type, t.updated_at,
+                              {merchant_key_sql} AS merchant_display_key,
+                              COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
+                              COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
+                       FROM {tx_source}
+                       {alias_join_sql}
+                       {metadata_join_sql}
+                       {where_sql}
+                       ORDER BY t.date DESC
                        LIMIT ? OFFSET ?"""
         data_params = params + [limit, offset]
         rows = c.execute(data_sql, data_params).fetchall()
@@ -224,6 +309,7 @@ def get_transactions_paginated(
 def get_summary_data(profile: str | None = None, conn=None) -> dict:
     """Compute summary statistics using SQL-level aggregation."""
     def _query(c):
+        tx_source = _transactions_source()
         profile_clause = ""
         profile_params = []
         is_household = not profile or profile == "household"
@@ -252,36 +338,36 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
 
         # Income: category='Income' AND amount > 0
         income = c.execute(
-            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE category = 'Income' AND amount > 0{income_transfer_excl}{profile_clause}",
+            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE category = 'Income' AND amount > 0{income_transfer_excl}{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         # Expenses: amount < 0 AND category NOT IN non_spending
         expenses = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE amount < 0 AND category NOT IN ({non_spending_ph}){transfer_excl}{profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE amount < 0 AND category NOT IN ({non_spending_ph}){transfer_excl}{profile_clause}",
             list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
 
         # Refunds: amount > 0 AND category NOT IN non_spending AND NOT income
         refunds = c.execute(
-            f"SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{transfer_excl}{profile_clause}",
+            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{transfer_excl}{profile_clause}",
             list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
 
         # Savings: category = 'Savings Transfer'
         savings = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE category = 'Savings Transfer'{profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE category = 'Savings Transfer'{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         # Transaction counts
         tx_count = c.execute(
-            f"SELECT COUNT(*) FROM transactions WHERE 1=1{profile_clause}",
+            f"SELECT COUNT(*) FROM {tx_source} WHERE 1=1{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         enriched_count = c.execute(
-            f"SELECT COUNT(*) FROM transactions WHERE enriched = 1{profile_clause}",
+            f"SELECT COUNT(*) FROM {tx_source} WHERE enriched = 1{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
@@ -308,13 +394,13 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
 
         # CC Repaid: sum of Credit Card Payment outflows (transfer_cc_payment)
         cc_repaid = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE category = 'Credit Card Payment' AND amount < 0{profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE category = 'Credit Card Payment' AND amount < 0{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         # External transfers (Zelle/Venmo to other people) — included in net flow
         external_transfers = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM transactions WHERE expense_type = 'transfer_external' AND amount < 0{profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE expense_type = 'transfer_external' AND amount < 0{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
@@ -351,6 +437,7 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
     household view) transfers from expense/refund totals.
     """
     def _query(c):
+        tx_source = _transactions_source()
         profile_clause = ""
         profile_params = []
         is_household = not profile or profile == "household"
@@ -378,7 +465,7 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
                 COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok} THEN ABS(amount) ELSE 0 END), 0) as expenses,
                 COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' {transfer_ok} THEN amount ELSE 0 END), 0) as refunds,
                 COALESCE(SUM(CASE WHEN category = 'Savings Transfer' THEN ABS(amount) ELSE 0 END), 0) as savings
-            FROM transactions
+            FROM {tx_source}
             WHERE LENGTH(date) >= 7{profile_clause}
             GROUP BY SUBSTR(date, 1, 7)
             ORDER BY month ASC
@@ -406,7 +493,7 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
         cc_sql = f"""
             SELECT SUBSTR(date, 1, 7) as month,
                    COALESCE(SUM(ABS(amount)), 0) as cc_repaid
-            FROM transactions
+            FROM {tx_source}
             WHERE category = 'Credit Card Payment' AND amount < 0
               AND LENGTH(date) >= 7{profile_clause}
             GROUP BY SUBSTR(date, 1, 7)
@@ -417,7 +504,7 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
         ext_sql = f"""
             SELECT SUBSTR(date, 1, 7) as month,
                    COALESCE(SUM(ABS(amount)), 0) as ext_transfers
-            FROM transactions
+            FROM {tx_source}
             WHERE expense_type = 'transfer_external' AND amount < 0
               AND LENGTH(date) >= 7{profile_clause}
             GROUP BY SUBSTR(date, 1, 7)
@@ -438,6 +525,141 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
         return _query(c)
 
 
+def _build_reconstructed_net_worth_state(c, profile: str | None = None) -> dict:
+    """
+    Reconstruct a historical net-worth timeline from transaction deltas, anchored
+    to the current live account balances.
+
+    This remains an approximation when balances move without transactions
+    (for example investment market changes), but it gives us exact date anchors
+    instead of relying on the dashboard chart's sampled points.
+    """
+    from datetime import date as dt_date, timedelta
+
+    acct_profile_clause = ""
+    acct_params = []
+    if profile and profile != "household":
+        acct_profile_clause = " AND profile_id = ?"
+        acct_params = [profile]
+
+    total_assets = c.execute(
+        f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('depository', 'investment') AND is_active = 1{acct_profile_clause}",
+        acct_params,
+    ).fetchone()[0]
+    total_owed = c.execute(
+        f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('credit', 'loan') AND is_active = 1{acct_profile_clause}",
+        acct_params,
+    ).fetchone()[0]
+    current_net_worth = total_assets - total_owed
+
+    tx_profile_clause = ""
+    tx_params = []
+    if profile and profile != "household":
+        tx_profile_clause = " AND profile_id = ?"
+        tx_params = [profile]
+    tx_source = _transactions_source()
+
+    daily_rows = c.execute(
+        f"""SELECT SUBSTR(date, 1, 10) as day, SUM(amount) as net
+            FROM {tx_source}
+            WHERE LENGTH(date) >= 10{tx_profile_clause}
+            GROUP BY SUBSTR(date, 1, 10)
+            ORDER BY day ASC""",
+        tx_params,
+    ).fetchall()
+
+    if not daily_rows:
+        return {
+            "current_net_worth": round(current_net_worth, 2),
+            "first_date": None,
+            "last_date": None,
+            "starting_net_worth": round(current_net_worth, 2),
+            "cumulative": {},
+        }
+
+    daily_net = {row[0]: row[1] for row in daily_rows}
+    first_date = dt_date.fromisoformat(daily_rows[0][0])
+    last_date = dt_date.fromisoformat(daily_rows[-1][0])
+
+    cumulative = {}
+    running = 0.0
+    d = first_date
+    while d <= last_date:
+        running += daily_net.get(d.isoformat(), 0.0)
+        cumulative[d] = running
+        d += timedelta(days=1)
+
+    total_cumulative = cumulative.get(last_date, 0.0)
+    starting_net_worth = current_net_worth - total_cumulative
+
+    return {
+        "current_net_worth": round(current_net_worth, 2),
+        "first_date": first_date,
+        "last_date": last_date,
+        "starting_net_worth": starting_net_worth,
+        "cumulative": cumulative,
+    }
+
+
+def _reconstructed_net_worth_on(state: dict, target_date) -> float | None:
+    """
+    Return reconstructed net worth on a specific date.
+
+    Dates before the earliest transaction are unknown, so we return None
+    instead of inventing a baseline.
+    """
+    first_date = state.get("first_date")
+    last_date = state.get("last_date")
+    cumulative = state.get("cumulative") or {}
+    if first_date is None or last_date is None or not cumulative:
+        return None
+    if target_date < first_date:
+        return None
+
+    effective_date = min(target_date, last_date)
+    cumulative_value = cumulative.get(effective_date)
+    if cumulative_value is None:
+        return None
+
+    return round(state["starting_net_worth"] + cumulative_value, 2)
+
+
+def get_net_worth_delta_metrics(profile: str | None = None, conn=None) -> dict:
+    """
+    Compute exact-anchor net-worth deltas for the dashboard hero card.
+
+    - MoM: current net worth minus previous month-end net worth
+    - YTD: current net worth minus previous year-end net worth
+
+    These values intentionally use exact anchor dates rather than the chart's
+    biweekly sampling so the pills reflect the label semantics more closely.
+    """
+    from datetime import date as dt_date, timedelta
+
+    def _query(c):
+        state = _build_reconstructed_net_worth_state(c, profile=profile)
+        current_net_worth = state["current_net_worth"]
+        if state["first_date"] is None:
+            return {"mom": None, "ytd": None}
+
+        today = dt_date.today()
+        previous_month_end = today.replace(day=1) - timedelta(days=1)
+        previous_year_end = dt_date(today.year - 1, 12, 31)
+
+        previous_month_net_worth = _reconstructed_net_worth_on(state, previous_month_end)
+        previous_year_end_net_worth = _reconstructed_net_worth_on(state, previous_year_end)
+
+        return {
+            "mom": round(current_net_worth - previous_month_net_worth, 2) if previous_month_net_worth is not None else None,
+            "ytd": round(current_net_worth - previous_year_end_net_worth, 2) if previous_year_end_net_worth is not None else None,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
 def get_category_analytics_data(month: str | None = None, profile: str | None = None, conn=None) -> list[dict]:
     """
     Compute per-category spending breakdown using SQL GROUP BY.
@@ -445,6 +667,7 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
     household view) transfers from the breakdown.
     """
     def _query(c):
+        tx_source = _transactions_source()
         where_clauses = []
         params = []
         is_household = not profile or profile == "household"
@@ -469,7 +692,7 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
         # Gross expenses by category
         expense_sql = f"""
             SELECT category, SUM(ABS(amount)) as total
-            FROM transactions
+            FROM {tx_source}
             WHERE amount < 0 AND category NOT IN ({non_spending_ph}){where_sql}
             GROUP BY category
         """
@@ -480,7 +703,7 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
         # Refunds by category
         refund_sql = f"""
             SELECT category, SUM(amount) as total
-            FROM transactions
+            FROM {tx_source}
             WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{where_sql}
             GROUP BY category
         """
@@ -517,14 +740,14 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
         # Compute transfer totals using the same profile + expense_type filtering
         savings_total = c.execute(
             f"""SELECT COALESCE(SUM(ABS(amount)), 0)
-                FROM transactions
+                FROM {tx_source}
                 WHERE category = 'Savings Transfer' AND amount < 0{" AND " + " AND ".join(where_clauses) if where_clauses else ""}""",
             params,
         ).fetchone()[0]
 
         personal_transfer_total = c.execute(
             f"""SELECT COALESCE(SUM(ABS(amount)), 0)
-                FROM transactions
+                FROM {tx_source}
                 WHERE category = 'Personal Transfer' AND amount < 0{" AND " + " AND ".join(where_clauses) if where_clauses else ""}""",
             params,
         ).fetchone()[0]
@@ -550,6 +773,7 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
         Each month includes up to 5 categories (top 4 + "Other" bucket).
     """
     def _query(c):
+        tx_source = _transactions_source()
         where_clauses = []
         params = []
         is_household = not profile or profile == "household"
@@ -571,7 +795,7 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
         # Get gross expenses grouped by month + category
         expense_sql = f"""
             SELECT SUBSTR(date, 1, 7) as month, category, SUM(ABS(amount)) as total
-            FROM transactions
+            FROM {tx_source}
             WHERE amount < 0 AND category NOT IN ({non_spending_ph}){where_sql}
             GROUP BY SUBSTR(date, 1, 7), category
             ORDER BY month DESC, total DESC
@@ -582,7 +806,7 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
         # Get refunds grouped by month + category
         refund_sql = f"""
             SELECT SUBSTR(date, 1, 7) as month, category, SUM(amount) as total
-            FROM transactions
+            FROM {tx_source}
             WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{where_sql}
             GROUP BY SUBSTR(date, 1, 7), category
         """
@@ -644,6 +868,7 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
 def get_merchant_insights_data(month: str | None = None, profile: str | None = None, conn=None) -> list[dict]:
     """Merchant-level spending breakdown using SQL aggregation."""
     def _query(c):
+        tx_source = _transactions_source()
         where_clauses = ["enriched = 1", "merchant_name != ''"]
         params = []
 
@@ -665,7 +890,7 @@ def get_merchant_insights_data(month: str | None = None, profile: str | None = N
                    merchant_city, merchant_state,
                    SUM(ABS(amount)) as total_spent,
                    COUNT(*) as transaction_count
-            FROM transactions
+            FROM {tx_source}
             {where_sql}
             GROUP BY merchant_name
             ORDER BY total_spent DESC
@@ -696,77 +921,29 @@ def get_net_worth_series_data(interval: str = "weekly", profile: str | None = No
     Uses SQL to fetch daily net changes, then builds the series in Python
     (cumulative day-by-day logic doesn't benefit from SQL window functions in SQLite).
     """
-    from datetime import date as dt_date, timedelta
-    from collections import defaultdict
+    from datetime import timedelta
 
     def _query(c):
-        # Current total balances
-        acct_profile_clause = ""
-        acct_params = []
-        if profile and profile != "household":
-            acct_profile_clause = " AND profile_id = ?"
-            acct_params = [profile]
-
-        total_assets = c.execute(
-            f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('depository', 'investment') AND is_active = 1{acct_profile_clause}",
-            acct_params,
-        ).fetchone()[0]
-        total_owed = c.execute(
-            f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('credit', 'loan') AND is_active = 1{acct_profile_clause}",
-            acct_params,
-        ).fetchone()[0]
-        current_net_worth = total_assets - total_owed
-
-        # Get daily net changes via SQL aggregation
-        tx_profile_clause = ""
-        tx_params = []
-        if profile and profile != "household":
-            tx_profile_clause = " AND profile_id = ?"
-            tx_params = [profile]
-
-        daily_rows = c.execute(
-            f"""SELECT SUBSTR(date, 1, 10) as day, SUM(amount) as net
-                FROM transactions
-                WHERE LENGTH(date) >= 10{tx_profile_clause}
-                GROUP BY SUBSTR(date, 1, 10)
-                ORDER BY day ASC""",
-            tx_params,
-        ).fetchall()
-
-        if not daily_rows:
+        state = _build_reconstructed_net_worth_state(c, profile=profile)
+        if state["first_date"] is None or state["last_date"] is None:
             return []
 
-        daily_net = {row[0]: row[1] for row in daily_rows}
-        first_date = dt_date.fromisoformat(daily_rows[0][0])
-        last_date = dt_date.fromisoformat(daily_rows[-1][0])
-
-        # Build cumulative
-        all_days = []
-        d = first_date
-        while d <= last_date:
-            all_days.append(d)
-            d += timedelta(days=1)
-
-        cumulative = {}
-        running = 0.0
-        for day in all_days:
-            running += daily_net.get(day.isoformat(), 0.0)
-            cumulative[day] = running
-
-        total_cumulative = cumulative.get(last_date, 0.0)
-        starting_nw = current_net_worth - total_cumulative
+        first_date = state["first_date"]
+        last_date = state["last_date"]
 
         step_days = 7 if interval == "weekly" else 14
         series = []
         d = first_date
         while d <= last_date:
-            nw = starting_nw + cumulative.get(d, 0.0)
-            series.append({"date": d.isoformat(), "value": round(nw, 2)})
+            nw = _reconstructed_net_worth_on(state, d)
+            if nw is not None:
+                series.append({"date": d.isoformat(), "value": nw})
             d += timedelta(days=step_days)
 
         if series and series[-1]["date"] != last_date.isoformat():
-            nw = starting_nw + cumulative.get(last_date, 0.0)
-            series.append({"date": last_date.isoformat(), "value": round(nw, 2)})
+            nw = _reconstructed_net_worth_on(state, last_date)
+            if nw is not None:
+                series.append({"date": last_date.isoformat(), "value": nw})
 
         return series
 
@@ -791,6 +968,7 @@ def get_dashboard_bundle_data(
         monthly_sorted = get_monthly_analytics_data(profile=profile, conn=c)
         cat_result = get_category_analytics_data(profile=profile, conn=c)
         nw_series = get_net_worth_series_data(interval=nw_interval, profile=profile, conn=c)
+        nw_deltas = get_net_worth_delta_metrics(profile=profile, conn=c)
         monthly_cat_breakdown = get_monthly_category_breakdown(profile=profile, months=12, conn=c)
 
         return {
@@ -801,6 +979,8 @@ def get_dashboard_bundle_data(
             "savingsTransferTotal": cat_result["savings_transfer_total"],
             "personalTransferTotal": cat_result["personal_transfer_total"],
             "netWorthSeries": nw_series,
+            "netWorthMomDelta": nw_deltas.get("mom"),
+            "netWorthYtdDelta": nw_deltas.get("ytd"),
             "ccRepaid": summary_out.get("cc_repaid", 0),
             "externalTransfers": summary_out.get("external_transfers", 0),
             "monthlyCategoryBreakdown": monthly_cat_breakdown,
@@ -1259,7 +1439,9 @@ def get_data(force_refresh: bool = False) -> dict:
 
     with get_db() as conn:
         # Check if we have any data
-        count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM {_transactions_source()}"
+        ).fetchone()[0]
         if count == 0:
             return EMPTY_DATA
 
@@ -1268,7 +1450,8 @@ def get_data(force_refresh: bool = False) -> dict:
             """SELECT id, account_name as name, account_subtype as type,
                       CASE WHEN account_type IN ('credit', 'loan') THEN 1 ELSE 0 END as is_credit,
                       account_type,
-                      current_balance as balance, currency, profile_id as profile
+                      current_balance as balance, currency, profile_id as profile,
+                      COALESCE(provider, 'teller') as provider
                FROM accounts WHERE is_active = 1"""
         ).fetchall()
         accounts = dicts_from_rows(acct_rows)
@@ -1282,7 +1465,7 @@ def get_data(force_refresh: bool = False) -> dict:
                       account_name, account_type, merchant_name, merchant_domain,
                       merchant_industry, merchant_city, merchant_state,
                       enriched, is_excluded, expense_type
-               FROM transactions
+               FROM transactions_visible
                ORDER BY date DESC"""
         ).fetchall()
         transactions = dicts_from_rows(tx_rows)
@@ -1320,21 +1503,281 @@ def get_cached_tx_ids() -> set:
 # SYNC (Teller → SQLite)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_fresh_data(incremental: bool = True) -> dict:
+def _sync_teller_accounts(conn, cached_ids: set, now: str) -> list[dict]:
     """
-    Fetch from Teller API and write to SQLite.
+    Fetch accounts and transactions from Teller, upsert accounts,
+    and return a list of new (uncategorised) transaction dicts.
+    This is the original Teller sync logic, extracted for clarity.
+    """
+    logger.info("Fetching accounts from Teller...")
+    accounts = get_all_accounts_by_profile()
+    new_transactions = []
+
+    for account in accounts:
+        token = account["access_token"]
+        name = account["name"]
+        subtype = account.get("subtype", "")
+        profile = account.get("profile", "primary")
+        institution = account.get("institution", {}).get("name", "")
+        logger.info("[%s] Fetching transactions for %s...", profile, name)
+
+        # Ensure this account's profile exists regardless
+        conn.execute(
+            "INSERT OR IGNORE INTO profiles (id, display_name) VALUES (?, ?)",
+            (profile, profile.title()),
+        )
+
+        all_txns = get_transactions(account["id"], token)
+        balances = get_balances(account["id"], token)
+
+        new_txns = [t for t in all_txns if t.get("id") not in cached_ids]
+
+        for t in new_txns:
+            t["account_name"] = name
+            t["account_type"] = subtype
+            t["profile"] = profile
+
+        # Upsert account
+        # Teller account types: depository, credit, loan, investment
+        # Map to our internal types for net worth classification
+        teller_type = account.get("type", "depository")
+        is_credit = subtype in ("credit_card", "credit") or teller_type == "credit"
+        is_loan = teller_type == "loan"
+        is_investment = teller_type == "investment"
+
+        # Balance selection: credit/loan use ledger, others use available
+        if is_credit or is_loan:
+            balance = balances.get("ledger") or balances.get("available")
+        else:
+            balance = balances.get("available") or balances.get("ledger")
+
+        # Determine internal account_type
+        if is_credit:
+            internal_type = "credit"
+        elif is_loan:
+            internal_type = "loan"
+        elif is_investment:
+            internal_type = "investment"
+        else:
+            internal_type = "depository"
+
+        conn.execute(
+            """INSERT OR REPLACE INTO accounts
+               (id, profile_id, institution_name, account_name,
+                account_type, account_subtype, current_balance,
+                currency, last_synced_at, is_active, provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'teller')""",
+            (
+                account["id"],
+                profile,
+                institution,
+                name,
+                internal_type,
+                subtype,
+                float(balance) if balance else 0.0,
+                account.get("currency", "USD"),
+                now,
+            ),
+        )
+
+        if new_txns:
+            logger.info(
+                "    Found %d new (skipping %d cached)",
+                len(new_txns), len(all_txns) - len(new_txns),
+            )
+            categorized = categorize_transactions(new_txns)
+            new_transactions.extend(categorized)
+        else:
+            logger.info("    No new transactions for %s", name)
+
+    return new_transactions
+
+
+def _sync_simplefin_accounts(conn, cached_ids: set, now: str) -> list[dict]:
+    """
+    Fetch accounts and transactions from all active SimpleFIN connections,
+    upsert accounts, and return a list of new (uncategorised) transaction dicts.
+    """
+    import simplefin
+
+    connections = simplefin._load_active_access_urls()
+    if not connections:
+        return []
+
+    logger.info("SimpleFIN: found %d active connection(s).", len(connections))
+    new_transactions = []
+
+    for sf_conn in connections:
+        conn_id = sf_conn["id"]
+        profile = sf_conn["profile"]
+        display_name = sf_conn.get("display_name", "")
+
+        if not simplefin._should_sync(sf_conn.get("last_synced_at")):
+            logger.info(
+                "SimpleFIN connection %d (%s) synced recently — skipping (rate limit).",
+                conn_id, display_name,
+            )
+            continue
+
+        # Ensure this connection's profile exists
+        conn.execute(
+            "INSERT OR IGNORE INTO profiles (id, display_name) VALUES (?, ?)",
+            (profile, profile.title()),
+        )
+
+        # SimpleFIN requires start-date or it returns balances only (no transactions).
+        # Full sync: fetch up to 1 year of history.
+        # Incremental sync: fetch 90-day window to catch any late-posted transactions.
+        # Check specifically for existing SimpleFIN transactions (id prefix 'sf_') for
+        # this connection's profile — avoids falsely treating a fresh SimpleFIN connection
+        # as incremental just because Teller transactions already exist in the DB.
+        from datetime import timedelta
+        sf_exists = conn.execute(
+            "SELECT 1 FROM transactions WHERE id LIKE 'sf_%' AND profile_id = ? LIMIT 1",
+            (profile,),
+        ).fetchone()
+        if sf_exists:
+            start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        else:
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+        try:
+            raw_data = simplefin.fetch_data(sf_conn["access_url"], start_date=start_date)
+        except ValueError as exc:
+            logger.warning("SimpleFIN connection %d fetch failed: %s", conn_id, exc)
+            continue
+
+        sf_accounts, sf_txns = simplefin.normalize_all(raw_data, profile)
+
+        # Upsert accounts
+        for acct in sf_accounts:
+            conn.execute(
+                """INSERT OR REPLACE INTO accounts
+                   (id, profile_id, institution_name, account_name,
+                    account_type, account_subtype, current_balance,
+                    currency, last_synced_at, is_active, provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'simplefin')""",
+                (
+                    acct["id"],
+                    acct["profile"],
+                    acct["institution_name"],
+                    acct["account_name"],
+                    acct["account_type"],
+                    acct["account_subtype"],
+                    acct["current_balance"],
+                    acct["currency"],
+                    now,
+                ),
+            )
+
+        # Filter to new transactions only
+        new_txns = [t for t in sf_txns if t.get("id") not in cached_ids]
+
+        if new_txns:
+            logger.info(
+                "SimpleFIN connection %d (%s): %d new transactions (skipping %d cached).",
+                conn_id, display_name, len(new_txns), len(sf_txns) - len(new_txns),
+            )
+            categorized = categorize_transactions(new_txns)
+            new_transactions.extend(categorized)
+        else:
+            logger.info("SimpleFIN connection %d (%s): no new transactions.", conn_id, display_name)
+
+        # Update last_synced_at
+        simplefin.update_last_synced(conn_id, now)
+
+    return new_transactions
+
+
+def _post_sync(all_new_transactions: list[dict], conn, now: str):
+    """
+    Shared post-sync steps: transfer classification, insertion,
+    net-worth snapshot, recurring detection, transfer reclassification.
+    """
+    # Build account lookup once for transfer classification
+    account_lookup = _build_account_lookup(conn)
+
+    # Classify transfer sub-types before insertion
+    for tx in all_new_transactions:
+        category = tx.get("category", "Other")
+        if category in TRANSFER_CATEGORIES:
+            tx["expense_type"] = _classify_transfer_type(tx, account_lookup)
+
+    # Insert new transactions
+    for tx in all_new_transactions:
+        _insert_transaction(conn, tx)
+
+    # Snapshot net worth
+    _snapshot_net_worth(conn, now)
+
+
+def _post_sync_recurring(all_new_transactions: list[dict]):
+    """Run recurring detection and transfer reclassification after sync."""
+    if all_new_transactions:
+        try:
+            from recurring import RecurringDetector, write_detection_results_to_db
+            from database import _extract_merchant_pattern as _emp
+
+            new_merchant_keys = set()
+            for tx in all_new_transactions:
+                merchant = (tx.get("merchant_name") or "").upper().strip()
+                if merchant:
+                    new_merchant_keys.add(merchant)
+                desc = tx.get("description", "")
+                pattern = _emp(desc)
+                if pattern:
+                    new_merchant_keys.add(pattern)
+
+            if new_merchant_keys:
+                logger.info(
+                    "Running incremental recurring detection for %d merchant keys...",
+                    len(new_merchant_keys),
+                )
+
+                all_data = get_data()
+                all_txns = all_data["transactions"]
+
+                profiles_seen = {tx.get("profile", "primary") for tx in all_new_transactions}
+                for prof in profiles_seen:
+                    prof_txns = [t for t in all_txns if t.get("profile") == prof]
+                    detector = RecurringDetector(get_db_conn=get_db)
+                    result = detector.detect(
+                        transactions=prof_txns,
+                        profile=prof,
+                        merchant_keys=new_merchant_keys,
+                        generate_events=True,
+                    )
+                    write_detection_results_to_db(
+                        get_db_conn=get_db,
+                        items=result["items"],
+                        events=result.get("events", []),
+                        profile=prof,
+                    )
+
+                logger.info("Incremental recurring detection complete.")
+
+        except Exception as e:
+            logger.warning("Incremental recurring detection failed (non-fatal): %s", e)
+
+    try:
+        reclassify_transfers()
+    except Exception as e:
+        logger.warning("Transfer reclassification failed (non-fatal): %s", e)
+
+
+def fetch_fresh_data(incremental: bool = True, sync_job_id: str | None = None) -> dict:
+    """
+    Fetch from Teller API (and SimpleFIN if configured) and write to SQLite.
     Called ONLY by /api/sync.
     """
     with _lock:
+        _set_sync_phase(sync_job_id, "preparing")
         cached_ids = get_cached_tx_ids() if incremental else set()
 
         if cached_ids:
             logger.info("Database has %d existing transactions.", len(cached_ids))
         else:
             logger.info("No cached transactions — full fetch.")
-
-        logger.info("Fetching accounts from Teller...")
-        accounts = get_all_accounts_by_profile()
 
         now = datetime.now().isoformat()
 
@@ -1353,154 +1796,28 @@ def fetch_fresh_data(incremental: bool = True) -> dict:
 
             all_new_transactions = []
 
-            for account in accounts:
-                token = account["access_token"]
-                name = account["name"]
-                subtype = account.get("subtype", "")
-                profile = account.get("profile", "primary")
-                institution = account.get("institution", {}).get("name", "")
-                logger.info("[%s] Fetching transactions for %s...", profile, name)
-
-                # Ensure this account's profile exists regardless
-                conn.execute(
-                    "INSERT OR IGNORE INTO profiles (id, display_name) VALUES (?, ?)",
-                    (profile, profile.title()),
-                )
-                
-                all_txns = get_transactions(account["id"], token)
-                balances = get_balances(account["id"], token)
-
-                new_txns = [t for t in all_txns if t.get("id") not in cached_ids]
-
-                for t in new_txns:
-                    t["account_name"] = name
-                    t["account_type"] = subtype
-                    t["profile"] = profile
-
-                # Upsert account
-                # Teller account types: depository, credit, loan, investment
-                # Map to our internal types for net worth classification
-                teller_type = account.get("type", "depository")
-                is_credit = subtype in ("credit_card", "credit") or teller_type == "credit"
-                is_loan = teller_type == "loan"
-                is_investment = teller_type == "investment"
-
-                # Balance selection: credit/loan use ledger, others use available
-                if is_credit or is_loan:
-                    balance = balances.get("ledger") or balances.get("available")
-                else:
-                    balance = balances.get("available") or balances.get("ledger")
-
-                # Determine internal account_type
-                if is_credit:
-                    internal_type = "credit"
-                elif is_loan:
-                    internal_type = "loan"
-                elif is_investment:
-                    internal_type = "investment"
-                else:
-                    internal_type = "depository"
-
-                conn.execute(
-                    """INSERT OR REPLACE INTO accounts
-                       (id, profile_id, institution_name, account_name,
-                        account_type, account_subtype, current_balance,
-                        currency, last_synced_at, is_active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                    (
-                        account["id"],
-                        profile,
-                        institution,
-                        name,
-                        internal_type,
-                        subtype,
-                        float(balance) if balance else 0.0,
-                        account.get("currency", "USD"),
-                        now,
-                    ),
-                )
-
-                if new_txns:
-                    logger.info(
-                        "    Found %d new (skipping %d cached)",
-                        len(new_txns), len(all_txns) - len(new_txns),
-                    )
-                    categorized = categorize_transactions(new_txns)
-                    all_new_transactions.extend(categorized)
-                else:
-                    logger.info("    No new transactions for %s", name)
-
-            # Build account lookup once for transfer classification
-            account_lookup = _build_account_lookup(conn)
-
-            # Classify transfer sub-types before insertion
-            for tx in all_new_transactions:
-                category = tx.get("category", "Other")
-                if category in TRANSFER_CATEGORIES:
-                    tx["expense_type"] = _classify_transfer_type(tx, account_lookup)
-
-            # Insert new transactions
-            for tx in all_new_transactions:
-                _insert_transaction(conn, tx)
-
-            # Snapshot net worth
-            _snapshot_net_worth(conn, now)
-
-        # Incremental recurring detection on newly synced transactions
-        if all_new_transactions:
+            # ── Teller sync ──
             try:
-                from recurring import RecurringDetector, write_detection_results_to_db
-                from database import _extract_merchant_pattern as _emp
-
-                # Collect merchant keys from new transactions
-                new_merchant_keys = set()
-                for tx in all_new_transactions:
-                    merchant = (tx.get("merchant_name") or "").upper().strip()
-                    if merchant:
-                        new_merchant_keys.add(merchant)
-                    desc = tx.get("description", "")
-                    pattern = _emp(desc)
-                    if pattern:
-                        new_merchant_keys.add(pattern)
-
-                if new_merchant_keys:
-                    logger.info(
-                        "Running incremental recurring detection for %d merchant keys...",
-                        len(new_merchant_keys),
-                    )
-
-                    # Need full transaction set for affected groups
-                    all_data = get_data()
-                    all_txns = all_data["transactions"]
-
-                    # Detect per profile
-                    profiles_seen = {tx.get("profile", "primary") for tx in all_new_transactions}
-                    for prof in profiles_seen:
-                        prof_txns = [t for t in all_txns if t.get("profile") == prof]
-                        detector = RecurringDetector(get_db_conn=get_db)
-                        result = detector.detect(
-                            transactions=prof_txns,
-                            profile=prof,
-                            merchant_keys=new_merchant_keys,
-                            generate_events=True,
-                        )
-                        write_detection_results_to_db(
-                            get_db_conn=get_db,
-                            items=result["items"],
-                            events=result.get("events", []),
-                            profile=prof,
-                        )
-
-                    logger.info("Incremental recurring detection complete.")
-
+                _set_sync_phase(sync_job_id, "fetching_accounts", "Syncing Teller accounts")
+                teller_txns = _sync_teller_accounts(conn, cached_ids, now)
+                all_new_transactions.extend(teller_txns)
             except Exception as e:
-                logger.warning("Incremental recurring detection failed (non-fatal): %s", e)
+                logger.warning("Teller sync failed (non-fatal): %s", e)
 
-        # Re-classify all transfers (new accounts may change internal/household/external)
-        try:
-            reclassify_transfers()
-        except Exception as e:
-            logger.warning("Transfer reclassification failed (non-fatal): %s", e)
+            # ── SimpleFIN sync ──
+            try:
+                _set_sync_phase(sync_job_id, "fetching_accounts", "Syncing SimpleFIN accounts")
+                sf_txns = _sync_simplefin_accounts(conn, cached_ids, now)
+                all_new_transactions.extend(sf_txns)
+            except Exception as e:
+                logger.warning("SimpleFIN sync failed (non-fatal): %s", e)
+
+            # ── Shared post-sync pipeline ──
+            _set_sync_phase(sync_job_id, "writing_transactions", "Writing transactions and balances")
+            _post_sync(all_new_transactions, conn, now)
+
+        _set_sync_phase(sync_job_id, "finalizing", "Finalizing derived data")
+        _post_sync_recurring(all_new_transactions)
 
         total_count_row = None
         with get_db() as conn:
@@ -1509,6 +1826,41 @@ def fetch_fresh_data(incremental: bool = True) -> dict:
         total_count = total_count_row[0] if total_count_row else 0
         logger.info("Sync complete: %d new, %d total.", len(all_new_transactions), total_count)
 
+        _set_sync_phase(sync_job_id, "completed", "Sync complete")
+        return get_data()
+
+
+def fetch_simplefin_data(sync_job_id: str | None = None) -> dict:
+    """
+    Fetch from SimpleFIN only (no Teller). Used by /api/simplefin/sync
+    to allow independent testing of the SimpleFIN pipeline.
+    """
+    with _lock:
+        _set_sync_phase(sync_job_id, "preparing")
+        cached_ids = get_cached_tx_ids()
+        now = datetime.now().isoformat()
+
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO profiles (id, display_name) VALUES ('household', 'Household')",
+            )
+
+            _set_sync_phase(sync_job_id, "fetching_accounts", "Syncing SimpleFIN accounts")
+            sf_txns = _sync_simplefin_accounts(conn, cached_ids, now)
+            _set_sync_phase(sync_job_id, "writing_transactions", "Writing transactions and balances")
+            _post_sync(sf_txns, conn, now)
+
+        _set_sync_phase(sync_job_id, "finalizing", "Finalizing derived data")
+        _post_sync_recurring(sf_txns)
+
+        total_count_row = None
+        with get_db() as conn:
+            total_count_row = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()
+
+        total_count = total_count_row[0] if total_count_row else 0
+        logger.info("SimpleFIN sync complete: %d new, %d total.", len(sf_txns), total_count)
+
+        _set_sync_phase(sync_job_id, "completed", "Sync complete")
         return get_data()
 
 
@@ -1554,6 +1906,8 @@ def _insert_transaction(conn, tx: dict):
         if row:
             account_id = row[0]
 
+    desc_normalized = _extract_merchant_pattern(tx.get("description", ""))
+
     conn.execute(
         """INSERT OR IGNORE INTO transactions
            (id, account_id, profile_id, date, description, raw_description,
@@ -1561,8 +1915,8 @@ def _insert_transaction(conn, tx: dict):
             counterparty_name, counterparty_type, teller_category,
             account_name, account_type, merchant_name, merchant_domain,
             merchant_industry, merchant_city, merchant_state,
-            enriched, confidence, expense_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            enriched, confidence, expense_type, description_normalized)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             tx_id,
             account_id,
@@ -1587,6 +1941,7 @@ def _insert_transaction(conn, tx: dict):
             1 if tx.get("enriched") else 0,
             tx.get("confidence", ""),
             tx.get("expense_type"),
+            desc_normalized,
         ),
     )
 
@@ -1606,7 +1961,11 @@ def _check_user_rules(conn, description: str) -> str | None:
            ORDER BY priority DESC"""
     ).fetchall()
 
-    desc_upper = description.upper()
+    # Canonical form for 'contains' matching — same function used to create the rule pattern.
+    # Comparing canonical-to-canonical (equality) instead of pattern-in-raw-description
+    # prevents mid-string noise tokens (e.g. store numbers) from breaking the match.
+    desc_normalized = _extract_merchant_pattern(description)
+    desc_upper = description.upper()  # still needed for 'exact' match_type
 
     for rule in rules:
         pattern = rule[0]
@@ -1614,7 +1973,7 @@ def _check_user_rules(conn, description: str) -> str | None:
         category = rule[2]
 
         if match_type == "contains":
-            if pattern.upper() in desc_upper:
+            if desc_normalized and pattern == desc_normalized:
                 return category
         elif match_type == "regex":
             if re.search(pattern, description, re.IGNORECASE):
@@ -1675,10 +2034,17 @@ def _snapshot_net_worth(conn, timestamp: str):
 # WRITE OPERATIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
+def update_transaction_category(tx_id: str, new_category: str, one_off: bool = False) -> dict | bool:
     """
     Update a single transaction's category (user override).
-    Also automatically creates a user rule for future matching.
+
+    one_off=False (default / "Always"): creates a user rule, applies it retroactively
+    to all matching transactions, and syncs merchant metadata — identical to the
+    previous behaviour.
+
+    one_off=True ("Just this transaction"): only updates this transaction and sets
+    category_pinned=1 so future rule applications cannot overwrite it.  No rule is
+    created and no other transactions are touched.
 
     Returns:
         - False if transaction not found
@@ -1688,7 +2054,9 @@ def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
     with get_db() as conn:
         # Get the transaction
         row = conn.execute(
-            "SELECT description, category, amount, merchant_name FROM transactions WHERE id = ?",
+            """SELECT description, category, amount, merchant_name, profile_id
+               FROM transactions
+               WHERE id = ?""",
             (tx_id,),
         ).fetchone()
 
@@ -1699,16 +2067,20 @@ def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
         old_category = row[1]
         tx_amount = row[2]
         tx_merchant_name = row[3]
+        tx_profile_id = row[4]
 
-        # Update the transaction
+        # Update the transaction.
+        # category_pinned=1 when one-off: guards against future rule overwrites.
+        # category_pinned=0 when always: clears any prior pin so rules can apply normally.
         conn.execute(
             """UPDATE transactions
                SET category = ?, categorization_source = 'user',
                    original_category = COALESCE(original_category, ?),
                    confidence = 'manual',
+                   category_pinned = ?,
                    updated_at = datetime('now')
                WHERE id = ?""",
-            (new_category, old_category, tx_id),
+            (new_category, old_category, 1 if one_off else 0, tx_id),
         )
 
         # Ensure category exists
@@ -1717,44 +2089,38 @@ def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
             (new_category,),
         )
 
-        # Auto-create a user rule
-        pattern = _extract_merchant_pattern(description)
-        if pattern and len(pattern) >= 3:
-            # Check if a user rule already exists for this pattern
-            existing = conn.execute(
-                "SELECT id, category FROM category_rules WHERE pattern = ? AND source = 'user' AND is_active = 1",
-                (pattern,),
-            ).fetchone()
-
-            if existing:
-                # Update existing rule
-                conn.execute(
-                    "UPDATE category_rules SET category = ? WHERE id = ?",
-                    (new_category, existing[0]),
+        if not one_off:
+            # "Always" path: create rule, backfill matching transactions, sync merchant.
+            pattern = _extract_merchant_pattern(description)
+            merchant_pattern = _extract_merchant_pattern(tx_merchant_name or "")
+            rule_pattern = merchant_pattern or pattern
+            if rule_pattern and len(rule_pattern) >= 3:
+                _upsert_user_category_rule(
+                    conn,
+                    pattern=rule_pattern,
+                    category=new_category,
+                    profile_id=tx_profile_id,
+                )
+                retroactive_count = _apply_category_rule_to_transactions(
+                    conn,
+                    pattern=rule_pattern,
+                    category=new_category,
+                    profile_id=tx_profile_id,
+                    exclude_tx_id=tx_id,
+                )
+                _upsert_merchant_category_metadata(
+                    conn,
+                    merchant_key=rule_pattern,
+                    profile_id=tx_profile_id,
+                    category=new_category,
                 )
             else:
-                # Create new rule
-                conn.execute(
-                    """INSERT INTO category_rules
-                       (pattern, match_type, category, priority, source)
-                       VALUES (?, 'contains', ?, 1000, 'user')""",
-                    (pattern, new_category),
-                )
+                retroactive_count = 0
+        else:
+            # "One-off" path: no rule, no retroactive application, no merchant sync.
+            retroactive_count = 0
 
-            # Apply rule retroactively: recategorize past transactions with same pattern
-            # Only recategorize those that weren't manually set by the user
-            escaped_pattern = _escape_like(pattern)
-            conn.execute(
-                """UPDATE transactions
-                   SET category = ?, categorization_source = 'user-rule',
-                       updated_at = datetime('now')
-                   WHERE UPPER(description) LIKE ? ESCAPE '\\'
-                     AND categorization_source != 'user'
-                     AND id != ?""",
-                (new_category, f"%{escaped_pattern}%", tx_id),
-            )
-
-        result = {"updated": True}
+        result = {"updated": True, "retroactive_count": retroactive_count}
 
         # Enhancement 7: Signal subscription prompt if category is "Subscriptions"
         if new_category.strip().lower() == "subscriptions":
@@ -1765,6 +2131,317 @@ def update_transaction_category(tx_id: str, new_category: str) -> dict | bool:
             result["transaction_id"] = tx_id
         
         return result
+
+
+def _upsert_user_category_rule(
+    conn,
+    pattern: str,
+    category: str,
+    profile_id: str | None = None,
+) -> int | None:
+    """Create or update a user rule scoped to an optional profile."""
+    normalized_pattern = (pattern or "").upper().strip()
+    normalized_category = (category or "").strip()
+    normalized_profile = (profile_id or "").strip() or None
+    if not normalized_pattern or len(normalized_pattern) < 3 or not normalized_category:
+        return None
+
+    existing = conn.execute(
+        """SELECT id
+           FROM category_rules
+           WHERE pattern = ?
+             AND source = 'user'
+             AND is_active = 1
+             AND COALESCE(profile_id, '') = COALESCE(?, '')
+           ORDER BY priority DESC, id DESC
+           LIMIT 1""",
+        (normalized_pattern, normalized_profile),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """UPDATE category_rules
+               SET category = ?,
+                   priority = 1000
+               WHERE id = ?""",
+            (normalized_category, existing[0]),
+        )
+        return existing[0]
+
+    cur = conn.execute(
+        """INSERT INTO category_rules
+           (pattern, match_type, category, priority, source, profile_id)
+           VALUES (?, 'contains', ?, 1000, 'user', ?)""",
+        (normalized_pattern, normalized_category, normalized_profile),
+    )
+    return cur.lastrowid
+
+
+def _apply_category_rule_to_transactions(
+    conn,
+    pattern: str,
+    category: str,
+    profile_id: str | None = None,
+    exclude_tx_id: str | None = None,
+) -> int:
+    """Apply a merchant-pattern category to matching transactions immediately."""
+    normalized_pattern = (pattern or "").upper().strip()
+    normalized_category = (category or "").strip()
+    normalized_profile = (profile_id or "").strip() or None
+    if not normalized_pattern or not normalized_category:
+        return 0
+
+    where = [
+        "(description_normalized = ? OR UPPER(COALESCE(merchant_name, '')) = ?)",
+        "categorization_source != 'user'",
+        "category_pinned = 0",
+    ]
+    params: list = [normalized_category, normalized_pattern, normalized_pattern]
+
+    if normalized_profile:
+        where.append("profile_id = ?")
+        params.append(normalized_profile)
+    if exclude_tx_id:
+        where.append("id != ?")
+        params.append(exclude_tx_id)
+
+    cur = conn.execute(
+        f"""UPDATE transactions
+            SET category = ?,
+                categorization_source = 'user-rule',
+                confidence = 'rule',
+                updated_at = datetime('now')
+            WHERE {' AND '.join(where)}""",
+        params,
+    )
+    return cur.rowcount
+
+
+def _upsert_merchant_category_metadata(
+    conn,
+    merchant_key: str,
+    profile_id: str | None,
+    category: str,
+) -> None:
+    """Keep merchant directory metadata aligned with the latest chosen category."""
+    normalized_key = (merchant_key or "").upper().strip()
+    normalized_profile = (profile_id or "").strip() or None
+    normalized_category = (category or "").strip()
+    if not normalized_key or not normalized_profile or not normalized_category:
+        return
+
+    existing = conn.execute(
+        """SELECT merchant_key
+           FROM merchants
+           WHERE profile_id = ?
+             AND (
+                 UPPER(TRIM(COALESCE(merchant_key, ''))) = ?
+                 OR UPPER(TRIM(COALESCE(clean_name, ''))) = ?
+             )
+           ORDER BY CASE WHEN UPPER(TRIM(COALESCE(merchant_key, ''))) = ? THEN 0 ELSE 1 END,
+                    updated_at DESC
+           LIMIT 1""",
+        (normalized_profile, normalized_key, normalized_key, normalized_key),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """UPDATE merchants
+               SET category = ?,
+                   source = 'user',
+                   updated_at = datetime('now')
+               WHERE merchant_key = ? AND profile_id = ?""",
+            (normalized_category, existing[0], normalized_profile),
+        )
+        return
+
+    conn.execute(
+        """INSERT INTO merchants
+               (merchant_key, profile_id, category, source, updated_at)
+           VALUES (?, ?, ?, 'user', datetime('now'))""",
+        (normalized_key, normalized_profile, normalized_category),
+    )
+
+
+def update_transaction_excluded(tx_id: str, is_excluded: bool, conn=None) -> dict | None:
+    """Update the exclusion flag for a single transaction."""
+    def _update(c):
+        existing = c.execute(
+            """SELECT id, profile_id, description, amount, category, merchant_name,
+                      is_excluded, categorization_source, updated_at
+               FROM transactions
+               WHERE id = ?""",
+            (tx_id,),
+        ).fetchone()
+        if not existing:
+            return None
+
+        c.execute(
+            """UPDATE transactions
+               SET is_excluded = ?, updated_at = datetime('now')
+               WHERE id = ?""",
+            (1 if is_excluded else 0, tx_id),
+        )
+        row = c.execute(
+            """SELECT id, profile_id, description, amount, category, merchant_name,
+                      is_excluded, categorization_source, updated_at
+               FROM transactions
+               WHERE id = ?""",
+            (tx_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def get_transactions_for_merchant(
+    merchant_key: str,
+    profile_id: str | None = None,
+    limit: int = 25,
+    conn=None,
+) -> list[dict]:
+    """Return recent transactions related to a merchant directory row.
+
+    merchant_key is the effective upper-cased merchant identifier, which is
+    UPPER(merchant_name) for enriched merchants or UPPER(description_normalized)
+    for unenriched ones. Both comparisons use UPPER() so case mismatches don't
+    prevent matches.
+    """
+    normalized_key = (merchant_key or "").upper().strip()
+    if not normalized_key:
+        return []
+
+    def _query(c):
+        alias_join_sql = _merchant_alias_join_sql("t", "merchant_alias")
+        metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
+        merchant_label_sql = _canonical_merchant_label_sql("t")
+        tx_source = _transactions_source(alias="t")
+        sql = f"""SELECT t.id as original_id, t.profile_id as profile, t.date, t.description,
+                        t.amount, t.category, t.original_category, t.categorization_source,
+                        t.account_name, t.merchant_name, t.is_excluded, t.updated_at,
+                        COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
+                        COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
+                 FROM {tx_source}
+                 {alias_join_sql}
+                 {metadata_join_sql}
+                 WHERE (
+                    UPPER(COALESCE(t.merchant_name, '')) = ?
+                    OR UPPER(COALESCE(t.description_normalized, '')) = ?
+                 )"""
+        params: list = [normalized_key, normalized_key]
+        if profile_id:
+            sql += " AND t.profile_id = ?"
+            params.append(profile_id)
+        sql += " ORDER BY t.date DESC, t.id DESC LIMIT ?"
+        params.append(limit)
+        rows = c.execute(sql, params).fetchall()
+        items = dicts_from_rows(rows)
+        for item in items:
+            item["is_excluded"] = bool(item.get("is_excluded", 0))
+        return items
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_category_rule_impact(
+    rule_id: int,
+    profile: str | None = None,
+    limit: int = 20,
+    conn=None,
+) -> dict | None:
+    """Return a rule plus matching transaction count and sample rows."""
+    def _query(c):
+        rule = c.execute(
+            """SELECT id, pattern, match_type, category, priority, source, profile_id,
+                      is_active, created_at
+               FROM category_rules
+               WHERE id = ?""",
+            (rule_id,),
+        ).fetchone()
+        if not rule:
+            return None
+
+        rule_item = dict(rule)
+        pattern = rule_item["pattern"] or ""
+        match_type = rule_item["match_type"] or "contains"
+        scoped_profile = profile if profile and profile != "household" else None
+
+        if match_type == "contains":
+            sql = """SELECT id as original_id, profile_id as profile, date, description,
+                            amount, category, merchant_name, categorization_source
+                     FROM transactions_visible
+                     WHERE (
+                        description_normalized = ?
+                        OR UPPER(COALESCE(merchant_name, '')) = ?
+                     )"""
+            params: list = [pattern, pattern]
+            count_sql = """SELECT COUNT(*)
+                           FROM transactions_visible
+                           WHERE (
+                              description_normalized = ?
+                              OR UPPER(COALESCE(merchant_name, '')) = ?
+                           )"""
+            count_params: list = [pattern, pattern]
+            if scoped_profile:
+                sql += " AND profile_id = ?"
+                count_sql += " AND profile_id = ?"
+                params.append(scoped_profile)
+                count_params.append(scoped_profile)
+            sql += " ORDER BY date DESC, id DESC LIMIT ?"
+            params.append(limit)
+            count = c.execute(count_sql, count_params).fetchone()[0]
+            sample = dicts_from_rows(c.execute(sql, params).fetchall())
+            return {**rule_item, "match_count": count, "sample": sample}
+
+        if match_type == "exact":
+            sql = """SELECT id as original_id, profile_id as profile, date, description,
+                            amount, category, merchant_name, categorization_source
+                     FROM transactions_visible
+                     WHERE UPPER(COALESCE(description, '')) = ?"""
+            params: list = [pattern.upper()]
+            count_sql = "SELECT COUNT(*) FROM transactions_visible WHERE UPPER(COALESCE(description, '')) = ?"
+            count_params: list = [pattern.upper()]
+            if scoped_profile:
+                sql += " AND profile_id = ?"
+                count_sql += " AND profile_id = ?"
+                params.append(scoped_profile)
+                count_params.append(scoped_profile)
+            sql += " ORDER BY date DESC, id DESC LIMIT ?"
+            params.append(limit)
+            count = c.execute(count_sql, count_params).fetchone()[0]
+            sample = dicts_from_rows(c.execute(sql, params).fetchall())
+            return {**rule_item, "match_count": count, "sample": sample}
+
+        sql = """SELECT id as original_id, profile_id as profile, date, description,
+                        amount, category, merchant_name, categorization_source
+                 FROM transactions_visible WHERE 1=1"""
+        params = []
+        if scoped_profile:
+            sql += " AND profile_id = ?"
+            params.append(scoped_profile)
+        sql += " ORDER BY date DESC, id DESC"
+        rows = dicts_from_rows(c.execute(sql, params).fetchall())
+
+        regex = re.compile(pattern, re.IGNORECASE)
+        sample = []
+        match_count = 0
+        for row in rows:
+            if regex.search(row.get("description") or ""):
+                match_count += 1
+                if len(sample) < limit:
+                    sample.append(row)
+        return {**rule_item, "match_count": match_count, "sample": sample}
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
 
 
 def add_category(name: str) -> bool:
@@ -1789,6 +2466,66 @@ def get_categories() -> list[str]:
         return [row[0] for row in rows]
 
 
+def get_categories_meta(conn=None) -> list[dict]:
+    """Return category metadata for settings/control surfaces."""
+    def _query(c):
+        rows = c.execute(
+            """SELECT name, is_system, parent_category, expense_type, expense_type_source,
+                      is_active, created_at
+               FROM categories
+               ORDER BY name"""
+        ).fetchall()
+        return dicts_from_rows(rows)
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def update_category_parent(category_name: str, parent_category: str | None, conn=None) -> dict | None:
+    """Assign or clear a category parent group."""
+    normalized_parent = parent_category.strip() if isinstance(parent_category, str) else None
+    if normalized_parent == "":
+        normalized_parent = None
+    if normalized_parent and normalized_parent == category_name:
+        raise ValueError("A category cannot be its own parent.")
+
+    def _update(c):
+        current = c.execute(
+            "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+            (category_name,),
+        ).fetchone()
+        if not current:
+            return None
+
+        if normalized_parent:
+            parent = c.execute(
+                "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+                (normalized_parent,),
+            ).fetchone()
+            if not parent:
+                raise ValueError("Parent category not found.")
+
+        c.execute(
+            "UPDATE categories SET parent_category = ? WHERE name = ?",
+            (normalized_parent, category_name),
+        )
+
+        row = c.execute(
+            """SELECT name, is_system, parent_category, expense_type, expense_type_source,
+                      is_active, created_at
+               FROM categories WHERE name = ?""",
+            (category_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
 def get_category_rules(source: str | None = None) -> list[dict]:
     """Get category rules, optionally filtered by source."""
     with get_db() as conn:
@@ -1804,6 +2541,913 @@ def get_category_rules(source: str | None = None) -> list[dict]:
                    FROM category_rules ORDER BY priority DESC"""
             ).fetchall()
         return dicts_from_rows(rows)
+
+
+def update_category_rule(
+    rule_id: int,
+    category: str | None = None,
+    priority: int | None = None,
+    is_active: bool | None = None,
+    conn=None,
+) -> dict | None:
+    """Update editable fields on a category rule."""
+    updates = []
+    params: list = []
+
+    if category is not None:
+        updates.append("category = ?")
+        params.append(category)
+    if priority is not None:
+        updates.append("priority = ?")
+        params.append(priority)
+    if is_active is not None:
+        updates.append("is_active = ?")
+        params.append(1 if is_active else 0)
+
+    if not updates:
+        raise ValueError("No rule changes provided.")
+
+    def _update(c):
+        existing = c.execute(
+            "SELECT id FROM category_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if not existing:
+            return None
+
+        if category is not None:
+            category_row = c.execute(
+                "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+                (category,),
+            ).fetchone()
+            if not category_row:
+                raise ValueError("Category not found.")
+
+        params_with_id = [*params, rule_id]
+        c.execute(
+            f"UPDATE category_rules SET {', '.join(updates)} WHERE id = ?",
+            params_with_id,
+        )
+        row = c.execute(
+            """SELECT id, pattern, match_type, category, priority, source, profile_id,
+                      is_active, created_at
+               FROM category_rules WHERE id = ?""",
+            (rule_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def get_copilot_conversations(limit: int = 50, profile: str | None = None, conn=None) -> list[dict]:
+    """Return recent Copilot conversations for the given profile."""
+    def _query(c):
+        params: list = [limit]
+        if profile and profile != "household":
+            rows = c.execute(
+                """SELECT id, profile_id, user_message, generated_sql, assistant_response,
+                          operation_type, rows_affected, created_at
+                   FROM copilot_conversations
+                   WHERE profile_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                [profile, limit],
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """SELECT id, profile_id, user_message, generated_sql, assistant_response,
+                          operation_type, rows_affected, created_at
+                   FROM copilot_conversations
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                params,
+            ).fetchall()
+        return dicts_from_rows(rows)
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_data_browser_rows(
+    table: str,
+    profile: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    conn=None,
+) -> list[dict]:
+    """Return rows for a small safe data-browser allowlist."""
+    table_key = (table or "").strip().lower()
+    if table_key not in {
+        "transactions",
+        "accounts",
+        "categories",
+        "category_rules",
+        "merchants",
+        "user_declared_subscriptions",
+        "subscription_events",
+        "dismissed_recurring",
+    }:
+        raise ValueError("Unsupported table.")
+
+    def _query(c):
+        params: list = []
+
+        if table_key == "transactions":
+            sql = """SELECT id, date, description, amount, category, profile_id, account_name,
+                            merchant_name, categorization_source, is_excluded
+                     FROM transactions_visible
+                     WHERE 1=1"""
+            if profile and profile != "household":
+                sql += " AND profile_id = ?"
+                params.append(profile)
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND (description LIKE ? ESCAPE '\\' OR merchant_name LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\')"
+                params.extend([like, like, like])
+            sql += " ORDER BY date DESC, created_at DESC LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        if table_key == "accounts":
+            sql = """SELECT id, profile_id, institution_name, account_name, account_type,
+                            account_subtype, current_balance, available_balance, last_synced_at
+                     FROM accounts WHERE is_active = 1"""
+            if profile and profile != "household":
+                sql += " AND profile_id = ?"
+                params.append(profile)
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND (account_name LIKE ? ESCAPE '\\' OR institution_name LIKE ? ESCAPE '\\')"
+                params.extend([like, like])
+            sql += " ORDER BY profile_id, institution_name, account_name LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        if table_key == "categories":
+            sql = """SELECT name, parent_category, expense_type, expense_type_source, is_system, is_active, created_at
+                     FROM categories WHERE 1=1"""
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND (name LIKE ? ESCAPE '\\' OR COALESCE(parent_category, '') LIKE ? ESCAPE '\\')"
+                params.extend([like, like])
+            sql += " ORDER BY name LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        if table_key == "category_rules":
+            sql = """SELECT id, pattern, match_type, category, priority, source, profile_id, is_active, created_at
+                     FROM category_rules WHERE 1=1"""
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND (pattern LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\')"
+                params.extend([like, like])
+            sql += " ORDER BY priority DESC, id DESC LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        if table_key == "merchants":
+            return get_merchant_directory(profile=profile, search=search, limit=limit, conn=c)
+
+        if table_key == "user_declared_subscriptions":
+            sql = """SELECT merchant_name, amount, frequency, profile_id, is_active, created_at, updated_at
+                     FROM user_declared_subscriptions WHERE 1=1"""
+            if profile and profile != "household":
+                sql += " AND profile_id = ?"
+                params.append(profile)
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND merchant_name LIKE ? ESCAPE '\\'"
+                params.append(like)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        if table_key == "subscription_events":
+            sql = """SELECT id, event_type, merchant_name, profile_id, detail, created_at, is_read
+                     FROM subscription_events WHERE 1=1"""
+            if profile and profile != "household":
+                sql += " AND profile_id = ?"
+                params.append(profile)
+            if search:
+                like = f"%{_escape_like(search)}%"
+                sql += " AND (merchant_name LIKE ? ESCAPE '\\' OR event_type LIKE ? ESCAPE '\\')"
+                params.extend([like, like])
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            return dicts_from_rows(c.execute(sql, params).fetchall())
+
+        sql = """SELECT merchant_name, profile_id, dismissed_at
+                 FROM dismissed_recurring WHERE 1=1"""
+        if profile and profile != "household":
+            sql += " AND profile_id = ?"
+            params.append(profile)
+        if search:
+            like = f"%{_escape_like(search)}%"
+            sql += " AND merchant_name LIKE ? ESCAPE '\\'"
+            params.append(like)
+        sql += " ORDER BY dismissed_at DESC LIMIT ?"
+        params.append(limit)
+        return dicts_from_rows(c.execute(sql, params).fetchall())
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_category_budgets(profile: str | None = None, conn=None) -> list[dict]:
+    """Return durable budget settings for a profile."""
+    profile_id = profile or "household"
+
+    def _query(c):
+        rows = c.execute(
+            """SELECT category, amount, updated_at
+               FROM category_budgets
+               WHERE profile_id = ?
+               ORDER BY category""",
+            (profile_id,),
+        ).fetchall()
+        return dicts_from_rows(rows)
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def update_category_budget(category: str, amount: float | None, profile: str | None = None, conn=None) -> dict:
+    """Create/update/delete a durable budget for a category."""
+    profile_id = profile or "household"
+
+    def _update(c):
+        category_row = c.execute(
+            "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+            (category,),
+        ).fetchone()
+        if not category_row:
+            raise ValueError("Category not found.")
+
+        if amount is None or amount <= 0:
+            c.execute(
+                "DELETE FROM category_budgets WHERE profile_id = ? AND category = ?",
+                (profile_id, category),
+            )
+            return {"category": category, "amount": None, "profile_id": profile_id}
+
+        c.execute(
+            """INSERT INTO category_budgets (profile_id, category, amount)
+               VALUES (?, ?, ?)
+               ON CONFLICT(profile_id, category) DO UPDATE SET
+                   amount = excluded.amount,
+                   updated_at = datetime('now')""",
+            (profile_id, category, amount),
+        )
+        row = c.execute(
+            """SELECT category, amount, updated_at
+               FROM category_budgets
+               WHERE profile_id = ? AND category = ?""",
+            (profile_id, category),
+        ).fetchone()
+        result = dict(row) if row else {"category": category, "amount": amount}
+        result["profile_id"] = profile_id
+        return result
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def get_merchant_directory(
+    profile: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    conn=None,
+) -> list[dict]:
+    """Return spend-based merchant totals without multiplying transaction rows.
+
+    The directory is driven from transactions first so every merchant you have
+    actually spent money with appears, even without enrichment. Merchant
+    display aliases come from merchant_aliases, while merchant metadata is
+    overlaid from a deduped merchant view using the existing merchant records
+    as a best-effort bridge for older enrichment keys. Non-spending outflows such as
+    transfers, income, and credit-card payments are excluded so "Total Spent"
+    matches the rest of the product.
+    """
+    def _query(c):
+        params: list = []
+        spend_placeholders = ",".join("?" * len(NON_SPENDING_CATEGORIES))
+        tx_where = [
+            "t.amount < 0",
+            "COALESCE(t.category, 'Other') NOT IN (" + spend_placeholders + ")",
+            "TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, '')) != ''",
+        ]
+        params.extend(NON_SPENDING_CATEGORIES)
+        if profile and profile != "household":
+            tx_where.append("t.profile_id = ?")
+            params.append(profile)
+
+        base_sql = f"""
+            WITH merchant_spend AS (
+                SELECT
+                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
+                    MAX(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description)) AS clean_name,
+                    t.profile_id,
+                    SUM(ABS(t.amount)) AS total_spent,
+                    COUNT(*) AS charge_count
+                FROM transactions_visible t
+                WHERE {" AND ".join(tx_where)}
+                GROUP BY
+                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))),
+                    t.profile_id
+            ),
+            merchant_alias AS (
+                SELECT
+                    profile_id,
+                    UPPER(TRIM(merchant_key)) AS merchant_key,
+                    display_name
+                FROM merchant_aliases
+                WHERE TRIM(COALESCE(merchant_key, '')) != ''
+                  AND TRIM(COALESCE(display_name, '')) != ''
+            ),
+            merchant_overlay_candidates AS (
+                SELECT
+                    profile_id,
+                    UPPER(TRIM(merchant_key)) AS overlay_key,
+                    clean_name,
+                    industry,
+                    category,
+                    source,
+                    COALESCE(is_subscription, 0) AS is_subscription,
+                    subscription_status,
+                    last_charge_date
+                FROM merchants
+                WHERE TRIM(COALESCE(merchant_key, '')) != ''
+
+                UNION ALL
+
+                SELECT
+                    profile_id,
+                    UPPER(TRIM(clean_name)) AS overlay_key,
+                    clean_name,
+                    industry,
+                    category,
+                    source,
+                    COALESCE(is_subscription, 0) AS is_subscription,
+                    subscription_status,
+                    last_charge_date
+                FROM merchants
+                WHERE TRIM(COALESCE(clean_name, '')) != ''
+                  AND UPPER(TRIM(clean_name)) != UPPER(TRIM(COALESCE(merchant_key, '')))
+            ),
+            merchant_overlay AS (
+                SELECT
+                    profile_id,
+                    overlay_key,
+                    COALESCE(
+                        MAX(CASE WHEN source = 'user' AND NULLIF(TRIM(clean_name), '') IS NOT NULL THEN clean_name END),
+                        MAX(CASE WHEN NULLIF(TRIM(clean_name), '') IS NOT NULL THEN clean_name END)
+                    ) AS clean_name,
+                    COALESCE(
+                        MAX(CASE WHEN source = 'user' AND NULLIF(TRIM(industry), '') IS NOT NULL THEN industry END),
+                        MAX(CASE WHEN NULLIF(TRIM(industry), '') IS NOT NULL THEN industry END)
+                    ) AS industry,
+                    COALESCE(
+                        MAX(CASE WHEN source = 'user' AND NULLIF(TRIM(category), '') IS NOT NULL THEN category END),
+                        MAX(CASE WHEN NULLIF(TRIM(category), '') IS NOT NULL THEN category END)
+                    ) AS category,
+                    MAX(is_subscription) AS is_subscription,
+                    COALESCE(
+                        MAX(CASE WHEN source = 'user' AND NULLIF(TRIM(subscription_status), '') IS NOT NULL THEN subscription_status END),
+                        MAX(CASE WHEN NULLIF(TRIM(subscription_status), '') IS NOT NULL THEN subscription_status END)
+                    ) AS subscription_status,
+                    MAX(last_charge_date) AS last_charge_date
+                FROM merchant_overlay_candidates
+                GROUP BY profile_id, overlay_key
+            )
+            SELECT
+                spend.merchant_key,
+                COALESCE(alias.display_name, overlay.clean_name, spend.clean_name) AS clean_name,
+                overlay.industry,
+                overlay.category,
+                COALESCE(overlay.is_subscription, 0) AS is_subscription,
+                overlay.subscription_status,
+                overlay.last_charge_date,
+                spend.profile_id,
+                spend.total_spent,
+                spend.charge_count
+            FROM merchant_spend spend
+            LEFT JOIN merchant_alias alias
+                ON alias.profile_id = spend.profile_id
+               AND alias.merchant_key = spend.merchant_key
+            LEFT JOIN merchant_overlay overlay
+                ON overlay.profile_id = spend.profile_id
+               AND overlay.overlay_key = spend.merchant_key
+        """
+
+        outer_where = "1=1"
+        if search:
+            like = f"%{_escape_like(search)}%"
+            outer_where = """(
+                sub.merchant_key LIKE ? ESCAPE '\\'
+                OR COALESCE(sub.clean_name, '') LIKE ? ESCAPE '\\'
+                OR COALESCE(sub.industry, '')   LIKE ? ESCAPE '\\'
+                OR COALESCE(sub.category, '')   LIKE ? ESCAPE '\\'
+            )"""
+            params.extend([like, like, like, like])
+
+        sql = f"""
+            SELECT * FROM ({base_sql}) sub
+            WHERE {outer_where}
+            ORDER BY sub.total_spent DESC, sub.charge_count DESC, sub.merchant_key ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        items = dicts_from_rows(c.execute(sql, params).fetchall())
+        user_rule_categories = _load_user_rule_categories_for_merchants(c, items)
+        inferred_categories = _infer_merchant_categories_from_transactions(c, items)
+        for item in items:
+            item["is_subscription"] = bool(item.get("is_subscription", 0))
+            category_key = ((item.get("profile_id") or "").strip(), (item.get("merchant_key") or "").upper().strip())
+            item["category"] = (
+                inferred_categories.get(category_key)
+                or user_rule_categories.get(category_key)
+                or item.get("category")
+            )
+        return items
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def _infer_merchant_categories_from_transactions(conn, merchant_items: list[dict]) -> dict[tuple[str, str], str]:
+    """Infer the effective merchant category from current transaction history."""
+    pending = [
+        ((item.get("profile_id") or "").strip(), (item.get("merchant_key") or "").upper().strip())
+        for item in merchant_items
+        if (item.get("profile_id") or "").strip()
+        and (item.get("merchant_key") or "").upper().strip()
+    ]
+    if not pending:
+        return {}
+
+    merchant_keys = sorted({merchant_key for _, merchant_key in pending})
+    profile_ids = sorted({profile_id for profile_id, _ in pending})
+    if not merchant_keys or not profile_ids:
+        return {}
+
+    key_placeholders = ",".join("?" * len(merchant_keys))
+    profile_placeholders = ",".join("?" * len(profile_ids))
+    spend_placeholders = ",".join("?" * len(NON_SPENDING_CATEGORIES))
+    rows = conn.execute(
+        f"""
+        SELECT profile_id,
+               merchant_key,
+               category,
+               COUNT(*) AS tx_count,
+               SUM(CASE WHEN categorization_source IN ('user', 'user-rule')
+                         OR confidence = 'manual'
+                        THEN 1 ELSE 0 END) AS trusted_count
+        FROM (
+            SELECT
+                t.profile_id,
+                UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
+                t.category,
+                t.categorization_source,
+                t.confidence
+            FROM transactions_visible t
+            WHERE t.amount < 0
+              AND TRIM(COALESCE(t.category, '')) != ''
+              AND COALESCE(t.category, 'Other') NOT IN ({spend_placeholders})
+              AND UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) IN ({key_placeholders})
+              AND t.profile_id IN ({profile_placeholders})
+        ) ranked
+        GROUP BY profile_id, merchant_key, category
+        """,
+        [*NON_SPENDING_CATEGORIES, *merchant_keys, *profile_ids],
+    ).fetchall()
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        key = (row[0] or "", row[1] or "")
+        grouped.setdefault(key, []).append(
+            {
+                "category": row[2] or "",
+                "count": int(row[3] or 0),
+                "trusted_count": int(row[4] or 0),
+            }
+        )
+
+    inferred: dict[tuple[str, str], str] = {}
+    for key, options in grouped.items():
+        if not options:
+            continue
+        total = sum(option["count"] for option in options)
+        best = max(options, key=lambda option: (option["trusted_count"], option["count"], option["category"]))
+        if total <= 0 or not best["category"]:
+            continue
+
+        dominance = best["count"] / total
+        if best["trusted_count"] > 0 or len(options) == 1 or dominance >= 0.7:
+            inferred[key] = best["category"]
+
+    return inferred
+
+
+def _load_user_rule_categories_for_merchants(conn, merchant_items: list[dict]) -> dict[tuple[str, str], str]:
+    """Load active user-rule categories keyed by (profile_id, merchant_key)."""
+    merchant_keys = sorted({
+        (item.get("merchant_key") or "").upper().strip()
+        for item in merchant_items
+        if (item.get("merchant_key") or "").upper().strip()
+    })
+    profile_ids = sorted({
+        (item.get("profile_id") or "").strip()
+        for item in merchant_items
+        if (item.get("profile_id") or "").strip()
+    })
+    if not merchant_keys or not profile_ids:
+        return {}
+
+    key_placeholders = ",".join("?" * len(merchant_keys))
+    profile_placeholders = ",".join("?" * len(profile_ids))
+    rows = conn.execute(
+        f"""
+        SELECT COALESCE(profile_id, '') AS profile_id, pattern, category
+        FROM category_rules
+        WHERE source = 'user'
+          AND is_active = 1
+          AND pattern IN ({key_placeholders})
+          AND COALESCE(profile_id, '') IN ('', {profile_placeholders})
+        ORDER BY CASE WHEN COALESCE(profile_id, '') = '' THEN 1 ELSE 0 END,
+                 priority DESC,
+                 id DESC
+        """,
+        [*merchant_keys, *profile_ids],
+    ).fetchall()
+
+    categories: dict[tuple[str, str], str] = {}
+    global_categories: dict[str, str] = {}
+    for row in rows:
+        profile_id = (row[0] or "").strip()
+        pattern = (row[1] or "").strip()
+        category = row[2] or ""
+        if profile_id:
+            categories.setdefault((profile_id, pattern), category)
+        else:
+            global_categories.setdefault(pattern, category)
+
+    for item in merchant_items:
+        profile_id = (item.get("profile_id") or "").strip()
+        merchant_key = (item.get("merchant_key") or "").upper().strip()
+        key = (profile_id, merchant_key)
+        if key not in categories and merchant_key in global_categories:
+            categories[key] = global_categories[merchant_key]
+    return categories
+
+
+def _get_merchant_alias(conn, merchant_key: str, profile_id: str | None) -> str | None:
+    """Return the user-facing alias for a canonical merchant key, if one exists."""
+    normalized_key = (merchant_key or "").upper().strip()
+    normalized_profile = (profile_id or "").strip()
+    if not normalized_key or not normalized_profile:
+        return None
+
+    row = conn.execute(
+        """SELECT display_name
+           FROM merchant_aliases
+           WHERE merchant_key = ? AND profile_id = ?""",
+        (normalized_key, normalized_profile),
+    ).fetchone()
+    if not row:
+        return None
+    alias = (row[0] or "").strip()
+    return alias or None
+
+
+def _upsert_merchant_alias(
+    conn,
+    merchant_key: str,
+    profile_id: str | None,
+    display_name: str | None,
+) -> str | None:
+    """Create, update, or clear a merchant alias for a canonical merchant key."""
+    normalized_key = (merchant_key or "").upper().strip()
+    normalized_profile = (profile_id or "").strip()
+    normalized_name = (display_name or "").strip()
+    if not normalized_key or not normalized_profile:
+        return None
+
+    if not normalized_name or normalized_name.upper() == normalized_key:
+        conn.execute(
+            "DELETE FROM merchant_aliases WHERE merchant_key = ? AND profile_id = ?",
+            (normalized_key, normalized_profile),
+        )
+        return None
+
+    conn.execute(
+        """INSERT INTO merchant_aliases
+               (merchant_key, profile_id, display_name, source, updated_at)
+           VALUES (?, ?, ?, 'user', datetime('now'))
+           ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
+               display_name = excluded.display_name,
+               source = 'user',
+               updated_at = datetime('now')""",
+        (normalized_key, normalized_profile, normalized_name),
+    )
+    return normalized_name
+
+
+def update_merchant_directory_entry(
+    merchant_key: str,
+    profile_id: str,
+    clean_name: str | None = None,
+    category: str | None = None,
+    domain: str | None = None,
+    industry: str | None = None,
+    conn=None,
+) -> dict | None:
+    """Update merchant metadata for a single merchant/profile row."""
+    metadata_updates = []
+    metadata_params: list = []
+    normalized_category = (category or "").strip()
+    normalized_profile_id = (profile_id or "").strip() or None
+    normalized_key = (merchant_key or "").upper().strip()
+    retroactive_count = 0
+
+    if category is not None:
+        metadata_updates.append("category = ?")
+        metadata_params.append(normalized_category or None)
+    if domain is not None:
+        metadata_updates.append("domain = ?")
+        metadata_params.append(domain.strip() or None)
+    if industry is not None:
+        metadata_updates.append("industry = ?")
+        metadata_params.append(industry.strip() or None)
+
+    if clean_name is None and not metadata_updates:
+        raise ValueError("No merchant changes provided.")
+
+    def _update(c):
+        if not normalized_key or not normalized_profile_id:
+            raise ValueError("Merchant key and profile are required.")
+
+        if category is not None and normalized_category:
+            category_row = c.execute(
+                "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+                (normalized_category,),
+            ).fetchone()
+            if not category_row:
+                raise ValueError("Category not found.")
+
+        alias_name = None
+        if clean_name is not None:
+            alias_name = _upsert_merchant_alias(
+                c,
+                merchant_key=normalized_key,
+                profile_id=normalized_profile_id,
+                display_name=clean_name,
+            )
+
+        if metadata_updates:
+            existing = c.execute(
+                "SELECT merchant_key FROM merchants WHERE merchant_key = ? AND profile_id = ?",
+                (normalized_key, normalized_profile_id),
+            ).fetchone()
+
+            if existing:
+                params_with_key = [*metadata_params, normalized_key, normalized_profile_id]
+                c.execute(
+                    f"""UPDATE merchants
+                        SET {', '.join(metadata_updates)},
+                            source = 'user',
+                            updated_at = datetime('now')
+                        WHERE merchant_key = ? AND profile_id = ?""",
+                    params_with_key,
+                )
+            else:
+                ins_industry = industry.strip() if industry is not None else None
+                ins_category = category.strip() or None if category is not None else None
+                ins_domain = domain.strip() if domain is not None else None
+                c.execute(
+                    """INSERT INTO merchants
+                           (merchant_key, profile_id, domain, industry, category, source, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'user', datetime('now'))""",
+                    (normalized_key, normalized_profile_id, ins_domain, ins_industry, ins_category),
+                )
+
+        if normalized_category:
+            pattern = _extract_merchant_pattern(normalized_key) or normalized_key
+            _upsert_user_category_rule(
+                c,
+                pattern=pattern,
+                category=normalized_category,
+                profile_id=normalized_profile_id,
+            )
+            retroactive_count = _apply_category_rule_to_transactions(
+                c,
+                pattern=pattern,
+                category=normalized_category,
+                profile_id=normalized_profile_id,
+            )
+        else:
+            retroactive_count = 0
+
+        row = c.execute(
+            """SELECT merchant_key, clean_name, category, domain, industry, source,
+                      is_subscription, subscription_status, subscription_amount,
+                      last_charge_date, next_expected_date, profile_id
+               FROM merchants
+               WHERE merchant_key = ? AND profile_id = ?""",
+            (normalized_key, normalized_profile_id),
+        ).fetchone()
+
+        result = dict(row) if row else {
+            "merchant_key": normalized_key,
+            "clean_name": None,
+            "category": normalized_category or None,
+            "domain": domain.strip() or None if domain is not None else None,
+            "industry": industry.strip() or None if industry is not None else None,
+            "source": "user",
+            "is_subscription": 0,
+            "subscription_status": None,
+            "subscription_amount": None,
+            "last_charge_date": None,
+            "next_expected_date": None,
+            "profile_id": normalized_profile_id,
+        }
+        result["clean_name"] = alias_name or _get_merchant_alias(c, normalized_key, normalized_profile_id) or result.get("clean_name") or normalized_key
+        result["retroactive_count"] = retroactive_count
+        return result
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def repair_non_spending_transaction_categories(conn=None) -> int:
+    """
+    Repair historical ACH/transfer rows that should have been classified as
+    non-spending transfers or credit-card payments. User-authored categories
+    are never overridden.
+    """
+    def _repair(c):
+        account_lookup = _build_account_lookup(c)
+        rows = c.execute(
+            """SELECT id, profile_id, description, raw_description, amount, category,
+                      categorization_source, transaction_type, account_type,
+                      counterparty_type, teller_category, expense_type
+               FROM transactions
+               WHERE amount < 0
+                 AND transaction_type IN ('ach', 'transfer')
+                 AND COALESCE(categorization_source, '') NOT IN ('user', 'user-rule')"""
+        ).fetchall()
+
+        updated = 0
+        for row in rows:
+            tx = {
+                "profile_id": row[1],
+                "description": row[2] or "",
+                "raw_description": row[3] or "",
+                "amount": row[4] or 0,
+                "category": row[5] or "",
+                "categorization_source": row[6] or "",
+                "type": row[7] or "",
+                "account_type": row[8] or "",
+                "counterparty_type": row[9] or "",
+                "teller_category": row[10] or "",
+            }
+            current_category = tx["category"]
+            current_expense_type = row[11]
+            new_category, confidence = _rule_based_categorize(tx)
+            if confidence != "rule-high" or new_category not in TRANSFER_CATEGORIES:
+                continue
+
+            tx["category"] = new_category
+            new_expense_type = _classify_transfer_type(tx, account_lookup)
+            if new_category == current_category and new_expense_type == current_expense_type:
+                continue
+
+            c.execute(
+                """UPDATE transactions
+                   SET category = ?,
+                       categorization_source = 'rule-high',
+                       confidence = 'rule',
+                       expense_type = ?,
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (new_category, new_expense_type, row[0]),
+            )
+            updated += 1
+
+        if updated > 0:
+            logger.info("Repaired %d historical non-spending transaction categories.", updated)
+        return updated
+
+    if conn is not None:
+        return _repair(conn)
+    with get_db() as c:
+        return _repair(c)
+
+
+def repair_polluted_merchant_categories(conn=None) -> int:
+    """Clear enrichment-polluted merchant categories that merely mirror industry."""
+    def _repair(c):
+        cur = c.execute(
+            """
+            UPDATE merchants
+               SET category = NULL,
+                   updated_at = datetime('now')
+             WHERE COALESCE(source, '') != 'user'
+               AND NULLIF(TRIM(category), '') IS NOT NULL
+               AND NULLIF(TRIM(industry), '') IS NOT NULL
+               AND UPPER(TRIM(category)) = UPPER(TRIM(industry))
+               AND UPPER(TRIM(category)) NOT IN (
+                    SELECT UPPER(name) FROM categories WHERE is_active = 1
+               )
+            """
+        )
+        repaired = cur.rowcount
+        if repaired > 0:
+            logger.info("Cleared %d merchant categories polluted by enrichment industry.", repaired)
+        return repaired
+
+    if conn is not None:
+        return _repair(conn)
+    with get_db() as c:
+        return _repair(c)
+
+
+def repair_cc_income_misclassifications(conn=None) -> int:
+    """
+    Fix historical CC payment inflows incorrectly categorized as Income.
+    Credit card accounts never receive income — any positive inflow tagged
+    Income is a CC bill payment. Joins on the accounts table so stale
+    account_type values in the transactions rows don't cause misses.
+    User-pinned categories are never touched.
+    """
+    def _repair(c):
+        # Fix stale account_type on CC transactions (stored as depository at
+        # sync time when balance was $0; accounts table has the correct type).
+        cc_account_ids = [
+            r[0] for r in c.execute(
+                "SELECT id FROM accounts WHERE account_type IN ('credit', 'loan')"
+            ).fetchall()
+        ]
+        if cc_account_ids:
+            ph = ",".join("?" * len(cc_account_ids))
+            c.execute(
+                f"""UPDATE transactions
+                    SET account_type = (
+                        SELECT a.account_type FROM accounts a WHERE a.id = transactions.account_id
+                    )
+                    WHERE account_id IN ({ph})
+                      AND account_type NOT IN ('credit', 'credit_card', 'loan')""",
+                cc_account_ids,
+            )
+
+        # Find Income-tagged transactions on credit accounts (join accounts for truth)
+        rows = c.execute(
+            """SELECT t.id FROM transactions t
+               JOIN accounts a ON t.account_id = a.id
+               WHERE a.account_type IN ('credit', 'loan')
+                 AND t.amount > 0
+                 AND t.category = 'Income'
+                 AND COALESCE(t.category_pinned, 0) = 0
+                 AND COALESCE(t.categorization_source, '') NOT IN ('user', 'user-rule')"""
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        ids = [r[0] for r in rows]
+        ph = ",".join("?" * len(ids))
+        c.execute(
+            f"""UPDATE transactions
+                SET category = 'Credit Card Payment',
+                    categorization_source = 'rule-high',
+                    updated_at = datetime('now')
+                WHERE id IN ({ph})""",
+            ids,
+        )
+        logger.info(
+            "repair_cc_income_misclassifications: fixed %d CC inflows miscategorized as Income.",
+            len(ids),
+        )
+        return len(ids)
+
+    if conn is not None:
+        return _repair(conn)
+    with get_db() as c:
+        return _repair(c)
 
 
 def reclassify_transfers(conn=None) -> int:
@@ -1826,7 +3470,7 @@ def reclassify_transfers(conn=None) -> int:
         # Fetch all transfer transactions
         transfer_ph = ",".join("?" * len(TRANSFER_CATEGORIES))
         rows = c.execute(
-            f"""SELECT id, profile_id, description, raw_description, expense_type
+            f"""SELECT id, profile_id, description, raw_description, category, expense_type
                 FROM transactions
                 WHERE category IN ({transfer_ph})""",
             list(TRANSFER_CATEGORIES),
@@ -1839,8 +3483,9 @@ def reclassify_transfers(conn=None) -> int:
                 "profile_id": row[1],
                 "description": row[2] or "",
                 "raw_description": row[3] or "",
+                "category": row[4] or "",
             }
-            current_type = row[4]
+            current_type = row[5]
             new_type = _classify_transfer_type(tx_dict, account_lookup)
 
             if new_type != current_type:
@@ -1860,6 +3505,364 @@ def reclassify_transfers(conn=None) -> int:
         return _reclassify(c)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# COPILOT DETERMINISTIC TOOLS
+# These functions back the curated chip prompts on the Copilot page.
+# They return structured data; the route handler formats the answer string.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def explain_category_assignment(
+    merchant_query: str,
+    profile: str | None = None,
+    conn=None,
+) -> dict:
+    """
+    Return why transactions matching merchant_query received their current category.
+    Inspects actual transaction rows and category_rules — no LLM.
+    """
+    def _query(c):
+        pattern = _extract_merchant_pattern(merchant_query)
+        if not pattern:
+            pattern = merchant_query.upper().strip()
+
+        scoped = profile if profile and profile != "household" else None
+
+        # Distribution of category + source for matching transactions
+        base_where = "(description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)"
+        dist_params: list = [pattern, pattern]
+        dist_sql = f"""
+            SELECT category, categorization_source, COUNT(*) as cnt
+            FROM transactions_visible
+            WHERE {base_where}
+        """
+        if scoped:
+            dist_sql += " AND profile_id = ?"
+            dist_params.append(scoped)
+        dist_sql += " GROUP BY category, categorization_source ORDER BY cnt DESC LIMIT 10"
+
+        dist_rows = dicts_from_rows(c.execute(dist_sql, dist_params).fetchall())
+
+        total = sum(r["cnt"] for r in dist_rows)
+        dominant = dist_rows[0] if dist_rows else None
+
+        # Matching active rule (highest priority first)
+        rule_row = c.execute(
+            """SELECT id, pattern, match_type, category, priority, source
+               FROM category_rules
+               WHERE pattern = ? AND is_active = 1
+               ORDER BY priority DESC LIMIT 1""",
+            (pattern,),
+        ).fetchone()
+
+        # Recent sample transactions
+        sample_params: list = [pattern, pattern]
+        sample_sql = f"""
+            SELECT date, description, amount, category, categorization_source, merchant_name
+            FROM transactions_visible
+            WHERE {base_where}
+        """
+        if scoped:
+            sample_sql += " AND profile_id = ?"
+            sample_params.append(scoped)
+        sample_sql += " ORDER BY date DESC LIMIT 5"
+        samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
+
+        return {
+            "merchant_query": merchant_query,
+            "normalized_pattern": pattern,
+            "dominant_category": dominant["category"] if dominant else None,
+            "dominant_source": dominant["categorization_source"] if dominant else None,
+            "distribution": dist_rows,
+            "rule": dict(rule_row) if rule_row else None,
+            "transaction_count": total,
+            "samples": samples,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def find_merchants_missing_category(
+    profile: str | None = None,
+    conn=None,
+) -> list[dict]:
+    """
+    Return description_normalized patterns that have transactions categorized
+    as 'Other', 'Uncategorized', or empty, ordered by transaction count.
+    """
+    def _query(c):
+        scoped = profile if profile and profile != "household" else None
+        params: list = []
+        sql = """
+            SELECT
+                COALESCE(description_normalized, UPPER(description)) as pattern,
+                COUNT(*) as transaction_count,
+                MAX(description) as example_description,
+                MAX(date) as most_recent_date
+            FROM transactions_visible
+            WHERE (
+                category IS NULL
+                OR UPPER(TRIM(category)) IN ('OTHER', 'UNCATEGORIZED', '')
+            )
+        """
+        if scoped:
+            sql += " AND profile_id = ?"
+            params.append(scoped)
+        sql += """
+            GROUP BY COALESCE(description_normalized, UPPER(description))
+            HAVING pattern IS NOT NULL AND TRIM(pattern) != ''
+            ORDER BY transaction_count DESC
+            LIMIT 50
+        """
+        return dicts_from_rows(c.execute(sql, params).fetchall())
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def bulk_recategorize_preview(
+    merchant_query: str,
+    new_category: str,
+    profile: str | None = None,
+    conn=None,
+) -> dict:
+    """
+    Preview how many transactions would be moved to new_category for the
+    given merchant pattern. Returns count, sample rows, and the deterministic
+    UPDATE SQL (caller stores it as pending SQL for the confirm step).
+    """
+    def _query(c):
+        pattern = _extract_merchant_pattern(merchant_query)
+        if not pattern:
+            pattern = merchant_query.upper().strip()
+
+        scoped = profile if profile and profile != "household" else None
+
+        count_params: list = [pattern, pattern]
+        count_sql = """
+            SELECT COUNT(*) FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+              AND category != ?
+        """
+        count_params.append(new_category)
+        if scoped:
+            count_sql += " AND profile_id = ?"
+            count_params.append(scoped)
+
+        count = c.execute(count_sql, count_params).fetchone()[0]
+
+        sample_params: list = [pattern, pattern, new_category]
+        sample_sql = """
+            SELECT date, description, amount, category as current_category,
+                   categorization_source, merchant_name
+            FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+              AND category != ?
+        """
+        if scoped:
+            sample_sql += " AND profile_id = ?"
+            sample_params.append(scoped)
+        sample_sql += " ORDER BY date DESC LIMIT 20"
+        samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
+
+        # Build the deterministic SQL (no LLM) that will be stored as pending
+        if scoped:
+            update_sql = (
+                f"UPDATE transactions SET category = '{new_category}', "
+                f"categorization_source = 'user-rule', updated_at = datetime('now') "
+                f"WHERE (description_normalized = '{pattern}' "
+                f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
+                f"AND profile_id = '{scoped}' "
+                f"AND COALESCE(is_excluded, 0) = 0"
+            )
+        else:
+            update_sql = (
+                f"UPDATE transactions SET category = '{new_category}', "
+                f"categorization_source = 'user-rule', updated_at = datetime('now') "
+                f"WHERE (description_normalized = '{pattern}' "
+                f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
+                f"AND COALESCE(is_excluded, 0) = 0"
+            )
+
+        return {
+            "pattern": pattern,
+            "new_category": new_category,
+            "count": count,
+            "samples": samples,
+            "update_sql": update_sql,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def preview_rule_creation(
+    raw_pattern: str,
+    category: str,
+    profile: str | None = None,
+    conn=None,
+) -> dict:
+    """
+    Preview the impact of creating a new 'contains' user rule for raw_pattern → category.
+    Reuses the same match logic as get_category_rule_impact (description_normalized equality).
+    Returns count, sample rows, whether a rule already exists, and the deterministic INSERT SQL.
+    """
+    def _query(c):
+        pattern = _extract_merchant_pattern(raw_pattern)
+        if not pattern:
+            pattern = raw_pattern.upper().strip()
+
+        scoped = profile if profile and profile != "household" else None
+
+        # Check for existing rule
+        existing_rule = c.execute(
+            """SELECT id, pattern, category, priority, source, is_active
+               FROM category_rules
+               WHERE pattern = ? AND is_active = 1
+               ORDER BY priority DESC LIMIT 1""",
+            (pattern,),
+        ).fetchone()
+
+        # Count + sample matching transactions (same logic as get_category_rule_impact contains branch)
+        count_params: list = [pattern, pattern]
+        count_sql = """
+            SELECT COUNT(*) FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+        """
+        if scoped:
+            count_sql += " AND profile_id = ?"
+            count_params.append(scoped)
+
+        count = c.execute(count_sql, count_params).fetchone()[0]
+
+        sample_params: list = [pattern, pattern]
+        sample_sql = """
+            SELECT date, description, amount, category as current_category,
+                   categorization_source, merchant_name
+            FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+        """
+        if scoped:
+            sample_sql += " AND profile_id = ?"
+            sample_params.append(scoped)
+        sample_sql += " ORDER BY date DESC LIMIT 20"
+        samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
+
+        # Deterministic INSERT SQL
+        insert_sql = (
+            f"INSERT OR REPLACE INTO category_rules "
+            f"(pattern, match_type, category, priority, source) "
+            f"VALUES ('{pattern}', 'contains', '{category}', 1000, 'user')"
+        )
+
+        return {
+            "pattern": pattern,
+            "category": category,
+            "count": count,
+            "samples": samples,
+            "existing_rule": dict(existing_rule) if existing_rule else None,
+            "insert_sql": insert_sql,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def rename_merchant_variants(
+    old_pattern: str,
+    new_name: str,
+    profile: str | None = None,
+    conn=None,
+) -> dict:
+    """
+    Preview assigning a merchant display alias across all matching transactions.
+    The alias is stored per profile + canonical merchant key, leaving raw bank
+    descriptions and enriched merchant_name values untouched.
+    """
+    def _query(c):
+        pattern = _extract_merchant_pattern(old_pattern)
+        if not pattern:
+            pattern = old_pattern.upper().strip()
+
+        scoped = profile if profile and profile != "household" else None
+
+        count_params: list = [pattern, pattern]
+        count_sql = """
+            SELECT COUNT(*) FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+        """
+        if scoped:
+            count_sql += " AND profile_id = ?"
+            count_params.append(scoped)
+
+        count = c.execute(count_sql, count_params).fetchone()[0]
+
+        sample_params: list = [pattern, pattern]
+        sample_sql = """
+            SELECT date, description, merchant_name, amount, category
+            FROM transactions_visible
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+        """
+        if scoped:
+            sample_sql += " AND profile_id = ?"
+            sample_params.append(scoped)
+        sample_sql += " ORDER BY date DESC LIMIT 20"
+        samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
+
+        escaped_new = new_name.replace("'", "''")
+        escaped_pattern = pattern.replace("'", "''")
+        if scoped:
+            target_profiles = [scoped]
+        else:
+            target_profiles = [
+                row[0]
+                for row in c.execute(
+                    """
+                    SELECT DISTINCT profile_id
+                    FROM transactions_visible
+                    WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+                    ORDER BY profile_id ASC
+                    """,
+                    (pattern, pattern),
+                ).fetchall()
+                if (row[0] or "").strip()
+            ]
+
+        statements: list[str] = []
+        for target_profile in target_profiles:
+            escaped_profile = target_profile.replace("'", "''")
+            statements.append(
+                "INSERT INTO merchant_aliases "
+                "(merchant_key, profile_id, display_name, source, updated_at) "
+                f"VALUES ('{escaped_pattern}', '{escaped_profile}', '{escaped_new}', 'user', datetime('now')) "
+                "ON CONFLICT(merchant_key, profile_id) DO UPDATE SET "
+                f"display_name = '{escaped_new}', source = 'user', updated_at = datetime('now')"
+            )
+        update_sql = "; ".join(statements)
+
+        return {
+            "pattern": pattern,
+            "new_name": new_name,
+            "count": count,
+            "samples": samples,
+            "update_sql": update_sql,
+            "profiles": target_profiles,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
 def backfill_transfer_types() -> int:
     """
     Startup-safe backfill: only runs if there are transfer-category
@@ -1877,4 +3880,4 @@ def backfill_transfer_types() -> int:
             return 0
 
         logger.info("Backfilling expense_type for %d transfer transactions...", null_count)
-        return reclassify_transfers(conn=c)    
+        return reclassify_transfers(conn=c)

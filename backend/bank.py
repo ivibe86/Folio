@@ -138,12 +138,19 @@ _TELLER_PAGE_SIZE = 100
 def validate_teller_config():
     """
     Validate Teller certificate configuration at startup.
-    Raises RuntimeError if certificates are missing or unreadable.
+    If Teller tokens exist but certificates are missing/unreadable, raises RuntimeError.
+    If no Teller tokens exist, logs a warning and returns (allows SimpleFIN-only usage).
     Called from main.py startup event.
     """
     cert_path, key_path = CERT
 
     if not cert_path or not key_path:
+        if not TOKENS:
+            logger.warning(
+                "Teller not configured (no certificates and no tokens). "
+                "Teller sync will be unavailable. SimpleFIN or other providers can still be used."
+            )
+            return
         raise RuntimeError(
             "Teller certificate configuration incomplete. "
             "Set TELLER_CERT_PATH and TELLER_KEY_PATH environment variables."
@@ -153,10 +160,16 @@ def validate_teller_config():
     key_file = Path(key_path)
 
     if not cert_file.exists():
+        if not TOKENS:
+            logger.warning("Teller certificate file not found: %s — Teller sync will be unavailable.", cert_path)
+            return
         raise RuntimeError(
             f"Teller certificate file not found: {cert_path}"
         )
     if not key_file.exists():
+        if not TOKENS:
+            logger.warning("Teller key file not found: %s — Teller sync will be unavailable.", key_path)
+            return
         raise RuntimeError(
             f"Teller key file not found: {key_path}"
         )

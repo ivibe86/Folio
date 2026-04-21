@@ -16,6 +16,7 @@ from collections import OrderedDict
 from dotenv import load_dotenv
 from log_config import get_logger
 from privacy import mask_amount
+import llm_client
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ TROVE_BULK_URL = "https://trove.headline.com/api/v1/transactions/bulk"
 
 # Feature toggle: set ENABLE_TROVE=false in .env to skip all Trove enrichment
 ENABLE_TROVE = os.getenv("ENABLE_TROVE", "true").lower() in ("true", "1", "yes")
+ENABLE_LOCAL_ENRICHMENT = os.getenv("ENABLE_LOCAL_ENRICHMENT", "true").lower() in ("true", "1", "yes")
 
 # Transactions with these categories (from rule-high) don't need enrichment
 SKIP_ENRICHMENT_CATEGORIES = {
@@ -48,6 +50,51 @@ TROVE_CACHE_MAX_SIZE = int(os.getenv("TROVE_CACHE_MAX_SIZE", "1000"))
 BULK_THRESHOLD = int(os.getenv("TROVE_BULK_THRESHOLD", "0"))
 
 BULK_BATCH_SIZE = int(os.getenv("TROVE_BULK_BATCH_SIZE", "100"))
+LOCAL_ENRICHMENT_BATCH_SIZE = int(os.getenv("LOCAL_ENRICHMENT_BATCH_SIZE", "20"))
+LOCAL_ENRICHMENT_MIN_CONFIDENCE = os.getenv("LOCAL_ENRICHMENT_MIN_CONFIDENCE", "medium").strip().lower()
+
+MERCHANT_INDUSTRIES = [
+    "Grocery",
+    "Restaurant",
+    "Coffee Shop",
+    "Fast Food",
+    "Bar / Nightlife",
+    "Gas Station",
+    "Pharmacy",
+    "Healthcare Provider",
+    "Insurance",
+    "Utilities",
+    "Internet / Telecom",
+    "Streaming / Media",
+    "Software / SaaS",
+    "E-commerce Marketplace",
+    "Electronics Retail",
+    "General Retail",
+    "Home Improvement",
+    "Transportation / Rideshare",
+    "Travel / Airline",
+    "Travel / Hotel",
+    "Subscription Service",
+    "Bank / Financial Service",
+    "Government / Tax",
+    "Education",
+    "Fitness",
+    "Personal Care",
+    "Unknown",
+]
+
+_CONFIDENCE_RANK = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+}
+
+PLATFORM_NORMALIZE_MERCHANTS = {
+    "doordash",
+    "uber eats",
+    "instacart",
+    "grubhub",
+}
 # ══════════════════════════════════════════════════════════════════════════════
 # PERSISTENT ENRICHMENT CACHE (DB-backed)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -157,7 +204,7 @@ def _persist_enrichment(pattern_key: str, enrichment: dict, source: str = "trove
     except Exception as e:
         logger.debug("Persistent cache write failed: %s", e)
 
-def _upsert_merchant_from_tx(tx: dict, enrichment: dict):
+def _upsert_merchant_from_tx(tx: dict, enrichment: dict, source: str = "trove"):
     """
     After enriching a transaction, upsert the merchants table.
     Requires profile_id on the transaction dict (set during categorize_transactions).
@@ -181,7 +228,7 @@ def _upsert_merchant_from_tx(tx: dict, enrichment: dict):
                 merchant_key=merchant_key,
                 enrichment=enrichment,
                 profile_id=profile_id,
-                source="trove",
+                source=source,
             )
     except Exception as e:
         logger.debug("Merchant upsert from enrichment failed: %s", e)        
@@ -259,6 +306,537 @@ def _get_anonymous_user_id() -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
+def _resolve_enrichment_mode() -> str:
+    """
+    Pick the active enrichment backend.
+
+    Preference order:
+    1. Trove, if enabled and configured
+    2. Local LLM enrichment, if enabled and an LLM is available
+    3. None
+    """
+    if ENABLE_TROVE and TROVE_API_KEY:
+        return "trove"
+    if ENABLE_LOCAL_ENRICHMENT and llm_client.LLM_PROVIDER == "ollama" and llm_client.is_available():
+        return "local_llm"
+    return "none"
+
+
+def _normalize_industry(raw_industry: str) -> str:
+    """Map model output to the closest allowed merchant industry label."""
+    if not raw_industry:
+        return "Unknown"
+
+    raw = raw_industry.strip().lower()
+    allowed = {item.lower(): item for item in MERCHANT_INDUSTRIES}
+    if raw in allowed:
+        return allowed[raw]
+
+    synonyms = {
+        "groceries": "Grocery",
+        "supermarket": "Grocery",
+        "cafe": "Coffee Shop",
+        "cafes": "Coffee Shop",
+        "coffee": "Coffee Shop",
+        "dining": "Restaurant",
+        "food": "Restaurant",
+        "rideshare": "Transportation / Rideshare",
+        "ride share": "Transportation / Rideshare",
+        "airline": "Travel / Airline",
+        "hotel": "Travel / Hotel",
+        "telecom": "Internet / Telecom",
+        "internet": "Internet / Telecom",
+        "streaming": "Streaming / Media",
+        "media": "Streaming / Media",
+        "software": "Software / SaaS",
+        "saas": "Software / SaaS",
+        "electronics": "Electronics Retail",
+        "retail": "General Retail",
+        "shopping": "General Retail",
+        "subscription": "Subscription Service",
+        "subscriptions": "Subscription Service",
+        "bank": "Bank / Financial Service",
+        "financial": "Bank / Financial Service",
+        "government": "Government / Tax",
+        "tax": "Government / Tax",
+        "medical": "Healthcare Provider",
+        "healthcare": "Healthcare Provider",
+        "fitness center": "Fitness",
+    }
+    if raw in synonyms:
+        return synonyms[raw]
+
+    for token, canonical in synonyms.items():
+        if token in raw:
+            return canonical
+
+    return "Unknown"
+
+
+def _confidence_meets_threshold(confidence: str) -> bool:
+    minimum = LOCAL_ENRICHMENT_MIN_CONFIDENCE
+    if minimum not in _CONFIDENCE_RANK:
+        minimum = "medium"
+    return _CONFIDENCE_RANK.get(confidence, 0) >= _CONFIDENCE_RANK[minimum]
+
+
+def _match_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(token) >= 4
+    }
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _merchant_alias_tokens(merchant_name: str) -> set[str]:
+    """
+    Generic aliases for common abbreviations and descriptor variants that
+    often appear in bank strings. Keep this intentionally small and universal.
+    """
+    normalized = merchant_name.strip().lower()
+    aliases: set[str] = set()
+
+    alias_map = {
+        "amazon": {"amzn"},
+        "amazon marketplace": {"amzn", "mktpl", "mktplace"},
+        "amazon grocery": {"amzn", "groce"},
+        "southwest": {"southwes"},
+        "lufthansa": {"lufthan"},
+        "air new zealand": {"air", "nz"},
+        "mcdonald's": {"mcdonalds"},
+        "total wine": {"totalwine"},
+        "openai": {"chatgpt"},
+        "costco": {"whse"},
+    }
+
+    for canonical, extras in alias_map.items():
+        if normalized == canonical:
+            aliases.update(extras)
+
+    return aliases
+
+
+def _merchant_name_supported(description: str, merchant_name: str) -> bool:
+    """
+    Generic guardrail against cross-row hallucinations: the chosen merchant
+    should have some lexical support in the transaction text.
+    """
+    if not description or not merchant_name:
+        return False
+
+    desc_tokens = _match_tokens(description)
+    name_tokens = _match_tokens(merchant_name)
+    if not desc_tokens or not name_tokens:
+        return False
+
+    if merchant_name.strip().lower() in PLATFORM_NORMALIZE_MERCHANTS:
+        return True
+
+    if not desc_tokens.isdisjoint(name_tokens):
+        return True
+
+    alias_tokens = _merchant_alias_tokens(merchant_name)
+    if alias_tokens and not desc_tokens.isdisjoint(alias_tokens):
+        return True
+
+    desc_compact = _compact_text(description)
+    name_compact = _compact_text(merchant_name)
+    if len(name_compact) >= 5 and name_compact in desc_compact:
+        return True
+
+    return False
+
+
+def _validate_local_enrichment_with_reason(tx: dict, enrichment: dict | None) -> tuple[dict | None, str]:
+    """Reject weak local enrichments and return the rejection reason."""
+    if enrichment is None:
+        return None, "parse_failed"
+
+    merchant_name = (enrichment.get("name") or "").strip()
+    merchant_industry = (enrichment.get("industry") or "").strip()
+    description = (tx.get("raw_description") or tx.get("description") or "").strip()
+
+    if not merchant_name and not merchant_industry:
+        return None, "abstained"
+
+    if not merchant_name:
+        return None, "empty_merchant_name"
+
+    if not merchant_industry or merchant_industry == "Unknown":
+        return None, "unknown_industry"
+
+    if not _merchant_name_supported(description, merchant_name):
+        return None, "unsupported_merchant_name"
+
+    return enrichment, "accepted"
+
+
+def _validate_local_enrichment(tx: dict, enrichment: dict | None) -> dict | None:
+    validated, _ = _validate_local_enrichment_with_reason(tx, enrichment)
+    return validated
+
+
+def _persist_local_result(tx: dict, enrichment: dict):
+    """Store a validated local enrichment in caches/tables for reuse."""
+    desc = tx.get("raw_description") or tx.get("description", "")
+    _enrichment_cache.put(desc, enrichment)
+    _persist_enrichment(_dedup_key(tx), enrichment, source="seed")
+    _upsert_merchant_from_tx(tx, enrichment, source="llm")
+
+
+def _local_rule_enrichment(tx: dict) -> dict | None:
+    """
+    Fast path for obvious merchants where the raw description is already a
+    stronger signal than the LLM. This both improves speed and avoids batch
+    cross-contamination on repeated high-volume merchants.
+    """
+    desc = (tx.get("raw_description") or tx.get("description") or "").strip()
+    if not desc:
+        return None
+
+    upper = desc.upper()
+
+    rules: list[tuple[re.Pattern[str], str, str]] = [
+        (
+            re.compile(
+                r"\bAMZ\*PRIME SHIPPING CLUB\b|\bAMAZON PRIME\b|\bAMZ[N ]?\*?PRIME\b",
+                re.I,
+            ),
+            "Amazon Prime",
+            "Subscription Service",
+        ),
+        (
+            re.compile(
+                r"\bAMAZON DIGITAL SVCS\b|\bAMZN DIGITAL\b|\bVIDEO ON DEMAND\b",
+                re.I,
+            ),
+            "Amazon Digital Services",
+            "Streaming / Media",
+        ),
+        (
+            re.compile(r"\bAMAZONFRESH\b|\bAMZN\.COM/FRESH\b|\bAMAZON FRESH\b", re.I),
+            "Amazon Fresh",
+            "Grocery",
+        ),
+        (
+            re.compile(
+                r"\bAMAZON\.COM\*PMT SVC\b|\bAMZN PMTS\b|\bAMZN\.COM/PMTS\b|\bAMAZON PAY\b",
+                re.I,
+            ),
+            "Amazon Pay",
+            "E-commerce Marketplace",
+        ),
+        (
+            re.compile(r"\bAMAZON RETAIL LLC\b|\bAMAZON BOOKSTORE\b", re.I),
+            "Amazon Retail",
+            "General Retail",
+        ),
+        (re.compile(r"\bAMAZON\s+GROCE\b|\bAMZN\s+GROCE\b", re.I), "Amazon Grocery", "Grocery"),
+        (re.compile(r"\bAMAZON\s+MKTPL\b|\bAMAZON\s+MKTPLACE\b|\bAMZN\s+MKTP\b", re.I), "Amazon Marketplace", "E-commerce Marketplace"),
+        (re.compile(r"\bAMAZON\.COM\b|\bAMZN\.COM/BILL\b|\bPOS AMAZON\b|\bAMAZON MERCHANDISE\b", re.I), "Amazon", "E-commerce Marketplace"),
+        (re.compile(r"\bNETFLIX\b", re.I), "Netflix", "Streaming / Media"),
+        (re.compile(r"\bSPOTIFY\b", re.I), "Spotify", "Streaming / Media"),
+        (re.compile(r"\bHULU\b", re.I), "Hulu", "Streaming / Media"),
+        (re.compile(r"\bAPPLE\.COM/BILL\b|\bAPPLE ITUNES\b", re.I), "Apple", "Subscription Service"),
+        (re.compile(r"\bGOOGLE \*GOOGLE ONE\b|\bGOOGLE ONE\b", re.I), "Google", "Software / SaaS"),
+        (re.compile(r"\bEXPRESSVPN\b", re.I), "ExpressVPN", "Software / SaaS"),
+        (re.compile(r"\bGEICO\b", re.I), "GEICO", "Insurance"),
+        (re.compile(r"\bDOORDASH\b|\bDD \*DOORDASH\b", re.I), "DoorDash", "Restaurant"),
+        (re.compile(r"\bUBER\* TRIP\b|\bUBER TRIP\b", re.I), "Uber", "Transportation / Rideshare"),
+        (re.compile(r"\bUBER EATS\b", re.I), "Uber Eats", "Restaurant"),
+        (re.compile(r"\bLYFT\b", re.I), "Lyft", "Transportation / Rideshare"),
+        (re.compile(r"\bWHOLEFDS\b|\bWHOLE FOODS\b", re.I), "Whole Foods", "Grocery"),
+        (re.compile(r"\bCOSTCO\b", re.I), "Costco", "Grocery"),
+        (re.compile(r"\bSAFEWAY\b", re.I), "Safeway", "Grocery"),
+        (re.compile(r"\bTRADER JOE'?S\b", re.I), "Trader Joe's", "Grocery"),
+        (re.compile(r"\bCVS\b", re.I), "CVS Pharmacy", "Pharmacy"),
+        (re.compile(r"\bWALGREENS\b", re.I), "Walgreens", "Pharmacy"),
+        (re.compile(r"\bCHEVRON\b", re.I), "Chevron", "Gas Station"),
+        (re.compile(r"\bSHELL\b", re.I), "Shell", "Gas Station"),
+        (re.compile(r"\bEXXON\b|\bEXXONMOBIL\b", re.I), "Exxon", "Gas Station"),
+        (re.compile(r"\bCIRCLE K\b", re.I), "Circle K", "Gas Station"),
+        (re.compile(r"\bVALERO\b", re.I), "Valero", "Gas Station"),
+        (re.compile(r"\bSTARBUCKS\b", re.I), "Starbucks", "Coffee Shop"),
+    ]
+
+    for pattern, name, industry in rules:
+        if pattern.search(upper):
+            return {
+                "name": name,
+                "industry": industry,
+                "confidence": "high",
+                "_cache_source": "local_rule",
+            }
+
+    return None
+
+
+def _local_enrichment_line(tx: dict, index: int) -> str:
+    """Build one transaction line for local merchant-normalization prompts."""
+    description = (tx.get("raw_description") or tx.get("description") or "").strip()
+    clean_description = (tx.get("description") or "").strip()
+    tx_type = (tx.get("type") or "").strip()
+    account_type = (tx.get("account_type") or "").strip()
+    teller_category = (tx.get("teller_category") or "").strip()
+    return (
+        f'{index}. Raw description: "{description}" | '
+        f'Clean description: "{clean_description}" | '
+        f'Type: "{tx_type}" | '
+        f'Account type: "{account_type}" | '
+        f'Teller category: "{teller_category}"'
+    )
+
+
+LOCAL_ENRICHMENT_EXAMPLES = """
+Examples:
+- Raw description: "ALASKA AIR 0272123773667 SEATTLE"
+  Output: {"merchant_name":"Alaska Air","merchant_industry":"Travel / Airline","confidence":"high"}
+- Raw description: "LUFTHAN 2204081455193 NEW YORK"
+  Output: {"merchant_name":"Lufthansa","merchant_industry":"Travel / Airline","confidence":"high"}
+- Raw description: "DOORDASH*11/16-2 ORDER 855-431-0459"
+  Output: {"merchant_name":"DoorDash","merchant_industry":"Restaurant","confidence":"high"}
+- Raw description: "DD *DOORDASH SAFEWAY 855-973-1040"
+  Output: {"merchant_name":"DoorDash","merchant_industry":"Restaurant","confidence":"medium"}
+- Raw description: "AMAZON DIGITAL SVCS AMZN.COM/BILL"
+  Output: {"merchant_name":"Amazon Digital Services","merchant_industry":"Streaming / Media","confidence":"high"}
+- Raw description: "AMZN Mktp US *A1B2C3D4E"
+  Output: {"merchant_name":"Amazon Marketplace","merchant_industry":"E-commerce Marketplace","confidence":"high"}
+- Raw description: "AMAZONFRESH AMZN.COM/FRESH"
+  Output: {"merchant_name":"Amazon Fresh","merchant_industry":"Grocery","confidence":"high"}
+- Raw description: "CHATGPT SUBSCRIPTION HTTPSOPENAI.C"
+  Output: {"merchant_name":"OpenAI","merchant_industry":"Software / SaaS","confidence":"high"}
+- Raw description: "PAYPAL *TRANSFER JOHN D"
+  Output: {"merchant_name":"","merchant_industry":"","confidence":"low"}
+""".strip()
+
+LOCAL_ENRICHMENT_PLATFORM_POLICY = """
+Platform policy:
+- Normalize to the platform name for delivery/marketplace platforms when the
+  underlying seller may be missing or inconsistent: DoorDash, Uber Eats,
+  Instacart, Grubhub, Amazon Marketplace, Amazon Pay.
+- For processor-style wrappers like Square, Toast, Stripe, Clover, and PayPal,
+  prefer the underlying merchant only when it is clearly supported by the row's
+  text; otherwise keep the processor name or abstain.
+""".strip()
+
+
+def _build_local_enrichment_prompt(tx: dict) -> str:
+    """
+    Ask the local LLM to normalize merchant identity without inventing
+    domains or location data.
+    """
+    return f"""You normalize merchant purchase descriptions for a personal finance app.
+
+Return ONLY valid JSON with this exact schema:
+{{"merchant_name":"...", "merchant_industry":"...", "confidence":"high|medium|low"}}
+
+Rules:
+- Use ONLY this merchant_industry list:
+  {", ".join(MERCHANT_INDUSTRIES)}
+- Do not generate website domains, cities, states, or countries
+- Normalize the merchant_name to a clean human-readable merchant label
+- If the transaction is too ambiguous or not clearly a merchant purchase, return merchant_name="" and merchant_industry=""
+- If the merchant appears to be a payment processor wrapper (like PayPal, Square, Toast), prefer the underlying merchant when it is clearly present; otherwise keep the processor name
+- If confidence would be low, leave both merchant_name and merchant_industry empty
+- Never infer a merchant that is not directly supported by this transaction's text
+- Do not let one transaction influence another; each row must be judged independently
+- Only use Amazon/Amazon Marketplace when the row itself contains Amazon/AMZN text
+- Do not include explanations or extra keys
+
+{LOCAL_ENRICHMENT_PLATFORM_POLICY}
+
+{LOCAL_ENRICHMENT_EXAMPLES}
+
+Transaction:
+- {_local_enrichment_line(tx, 0)}
+"""
+
+
+def _build_local_enrichment_batch_prompt(batch: list[dict]) -> str:
+    """Ask the local LLM to normalize multiple merchant descriptions in one call."""
+    lines = "\n".join(_local_enrichment_line(tx, i) for i, tx in enumerate(batch))
+
+    return f"""You normalize merchant purchase descriptions for a personal finance app.
+
+Return ONLY valid JSON as an array with this exact schema:
+[{{"index":0,"merchant_name":"...","merchant_industry":"...","confidence":"high|medium|low"}}]
+
+Rules:
+- Use ONLY this merchant_industry list:
+  {", ".join(MERCHANT_INDUSTRIES)}
+- Do not generate website domains, cities, states, or countries
+- Normalize the merchant_name to a clean human-readable merchant label
+- If the transaction is too ambiguous or not clearly a merchant purchase, return merchant_name="" and merchant_industry=""
+- If the merchant appears to be a payment processor wrapper (like PayPal, Square, Toast), prefer the underlying merchant when it is clearly present; otherwise keep the processor name
+- If confidence would be low, leave both merchant_name and merchant_industry empty
+- Never infer a merchant that is not directly supported by that transaction's text
+- Do not let one transaction influence another; each row must be judged independently
+- Only use Amazon/Amazon Marketplace when that row itself contains Amazon/AMZN text
+- Do not include explanations or extra keys
+- Return one object for every index, even if the merchant is unknown
+
+{LOCAL_ENRICHMENT_PLATFORM_POLICY}
+
+{LOCAL_ENRICHMENT_EXAMPLES}
+
+Transactions:
+{lines}
+"""
+
+
+def _extract_json_blob(raw: str) -> str | None:
+    """Best-effort extraction of a JSON object or array from model output."""
+    if not raw:
+        return None
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+
+    if text.startswith("{") or text.startswith("["):
+        return text
+
+    array_match = re.search(r"\[.*\]", text, re.DOTALL)
+    if array_match:
+        return array_match.group(0)
+
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if obj_match:
+        return obj_match.group(0)
+
+    return None
+
+
+def _parse_local_enrichment_response(raw: str) -> dict | None:
+    """Parse and validate the local LLM JSON response."""
+    text = _extract_json_blob(raw)
+    if text is None:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    merchant_name = (parsed.get("merchant_name") or "").strip()
+    merchant_industry = _normalize_industry(parsed.get("merchant_industry") or "")
+    confidence = (parsed.get("confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+
+    if not merchant_name and merchant_industry == "Unknown":
+        return None
+
+    if merchant_industry == "Unknown":
+        return None
+
+    if not _confidence_meets_threshold(confidence):
+        return None
+
+    return {
+        "name": merchant_name,
+        "industry": merchant_industry,
+        "confidence": confidence,
+    }
+
+
+def _parse_local_enrichment_batch_response(raw: str) -> dict[int, dict]:
+    """Parse a batch merchant-normalization response keyed by batch index."""
+    text = _extract_json_blob(raw)
+    if text is None:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+
+    if not isinstance(parsed, list):
+        return {}
+
+    results: dict[int, dict] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index"))
+        except Exception:
+            continue
+
+        normalized = _parse_local_enrichment_response(json.dumps(item))
+        if normalized is not None:
+            results[idx] = normalized
+
+    return results
+
+
+def _detect_batch_contamination(batch_txs: list[dict], parsed_results: dict[int, dict]) -> str | None:
+    """
+    Detect suspicious merchant-name overconcentration in a batch response.
+    This catches a common small-model failure mode where one merchant identity
+    bleeds across many rows in the same prompt.
+    """
+    if len(parsed_results) < 4:
+        return None
+
+    counts: dict[str, list[int]] = {}
+    for batch_pos, parsed in parsed_results.items():
+        merchant_name = (parsed.get("name") or "").strip()
+        if merchant_name:
+            counts.setdefault(merchant_name, []).append(batch_pos)
+
+    if not counts:
+        return None
+
+    threshold = max(4, int(len(batch_txs) * 0.4 + 0.999))
+    for merchant_name, positions in counts.items():
+        if len(positions) < threshold:
+            continue
+        supported = 0
+        for pos in positions:
+            tx = batch_txs[pos]
+            description = (tx.get("raw_description") or tx.get("description") or "").strip()
+            if _merchant_name_supported(description, merchant_name):
+                supported += 1
+        if supported / len(positions) < 0.6:
+            return merchant_name
+
+    return None
+
+
+def _enrich_single_local(tx: dict) -> dict:
+    """Enrich a single transaction via the configured LLM provider."""
+    try:
+        raw = llm_client.complete(
+            _build_local_enrichment_prompt(tx),
+            max_tokens=220,
+            purpose="categorize",
+        )
+        parsed = _parse_local_enrichment_response(raw)
+        parsed, reason = _validate_local_enrichment_with_reason(tx, parsed)
+        if parsed is None:
+            tx["enriched"] = False
+            tx["enrichment_reject_reason"] = reason
+            return tx
+        parsed["_cache_source"] = "local_llm"
+        tx["enrichment_confidence"] = parsed.get("confidence", "")
+        tx["enrichment_reject_reason"] = ""
+        return _apply_enrichment(tx, parsed)
+    except Exception as e:
+        logger.error("Local LLM enrichment failed: %s", e)
+        tx["enriched"] = False
+        tx["enrichment_reject_reason"] = "single_call_error"
+        return tx
+
+
 def _should_enrich(tx: dict) -> bool:
     """
     Determine if a transaction should be sent to Trove.
@@ -272,7 +850,7 @@ def _should_enrich(tx: dict) -> bool:
     if cat in SKIP_ENRICHMENT_CATEGORIES:
         return False
 
-    desc = tx.get("description", "").strip()
+    desc = (tx.get("raw_description") or tx.get("description") or "").strip()
     if not desc or len(desc) < 3:
         return False
 
@@ -288,6 +866,12 @@ def _should_enrich(tx: dict) -> bool:
         "payroll", "direct dep", "des:payroll",
         "tax refund", "tax rfd", "casttaxrfd",
         "mobile deposit", "atm deposit",
+        "atm withdrawal", "withdrwl", "withdrawal",
+        "venmo", "zelle", "cash app", "cashapp",
+        "apple cash", "paypal transfer", "paypal *transfer",
+        "bkofamerica atm", "bank of america atm",
+        "pai iso", "payment sent", "transfer to",
+        "payment received", "ach credit", "ach debit",
     ]
     if any(p in desc_lower for p in skip_patterns):
         return False
@@ -308,23 +892,25 @@ def _apply_enrichment(tx: dict, enrichment: dict) -> dict:
     industry = (enrichment.get("industry") or "").strip()
     categories = enrichment.get("categories") or []
 
-    # Consider it a match if we got at least a domain
-    if domain:
+    merchant_name = name if name else (_domain_to_name(domain) if domain else "")
+    merchant_city = enrichment.get("hq_city") or enrichment.get("city") or ""
+    merchant_state = enrichment.get("hq_state_code") or enrichment.get("state_code") or ""
+    merchant_country = enrichment.get("hq_country_code") or enrichment.get("country_code") or ""
+
+    # For local LLM enrichment we may intentionally omit literal website domains.
+    # Count only actionable merchant enrichment as success; unknown industry
+    # should not inflate enrichment stats.
+    has_actionable_industry = bool(industry and industry != "Unknown")
+    if domain or (merchant_name and has_actionable_industry):
         tx["merchant_domain"] = domain
-        tx["merchant_name"] = name if name else _domain_to_name(domain)
+        tx["merchant_name"] = merchant_name
         tx["merchant_industry"] = industry
         tx["merchant_categories"] = categories
-        tx["merchant_city"] = (
-            enrichment.get("hq_city") or enrichment.get("city") or ""
-        )
-        tx["merchant_state"] = (
-            enrichment.get("hq_state_code") or enrichment.get("state_code") or ""
-        )
-        tx["merchant_country"] = (
-            enrichment.get("hq_country_code") or enrichment.get("country_code") or ""
-        )
+        tx["merchant_city"] = merchant_city
+        tx["merchant_state"] = merchant_state
+        tx["merchant_country"] = merchant_country
         tx["enriched"] = True
-        tx["enrichment_tier"] = "full" if name else "partial"
+        tx["enrichment_tier"] = "full" if (domain and merchant_name) else "normalized"
     else:
         tx["enriched"] = False
 
@@ -489,19 +1075,36 @@ def _fanout_enrichment(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def enrich_single(tx: dict) -> dict:
-    """Enrich a single transaction via Trove's single-enrich endpoint."""
-    if not ENABLE_TROVE:
-        return tx
-    if not TROVE_API_KEY:
+    """Enrich a single transaction via the active enrichment backend."""
+    mode = _resolve_enrichment_mode()
+    if mode == "none":
         return tx
     if not _should_enrich(tx):
         return tx
+
+    rule_hit = _local_rule_enrichment(tx) if mode == "local_llm" else None
+    if rule_hit is not None:
+        enriched = _apply_enrichment(tx, rule_hit)
+        if enriched.get("enriched"):
+            _persist_local_result(tx, rule_hit)
+        return enriched
 
     # Check cache first
     desc = tx.get("raw_description") or tx.get("description", "")
     cached = _enrichment_cache.get(desc)
     if cached is not None:
         return _apply_enrichment(tx, cached)
+
+    if mode == "local_llm":
+        enriched = _enrich_single_local(tx)
+        if enriched.get("enriched"):
+            cache_payload = {
+                "name": enriched.get("merchant_name", ""),
+                "industry": enriched.get("merchant_industry", ""),
+                "_cache_source": "local_llm",
+            }
+            _persist_local_result(tx, cache_payload)
+        return enriched
 
     anonymous_id = _get_anonymous_user_id()
 
@@ -552,12 +1155,9 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
 
     This is the main entry point called by categorizer.py.
     """
-    if not ENABLE_TROVE:
-        logger.info("    Trove enrichment disabled (ENABLE_TROVE=false) — skipping")
-        return transactions
-
-    if not TROVE_API_KEY:
-        logger.warning("No TROVE_API_KEY set — skipping enrichment")
+    mode = _resolve_enrichment_mode()
+    if mode == "none":
+        logger.info("    No enrichment backend available — skipping")
         return transactions
 
     # ── Step 1: Identify enrichable transactions ──
@@ -571,10 +1171,8 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
         return transactions
 
     total_enrichable = len(enrichable_indices)
-    logger.info(
-        "    Enriching %d of %d transactions via Trove...",
-        total_enrichable, len(transactions),
-    )
+    backend_label = "Trove" if mode == "trove" else "local LLM"
+    logger.info("    Enriching %d of %d transactions via %s...", total_enrichable, len(transactions), backend_label)
 
     # ── Step 2: Resolve cache hits ──
     cache_hit_count = 0
@@ -582,6 +1180,16 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
     remaining_indices = []
     for idx in enrichable_indices:
         tx = transactions[idx]
+        if mode == "local_llm":
+            rule_hit = _local_rule_enrichment(tx)
+            if rule_hit is not None:
+                transactions[idx] = _apply_enrichment(tx, rule_hit)
+                _persist_local_result(tx, rule_hit)
+                cache_hit_count += 1
+                if transactions[idx].get("enriched"):
+                    cache_hit_enriched += 1
+                continue
+
         desc = tx.get("raw_description") or tx.get("description", "")
         cached = _enrichment_cache.get(desc)
         if cached is not None:
@@ -605,6 +1213,7 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
             from_api=0,
             from_fanout=0,
             from_persistent_cache=0,
+            api_label="local LLM" if mode == "local_llm" else "Trove API",
         )
         return transactions
 
@@ -648,6 +1257,7 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
             from_api=0,
             from_fanout=0,
             from_persistent_cache=persistent_hit_enriched,
+            api_label="local LLM" if mode == "local_llm" else "Trove API",
         )
         return transactions
 
@@ -663,8 +1273,16 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
             len(representative_indices), len(remaining_indices), duplicate_count,
         )
 
-    # ── Step 4: Choose strategy based on deduplicated volume ──
-    if len(representative_indices) <= BULK_THRESHOLD:
+    # ── Step 4: Choose strategy based on active backend ──
+    if mode == "local_llm":
+        logger.info(
+            "    Using local LLM enrichment for %d unique descriptions",
+            len(representative_indices),
+        )
+        api_enriched, fanout_enriched = _enrich_via_local_llm(
+            transactions, representative_indices, fanout_map,
+        )
+    elif len(representative_indices) <= BULK_THRESHOLD:
         est_seconds = len(representative_indices) * SINGLE_REQUEST_DELAY
         logger.info(
             "    Using single-enrich for %d unique descriptions (~%.0fs estimated)",
@@ -689,6 +1307,7 @@ def enrich_transactions(transactions: list[dict]) -> list[dict]:
         from_api=api_enriched,
         from_fanout=fanout_enriched,
         from_persistent_cache=persistent_hit_enriched,
+        api_label="local LLM" if mode == "local_llm" else "Trove API",
     )
 
     return transactions
@@ -700,6 +1319,7 @@ def _log_enrichment_summary(
     from_api: int,
     from_fanout: int,
     from_persistent_cache: int = 0,
+    api_label: str = "Trove API",
 ):
     """Log a clear breakdown of how transactions were enriched."""
     total_enriched = from_cache + from_api + from_fanout + from_persistent_cache
@@ -711,7 +1331,7 @@ def _log_enrichment_summary(
     if from_persistent_cache > 0:
         parts.append(f"{from_persistent_cache} from DB cache")
     if from_api > 0:
-        parts.append(f"{from_api} from Trove API")
+        parts.append(f"{from_api} from {api_label}")
     if from_fanout > 0:
         parts.append(f"{from_fanout} via dedup fanout")
 
@@ -728,9 +1348,95 @@ def _log_enrichment_summary(
     )
     if not_enriched > 0:
         logger.info(
-            "    Not enriched: %d transactions (no Trove match)",
+            "    Not enriched: %d transactions (no enrichment match)",
             not_enriched,
         )
+
+
+def _enrich_via_local_llm(
+    transactions: list[dict],
+    indices: list[int],
+    fanout_map: dict[str, list[int]],
+) -> tuple[int, int]:
+    """
+    Enrich transactions via the configured LLM provider, then fan out to
+    duplicate descriptions using the same dedup flow as Trove.
+    """
+    api_enriched = 0
+    fanout_enriched = 0
+    reject_counts: dict[str, int] = {}
+
+    for start in range(0, len(indices), LOCAL_ENRICHMENT_BATCH_SIZE):
+        batch_indices = indices[start:start + LOCAL_ENRICHMENT_BATCH_SIZE]
+        batch_txs = [transactions[idx] for idx in batch_indices]
+        max_tokens = min(4096, max(512, 140 * len(batch_indices)))
+
+        try:
+            raw = llm_client.complete(
+                _build_local_enrichment_batch_prompt(batch_txs),
+                max_tokens=max_tokens,
+                purpose="categorize",
+            )
+            parsed_results = _parse_local_enrichment_batch_response(raw)
+            contaminated_merchant = _detect_batch_contamination(batch_txs, parsed_results)
+            if contaminated_merchant:
+                logger.warning(
+                    "    Local LLM batch %d-%d looked contaminated by merchant '%s' — retrying rows individually",
+                    start,
+                    start + len(batch_indices) - 1,
+                    contaminated_merchant,
+                )
+                parsed_results = {}
+        except Exception as e:
+            logger.error(
+                "Local LLM batch enrich failed for batch %d-%d: %s",
+                start,
+                start + len(batch_indices) - 1,
+                e,
+            )
+            parsed_results = {}
+
+        for batch_pos, idx in enumerate(batch_indices):
+            tx = transactions[idx]
+            parsed, reason = _validate_local_enrichment_with_reason(tx, parsed_results.get(batch_pos))
+            if parsed is None:
+                reject_counts[reason] = reject_counts.get(reason, 0) + 1
+                if len(batch_indices) > 1:
+                    fallback_tx = _enrich_single_local(tx)
+                    transactions[idx] = fallback_tx
+                    if fallback_tx.get("enriched"):
+                        payload = {
+                            "name": fallback_tx.get("merchant_name", ""),
+                            "industry": fallback_tx.get("merchant_industry", ""),
+                            "confidence": fallback_tx.get("enrichment_confidence", "medium"),
+                            "_cache_source": "local_llm",
+                        }
+                        _persist_local_result(fallback_tx, payload)
+                        api_enriched += 1
+                    else:
+                        tx["enriched"] = False
+                else:
+                    tx["enriched"] = False
+            else:
+                parsed["_cache_source"] = "local_llm"
+                tx["enrichment_confidence"] = parsed.get("confidence", "")
+                _persist_local_result(tx, parsed)
+                transactions[idx] = _apply_enrichment(tx, parsed)
+                if transactions[idx].get("enriched"):
+                    api_enriched += 1
+
+            fanout_enriched += _fanout_enrichment(transactions, fanout_map, idx)
+
+    logger.info(
+        "    Local LLM enrich: %d/%d normalized, %d fanned out to duplicates",
+        api_enriched, len(indices), fanout_enriched,
+    )
+    if reject_counts:
+        logger.info(
+            "    Local LLM rejects: %s",
+            ", ".join(f"{reason}={count}" for reason, count in sorted(reject_counts.items())),
+        )
+    return api_enriched, fanout_enriched
 
 
 def _enrich_via_single(

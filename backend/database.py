@@ -6,9 +6,14 @@ SQLite database initialization, connection management, and schema definition.
 import sqlite3
 import os
 import threading
+import re
 from pathlib import Path
 from contextlib import contextmanager
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - fallback for lightweight scripts
+    def load_dotenv():
+        return False
 from log_config import get_logger
 
 load_dotenv()
@@ -27,6 +32,26 @@ else:
 _local = threading.local()
 
 
+def _sqlite_regexp(pattern, value) -> int:
+    """SQLite REGEXP implementation used by Copilot-generated queries."""
+    if pattern is None or value is None:
+        return 0
+    try:
+        return 1 if re.search(str(pattern), str(value), re.IGNORECASE) else 0
+    except re.error:
+        logger.debug("Invalid REGEXP pattern passed to SQLite helper: %s", pattern)
+        return 0
+
+
+def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.create_function("REGEXP", 2, _sqlite_regexp)
+    return conn
+
+
 def get_connection() -> sqlite3.Connection:
     """
     Get a thread-local SQLite connection.
@@ -39,11 +64,9 @@ def get_connection() -> sqlite3.Connection:
     """
     if not hasattr(_local, "connection") or _local.connection is None:
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        _local.connection = conn
+        _local.connection = _configure_connection(conn)
+    else:
+        _configure_connection(_local.connection)
     return _local.connection
 
 
@@ -71,10 +94,7 @@ def get_db_session():
             return rows
     """
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn = _configure_connection(conn)
     try:
         yield conn
         conn.commit()
@@ -118,8 +138,14 @@ def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA_SQL)
         _migrate_expense_type(conn)
+        _migrate_category_parent(conn)
         _migrate_merchants_table(conn)
+        _migrate_merchant_aliases(conn)
         _migrate_transaction_expense_type(conn)
+        _migrate_description_normalized(conn)
+        _migrate_category_pinned(conn)
+        _migrate_accounts_provider(conn)
+        _migrate_accounts_last_four(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)          
@@ -152,6 +178,13 @@ def _migrate_expense_type(conn: sqlite3.Connection):
             (name,),
         )
 
+
+def _migrate_category_parent(conn: sqlite3.Connection):
+    """Ensure categories.parent_category exists for older databases."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(categories)").fetchall()]
+    if "parent_category" not in cols:
+        conn.execute("ALTER TABLE categories ADD COLUMN parent_category TEXT DEFAULT NULL")
+
 def _migrate_merchants_table(conn: sqlite3.Connection):
     """
     Ensure merchants table has all required columns for Enhancement 4
@@ -169,6 +202,45 @@ def _migrate_merchants_table(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_at TEXT")
     if "cancelled_by_user" not in cols:
         conn.execute("ALTER TABLE merchants ADD COLUMN cancelled_by_user INTEGER DEFAULT 0")
+
+
+def _migrate_merchant_aliases(conn: sqlite3.Connection):
+    """Create merchant_aliases and backfill legacy user display overrides."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS merchant_aliases (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            merchant_key TEXT NOT NULL,
+            profile_id  TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'user',
+            created_at  TEXT DEFAULT (datetime('now')),
+            updated_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(merchant_key, profile_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_merchant_aliases_profile
+            ON merchant_aliases(profile_id);
+        CREATE INDEX IF NOT EXISTS idx_merchant_aliases_key
+            ON merchant_aliases(merchant_key);
+        """
+    )
+
+    conn.execute(
+        """
+        INSERT INTO merchant_aliases (merchant_key, profile_id, display_name, source)
+        SELECT UPPER(TRIM(merchant_key)),
+               profile_id,
+               TRIM(clean_name),
+               'user'
+          FROM merchants
+         WHERE COALESCE(profile_id, '') != ''
+           AND NULLIF(TRIM(clean_name), '') IS NOT NULL
+           AND UPPER(TRIM(clean_name)) != UPPER(TRIM(COALESCE(merchant_key, '')))
+           AND COALESCE(source, '') = 'user'
+        ON CONFLICT(merchant_key, profile_id) DO NOTHING
+        """
+    )
         
 def _migrate_transaction_expense_type(conn: sqlite3.Connection):
     """
@@ -179,7 +251,106 @@ def _migrate_transaction_expense_type(conn: sqlite3.Connection):
     cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
     if "expense_type" not in cols:
         conn.execute("ALTER TABLE transactions ADD COLUMN expense_type TEXT DEFAULT NULL")
-        logger.info("Added expense_type column to transactions table.")        
+        logger.info("Added expense_type column to transactions table.")
+
+
+def _migrate_description_normalized(conn: sqlite3.Connection):
+    """
+    Add description_normalized column and index to transactions, then backfill
+    existing rows. Idempotent — safe to call on every startup.
+
+    description_normalized stores the output of _extract_merchant_pattern(description),
+    i.e. the canonical merchant token with store numbers, dates, and location noise
+    stripped. Matching user-defined rules against this canonical form instead of the
+    raw description fixes the mid-string noise bug (e.g. '#187' between merchant
+    name tokens preventing substring containment).
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "description_normalized" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN description_normalized TEXT DEFAULT NULL")
+        logger.info("Added description_normalized column to transactions table.")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_description_normalized "
+        "ON transactions(description_normalized)"
+    )
+
+    # Backfill existing rows in batches of 500 to avoid a single huge transaction.
+    # _extract_merchant_pattern is Python-only, so we fetch-loop-update.
+    _BATCH = 500
+    total = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, description FROM transactions WHERE description_normalized IS NULL LIMIT ?",
+            (_BATCH,),
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            normalized = _extract_merchant_pattern(row[1])  # row[0]=id, row[1]=description
+            conn.execute(
+                "UPDATE transactions SET description_normalized = ? WHERE id = ?",
+                (normalized, row[0]),
+            )
+        conn.commit()
+        total += len(rows)
+        if len(rows) < _BATCH:
+            break
+    if total:
+        logger.info("Backfilled description_normalized for %d transactions.", total)
+
+
+def _migrate_category_pinned(conn: sqlite3.Connection):
+    """
+    Add category_pinned column to transactions.
+    When 1, the transaction was manually recategorized as a one-off — future rule
+    applications and syncs must not overwrite its category.
+    Idempotent — safe to call on every startup.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "category_pinned" not in cols:
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN category_pinned INTEGER NOT NULL DEFAULT 0"
+        )
+        logger.info("Added category_pinned column to transactions table.")
+
+
+def _migrate_accounts_last_four(conn: sqlite3.Connection):
+    """
+    Add last_four column to accounts for cleaner cross-provider matching.
+    Backfills by extracting the last 4-digit sequence from account_name or id.
+    Idempotent.
+    """
+    import re as _re
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "last_four" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN last_four TEXT DEFAULT NULL")
+        rows = conn.execute("SELECT id, account_name FROM accounts").fetchall()
+        for acct_id, acct_name in rows:
+            for source in (acct_name or "", acct_id or ""):
+                seqs = _re.findall(r'\d{4,}', source)
+                if seqs:
+                    conn.execute(
+                        "UPDATE accounts SET last_four = ? WHERE id = ?",
+                        (seqs[-1][-4:], acct_id),
+                    )
+                    break
+        logger.info("Added last_four column to accounts table.")
+
+
+def _migrate_accounts_provider(conn: sqlite3.Connection):
+    """
+    Add provider column to accounts table so we can distinguish
+    Teller vs SimpleFIN (or future) account sources. Idempotent.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "provider" not in cols:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'teller'"
+        )
+        logger.info("Added provider column to accounts table.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -244,6 +415,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     confidence              TEXT DEFAULT '',
     is_excluded             INTEGER DEFAULT 0,
     expense_type            TEXT DEFAULT NULL,
+    description_normalized  TEXT DEFAULT NULL,
     created_at              TEXT DEFAULT (datetime('now')),
     updated_at              TEXT
 );
@@ -253,7 +425,10 @@ CREATE INDEX IF NOT EXISTS idx_transactions_profile ON transactions(profile_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category);
 CREATE INDEX IF NOT EXISTS idx_transactions_profile_date ON transactions(profile_id, date);
 CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
-
+CREATE VIEW IF NOT EXISTS transactions_visible AS
+SELECT *
+FROM transactions
+WHERE COALESCE(is_excluded, 0) = 0;
 CREATE TABLE IF NOT EXISTS category_rules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern     TEXT NOT NULL,
@@ -270,6 +445,17 @@ CREATE TABLE IF NOT EXISTS category_rules (
 
 CREATE INDEX IF NOT EXISTS idx_rules_source_priority ON category_rules(source, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_rules_active ON category_rules(is_active);
+
+CREATE TABLE IF NOT EXISTS category_budgets (
+    profile_id      TEXT NOT NULL,
+    category        TEXT NOT NULL REFERENCES categories(name),
+    amount          REAL NOT NULL,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (profile_id, category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_category_budgets_profile ON category_budgets(profile_id);
 
 CREATE TABLE IF NOT EXISTS net_worth_history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -418,6 +604,19 @@ CREATE TABLE IF NOT EXISTS dismissed_recurring (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dismissed_recurring_profile ON dismissed_recurring(profile_id);
+
+CREATE TABLE IF NOT EXISTS simplefin_connections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile             TEXT NOT NULL,
+    display_name        TEXT NOT NULL DEFAULT '',
+    access_url_encrypted TEXT NOT NULL,
+    is_active           INTEGER NOT NULL DEFAULT 1,
+    last_synced_at      TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sf_connections_profile ON simplefin_connections(profile);
+CREATE INDEX IF NOT EXISTS idx_sf_connections_active  ON simplefin_connections(is_active);
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -738,7 +937,7 @@ def upsert_merchant_from_enrichment(
 
     clean_name = (enrichment.get("name") or enrichment.get("merchant_name") or "").strip()
     domain = (enrichment.get("domain") or enrichment.get("merchant_domain") or "").strip()
-    category = (enrichment.get("category") or enrichment.get("industry") or enrichment.get("merchant_industry") or "").strip()
+    category = (enrichment.get("category") or "").strip()
     industry = (enrichment.get("industry") or enrichment.get("merchant_industry") or "").strip()
     logo_url = (enrichment.get("logo_url") or "").strip()
 

@@ -1,0 +1,26 @@
+{
+  "light": {
+    "label": "Light",
+    "description": "Fastest startup, lowest disk/RAM footprint",
+    "categorize_model": "gemma4:e2b",
+    "copilot_model": "gemma4:e2b",
+    "disk_gb": 8,
+    "recommended_min_ram_gb": 8
+  },
+  "balanced": {
+    "label": "Balanced",
+    "description": "Best default for enrichment + categorization on laptops",
+    "categorize_model": "gemma4:e4b",
+    "copilot_model": "gemma4:e4b",
+    "disk_gb": 10,
+    "recommended_min_ram_gb": 16
+  },
+  "quality": {
+    "label": "Best Quality",
+    "description": "Higher quality copilot answers, more disk/RAM required",
+    "categorize_model": "gemma4:e4b",
+    "copilot_model": "gemma4:26b",
+    "disk_gb": 28,
+    "recommended_min_ram_gb": 32
+  }
+}

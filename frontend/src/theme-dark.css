@@ -5,11 +5,11 @@
 
 .dark {
     /* —— Dark Foundation —— */
-    --body-bg:      #141618;
-    --bg-base:      #141618;
-    --bg-level-1:   #1A1C20;
-    --bg-level-2:   #202328;
-    --bg-level-3:   #272A30;
+    --body-bg:      #24252A;
+    --bg-base:      #24252A;
+    --bg-level-1:   #2A2C32;
+    --bg-level-2:   #31343B;
+    --bg-level-3:   #383B43;
 
     /* —— Disable light-mode mesh canvas —— */
     --mesh-canvas:  none;
@@ -27,38 +27,38 @@
     --frost-inner-glow:    none;
     --frost-edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05),
                             inset 0 -1px 0 rgba(0, 0, 0, 0.10);
-    --bg-card:      #202328;
-    --bg-recessed:  #1A1C20;
+    --bg-card:      #2B2D33;
+    --bg-recessed:  #26282E;
     --bg-hero:      #18191D;
-    --border-subtle: rgba(82, 90, 100, 0.20);
+    --border-subtle: rgba(116, 128, 148, 0.20);
 
     /* —— Accent —— */
     --accent:        #5a9fd4;
     --accent-hover:  #6db3e8;
-    --accent-soft:   rgba(90, 159, 212, 0.12);
-    --accent-glow:   rgba(90, 159, 212, 0.06);
-    --accent-border: rgba(90, 159, 212, 0.20);
+    --accent-soft:   rgba(90, 159, 212, 0.16);
+    --accent-glow:   rgba(90, 159, 212, 0.08);
+    --accent-border: rgba(90, 159, 212, 0.24);
 
     /* —— Surfaces —— */
-    --surface:      rgba(26, 34, 48, 0.85);
-    --surface-alt:  rgba(30, 40, 55, 0.85);
-    --surface-100:  rgba(32, 35, 40, 0.65);
-    --surface-200:  rgba(42, 46, 52, 0.50);
-    --surface-300:  rgba(52, 56, 62, 0.45);
-    --surface-elevated: rgba(34, 37, 42, 0.80);
+    --surface:      rgba(42, 44, 52, 0.86);
+    --surface-alt:  rgba(46, 48, 56, 0.86);
+    --surface-100:  rgba(47, 50, 58, 0.72);
+    --surface-200:  rgba(58, 61, 70, 0.54);
+    --surface-300:  rgba(66, 70, 80, 0.48);
+    --surface-elevated: rgba(48, 50, 58, 0.82);
 
     /* —— Glass tokens —— */
     --glass-blur:       20px;
     --glass-blur-heavy: 30px;
-    --glass-bg:         rgba(26, 28, 32, 0.70);
-    --glass-bg-strong:  rgba(26, 28, 32, 0.85);
-    --glass-bg-subtle:  rgba(26, 28, 32, 0.50);
-    --glass-border:     rgba(90, 159, 212, 0.10);
-    --glass-shine:      linear-gradient(135deg, rgba(90,159,212,0.06) 0%, rgba(90,159,212,0.02) 50%, rgba(90,159,212,0.03) 100%);
+    --glass-bg:         rgba(42, 44, 52, 0.72);
+    --glass-bg-strong:  rgba(42, 44, 52, 0.88);
+    --glass-bg-subtle:  rgba(42, 44, 52, 0.52);
+    --glass-border:     rgba(138, 153, 176, 0.14);
+    --glass-shine:      linear-gradient(135deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.012) 46%, rgba(126, 211, 255, 0.028) 100%);
 
     /* —— Borders —— */
-    --card-border:       rgba(82, 100, 124, 0.40);
-    --card-border-hover: rgba(90, 159, 212, 0.32);
+    --card-border:       rgba(114, 124, 140, 0.30);
+    --card-border-hover: rgba(90, 159, 212, 0.36);
 
     /* —— Text —— */
     --text-primary:   #F1F5F9;
@@ -94,25 +94,25 @@
     --flow-to-balance:      #22D3EE;
     --flow-to-balance-glow: rgba(34, 211, 238, 0.16);
 
-    --ribbon-bg: rgba(26, 28, 32, 0.75);
+    --ribbon-bg: rgba(36, 36, 39, 0.75);
     --flow-tax:             #fbbf24;
     --flow-rose:            #f87171;
 
     /* —— Card System —— */
-    --card-bg:      rgba(26, 28, 32, 0.70);
-    --card-bg-flat: rgba(24, 26, 30, 0.85);
+    --card-bg:      rgba(34, 36, 42, 0.82);
+    --card-bg-flat: rgba(34, 36, 42, 0.93);
     --card-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.20),
-        0 4px 12px rgba(0, 0, 0, 0.16),
-        0 12px 32px rgba(0, 0, 0, 0.12);
+        0 1px 2px rgba(0, 0, 0, 0.22),
+        0 10px 26px rgba(0, 0, 0, 0.18),
+        0 24px 52px rgba(0, 0, 0, 0.12);
     --card-shadow-hover:
-        0 2px 6px rgba(0, 0, 0, 0.24),
-        0 8px 24px rgba(0, 0, 0, 0.20),
-        0 24px 56px rgba(0, 0, 0, 0.16);
+        0 2px 6px rgba(0, 0, 0, 0.26),
+        0 12px 30px rgba(0, 0, 0, 0.22),
+        0 28px 64px rgba(0, 0, 0, 0.18);
 
     /* ── Sidebar ── */
-    --sidebar-bg:          rgba(16, 17, 20, 0.96);
-    --sidebar-border:      rgba(70, 90, 115, 0.18);
+    --sidebar-bg:          rgba(25, 25, 27, 0.97);
+    --sidebar-border:      rgba(75, 75, 82, 0.15);
     --sidebar-text:        #7B8DA4;
     --sidebar-text-active: #e8ecf1;
     --sidebar-hover:       rgba(90, 159, 212, 0.08);
@@ -120,15 +120,14 @@
     --sidebar-logo-shadow: 0 4px 16px rgba(90, 159, 212, 0.35);
 
 /* ── Glass Rail v2 ── */
-    --rail-bg: rgba(21, 23, 30, 0.82);
+    --rail-bg: rgba(25, 25, 27, 0.90);
     --rail-blur:                 30px;
     --rail-saturate:             1.0;
-    --rail-border:               rgba(56, 189, 248, 0.15);
+    --rail-border:               rgba(120, 120, 130, 0.10);
     --rail-shadow:
-        inset -2px 0 24px rgba(56, 189, 248, 0.07),
-        inset -1px 0 8px rgba(56, 189, 248, 0.04),
-        1px 0 0 rgba(148, 163, 184, 0.05),
-        4px 0 24px rgba(0, 0, 0, 0.25);
+        inset -1px 0 0 rgba(160, 160, 170, 0.06),
+        1px 0 0 rgba(148, 163, 184, 0.04),
+        6px 0 20px rgba(0, 0, 0, 0.18);
     --rail-link-hover:           rgba(148, 163, 184, 0.07);
     --rail-link-active-bg:       rgba(148, 163, 184, 0.10);
     --rail-link-active-shadow:
@@ -139,9 +138,9 @@
     --rail-sync-bg:              rgba(148, 163, 184, 0.07);
     --rail-sync-bg-hover:        rgba(148, 163, 184, 0.12);
 
-    /* ââ Glass Rail v2 â Separator Glow ââ */
-    --rail-separator-glow:       rgba(56, 189, 248, 0.12);
-    --rail-separator-glow-center: rgba(56, 189, 248, 0.25);
+    /* ── Glass Rail v2 — Separator Glow ── */
+    --rail-separator-glow:       rgba(90, 159, 212, 0.14);
+    --rail-separator-glow-center: rgba(90, 159, 212, 0.28);
 
     /* ── Glass Rail v2 — Copilot ── */
     --rail-copilot-bg:              rgba(139, 92, 246, 0.06);
@@ -166,12 +165,12 @@
         0 0 32px rgba(90, 159, 212, 0.04);
 
     /* —— Topbar —— */
-    --topbar-bg:     rgba(35, 45, 60, 0.78);
-    --topbar-border: rgba(82, 100, 124, 0.18);
+    --topbar-bg:     rgba(36, 38, 44, 0.92);
+    --topbar-border: rgba(114, 124, 140, 0.16);
 
     /* —— Sankey Theater —— */
-    --sankey-theater-bg:       linear-gradient(135deg, rgba(18, 20, 24, 0.93) 0%, rgba(15, 17, 20, 0.95) 50%, rgba(13, 14, 17, 0.96) 100%);
-    --sankey-theater-border:   rgba(70, 95, 128, 0.24);
+    --sankey-theater-bg:       linear-gradient(135deg, rgba(20, 22, 28, 0.94) 0%, rgba(16, 18, 23, 0.96) 52%, rgba(13, 14, 18, 0.98) 100%);
+    --sankey-theater-border:   rgba(92, 126, 168, 0.28);
     --sankey-theater-shadow:
         0 2px 8px rgba(10, 22, 38, 0.18),
         0 8px 32px rgba(10, 22, 38, 0.14),
@@ -216,8 +215,28 @@
     --surface-upcoming:  linear-gradient(135deg, rgba(251, 191, 36, 0.04) 0%, rgba(248, 113, 113, 0.02) 100%);
 
         /* ── Luminous container borders (dark mode) ── */
-    --theater-glow-border:  0 0 0 1px rgba(56, 189, 248, 0.18), 0 0 20px rgba(56, 189, 248, 0.12), 0 0 45px rgba(90, 159, 212, 0.07);
-    --nw-container-glow:    0 0 0 1px rgba(56, 189, 248, 0.14), 0 0 16px rgba(56, 189, 248, 0.10), 0 0 36px rgba(90, 159, 212, 0.05);
+    --theater-glow-border:
+        0 0 0 1px rgba(56, 189, 248, 0.09),
+        0 0 14px rgba(56, 189, 248, 0.045);
+    --nw-container-glow:
+        0 0 0 1px rgba(56, 189, 248, 0.14),
+        0 0 22px rgba(56, 189, 248, 0.08),
+        0 0 34px rgba(56, 189, 248, 0.035);
+    --dashboard-stage-bg:
+        linear-gradient(180deg, rgba(54, 56, 62, 0.18) 0%, rgba(40, 42, 48, 0.08) 55%, rgba(35, 38, 46, 0) 100%);
+    --dashboard-stage-border: rgba(136, 152, 174, 0.12);
+    --dashboard-stage-line:
+        linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(124, 146, 172, 0.10) 14%,
+            rgba(112, 186, 235, 0.22) 50%,
+            rgba(124, 146, 172, 0.10) 86%,
+            transparent 100%
+        );
+    --dashboard-stage-glow:
+        radial-gradient(ellipse at 22% 0%, rgba(148, 163, 184, 0.05), transparent 58%),
+        radial-gradient(ellipse at 80% 8%, rgba(120, 212, 255, 0.022), transparent 54%);
  
     /* ── Analytics Waterfall ── */
     --wf-bar-glow: 0 0 12px rgba(56, 189, 248, 0.08);
@@ -225,5 +244,3 @@
     color-scheme: dark;
     
 }
-
-

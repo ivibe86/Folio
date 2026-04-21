@@ -286,6 +286,41 @@
     background: rgba(139, 92, 246, 0.22);
 }
 
+/* ── Ledger container: keep transaction contrast self-contained ── */
+.tx-ledger-card {
+    background: color-mix(in srgb, var(--card-bg-flat) 96%, var(--body-bg));
+    border-color: color-mix(in srgb, var(--card-border) 90%, rgba(255, 255, 255, 0.03));
+}
+
+.dark .tx-ledger-card {
+    background: rgba(35, 35, 38, 1);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.tx-ledger-card::after {
+    display: none;
+}
+
+.tx-ledger-card::before {
+    display: none;
+}
+
+.tx-ledger-card.card::after,
+.tx-ledger-card.card::before {
+    display: none !important;
+}
+
+.dark .tx-ledger-day-header {
+    background: rgba(40, 40, 44, 1) !important;
+    border-top-color: rgba(78, 88, 108, 0.16) !important;
+}
+
+.dark .tx-ledger-row {
+    background: rgba(46, 46, 51, 1) !important;
+    border-bottom: 1px solid rgba(72, 82, 102, 0.16) !important;
+}
+
 /* ── Transaction row: 3-zone grid layout ── */
 .tx-row-grid {
     display: grid;
@@ -332,6 +367,11 @@
     border-bottom: 1px solid var(--card-border);
 }
 
+.dark .tx-column-headers {
+    background: rgba(37, 37, 41, 1);
+    border-bottom-color: rgba(72, 82, 102, 0.18);
+}
+
 .tx-column-headers span {
     font-size: 10px;
     font-weight: 600;
@@ -353,7 +393,17 @@
 
 /* ── Transaction row highlight on update ── */
 .tx-row {
+    background: color-mix(in srgb, var(--card-bg-flat) 84%, transparent);
     transition: background 0.3s ease;
+}
+
+.dark .tx-row {
+    background: rgba(63, 63, 70, 1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.015);
+}
+
+.dark .tx-row.tx-ledger-row {
+    background: rgba(46, 46, 51, 1) !important;
 }
 
 /* ── Responsive: stack on small screens ── */
@@ -499,7 +549,7 @@
     animation: txnFilterIn 0.15s var(--ease-out-expo) both;
 }
 
-:global(.dark) .txn-filter-dropdown {
+.dark .txn-filter-dropdown {
     background: var(--bg-level-2);
     border-color: rgba(82, 100, 124, 0.50);
     box-shadow:
@@ -549,11 +599,11 @@
     box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25), 0 0 8px rgba(56, 189, 248, 0.08);
 }
 
-:global(.dark) .txn-filter-option:hover {
+.dark .txn-filter-option:hover {
     background: rgba(90, 159, 212, 0.08);
 }
 
-:global(.dark) .txn-filter-option.active {
+.dark .txn-filter-option.active {
     background: rgba(90, 159, 212, 0.12);
     color: var(--accent);
 }

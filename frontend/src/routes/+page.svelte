@@ -1,6 +1,7 @@
 <script>
     import '$lib/styles/dashboard.css';
     import '$lib/styles/transactions.css';
+    import { page } from '$app/stores';
     import { onMount, onDestroy, tick } from 'svelte';
     import { api, invalidateCacheByPrefix, invalidateCache } from '$lib/api.js';
     import {
@@ -31,10 +32,14 @@
     // Teller Connect configuration (fetched from backend)
     let tellerAppId = '';
     let tellerEnvironment = 'development';
-
-    // ── Enrollment sync polling ──
-    let _syncPollTimer = null;
-    let _baselineAccountCount = 0;
+    let migrationStatus = null;
+    let migrationBannerDismissed = false;
+    let appConfig = {
+        demoMode: false,
+        bankLinkingEnabled: true,
+        manualSyncEnabled: true,
+        demoPersistence: 'persistent'
+    };
 
     // Period — synced with global store for cross-page persistence
     let selectedPeriod = 'this_month';
@@ -71,6 +76,7 @@
     let drillNewCategoryError = '';
     let drillRecentlyUpdatedTxId = null;
     let drillUpdateFeedback = '';
+    let drillPendingCategoryChange = null; // { txId, category } — awaiting one-off vs always choice
 
     // iOS-style period toggle
     const periodOptions = [
@@ -95,6 +101,8 @@
 
     // Net worth trend data (full area chart)
     let netWorthTrendData = [];
+    let netWorthMomDelta = data.netWorthMomDelta ?? null;
+    let netWorthYtdDelta = data.netWorthYtdDelta ?? null;
 
     // Hover tooltip for net worth chart
     let hoverPoint = null;
@@ -122,6 +130,15 @@
     // Sankey theater mouse-tracking glow
     let sankeyTheaterEl = null;
     let sankeyGlowOpacity = 0;
+    let debugLoadingMode = '';
+
+    $: debugLoadingMode = $page.url.searchParams.get('debugLoading') || '';
+    $: forceDashboardEnrollmentLoading = ['1', 'dashboard', 'enrollment'].includes(debugLoadingMode);
+    $: forceSankeyLoadingOnly = debugLoadingMode === 'sankey';
+    $: enrollmentLoadingActive = forceDashboardEnrollmentLoading || ($syncing.active && $syncing.context === 'enrollment');
+    $: heroLoading = isRefreshing || enrollmentLoadingActive;
+    $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive;
+    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceSankeyLoadingOnly;
 
     function handleTheaterMouseMove(e) {
         if (!sankeyTheaterEl) return;
@@ -210,49 +227,9 @@
         trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
     }
 
-    // ── Sync polling: detect when backend finishes enrollment ──
-    function startSyncPolling() {
-        // Capture current account count as baseline
-        _baselineAccountCount = (accounts || []).length;
-        // Poll every 8 seconds
-        stopSyncPolling(); // clear any existing timer
-        _syncPollTimer = setInterval(pollSyncStatus, 8000);
-        // Also poll once immediately after a short delay
-        setTimeout(pollSyncStatus, 3000);
-    }
-
-    async function pollSyncStatus() {
-        try {
-            // Use a cache-busting fetch to check current accounts
-            invalidateCacheByPrefix('dashboard-bundle');
-            invalidateCacheByPrefix('accounts');
-            const freshBundle = await api.getDashboardBundle();
-            const freshAccountCount = (freshBundle?.accounts || []).length;
-
-            // Sync is complete when new accounts appear
-            if (freshAccountCount > _baselineAccountCount) {
-                console.info('✅ Sync polling: detected new accounts (%d → %d). Refreshing dashboard.',
-                    _baselineAccountCount, freshAccountCount);
-                stopSyncPolling();
-                syncing.stop();
-                await applyFreshBundle(freshBundle);
-            }
-        } catch (e) {
-            // Non-fatal — keep polling
-            console.warn('Sync poll check failed (will retry):', e.message);
-        }
-    }
-
-    function stopSyncPolling() {
-        if (_syncPollTimer) {
-            clearInterval(_syncPollTimer);
-            _syncPollTimer = null;
-        }
-    }
-
     /**
      * Apply a fresh dashboard bundle to all reactive state.
-     * Shared by polling completion AND handleTellerEnrolled.
+     * Shared by sync-complete events and manual refresh paths.
      */
     async function applyFreshBundle(bundle) {
         isRefreshing = true;
@@ -277,6 +254,8 @@
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
+            netWorthMomDelta = bundle.netWorthMomDelta ?? null;
+            netWorthYtdDelta = bundle.netWorthYtdDelta ?? null;
             trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
             allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
             if (allMonths.length > 0 && !allMonths.includes(selectedCustomMonth)) {
@@ -317,19 +296,27 @@
     }
 
     onDestroy(() => {
-        stopSyncPolling();
         if (animationFrameId != null) {
             cancelAnimationFrame(animationFrameId);
         }
     });
 
-    // ── If sync was already in progress (e.g. navigated away and back), resume polling ──
-    $: if ($syncing.active && $syncing.context === 'enrollment' && mounted && !_syncPollTimer) {
-        startSyncPolling();
-    }
-
     onMount(async () => {
         mounted = true;
+        const handleSyncComplete = async (event) => {
+            const detail = event?.detail || {};
+            if (detail.status && detail.status !== 'completed') return;
+            if (!['enrollment', 'manual-sync', 'simplefin'].includes(detail.source)) return;
+            try {
+                invalidateCacheByPrefix('dashboard-bundle');
+                const bundle = await api.getDashboardBundle();
+                await applyFreshBundle(bundle);
+            } catch (e) {
+                console.error('❌ Failed to refresh dashboard after sync completion:', e);
+            }
+        };
+
+        window.addEventListener('folio:sync-complete', handleSyncComplete);
         try {
             // ââ Guard: if the load() data is empty (401 race condition),
             //    retry the dashboard bundle before bootstrapping âââââââââ
@@ -348,6 +335,8 @@
                     netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                         ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                         : [];
+                    netWorthMomDelta = bundle.netWorthMomDelta ?? null;
+                    netWorthYtdDelta = bundle.netWorthYtdDelta ?? null;
                     trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
                     allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
                     if (allMonths.length > 0) selectedCustomMonth = allMonths[0];
@@ -363,35 +352,46 @@
             // Only mark complete if we actually have data to show
             initialLoadComplete = !!(summary && accounts && accounts.length > 0);
 
+            try {
+                appConfig = { ...appConfig, ...(await api.getAppConfig()) };
+            } catch (_) {
+                // Non-fatal; default to live mode behavior.
+            }
+
             // Fetch Teller Connect configuration (non-blocking)
             try {
                 const cfg = await api.getTellerConfig();
+                appConfig = { ...appConfig, ...cfg };
                 tellerAppId = cfg.applicationId || '';
                 tellerEnvironment = cfg.environment || 'sandbox';
             } catch (_) {
                 // Teller Connect will just be disabled if config isn't available
             }
 
-            // If sync was already in progress (user navigated away and back), resume polling
-            if ($syncing.active && $syncing.context === 'enrollment') {
-                console.info('🔄 Resuming sync poll — enrollment was in progress.');
-                startSyncPolling();
+            // Check if a Teller → SimpleFIN migration is needed (non-blocking)
+            try {
+                const dismissed = localStorage.getItem('migration_banner_dismissed');
+                if (!dismissed) {
+                    migrationStatus = await api.getMigrationStatus();
+                }
+            } catch (_) {
+                // Non-fatal — banner just won't show
             }
         } catch (e) {
             console.error('Failed to initialize dashboard:', e);
         }
+
+        return () => {
+            window.removeEventListener('folio:sync-complete', handleSyncComplete);
+        };
     });
 
     /**
-    * Handle successful Teller Connect enrollment.
-    * 
-    * Two paths lead here:
-    * 1. The api.enrollAccount() promise resolved before timeout (fast sync).
-    *    → event.detail contains the enrollment result. Refresh immediately.
-    * 2. Polling detected completion (slow sync).
-    *    → applyFreshBundle() is called directly, not this function.
+    * Handle successful Teller Connect enrollment request acceptance.
     *
-    * This function now ONLY handles path 1 (the fast/happy path).
+    * The actual UI completion now comes from the global sync-status poller
+    * in +layout.svelte, which broadcasts folio:sync-complete only after the
+    * backend reports that sync, enrichment, and finalization are done.
     */
     async function handleTellerEnrolled(event) {
         // Guard: Teller SDK can fire onSuccess twice (postMessage + callback)
@@ -403,24 +403,9 @@
 
         const result = event.detail;
         console.info('🏦 Teller enrollment completed (fast path):', result);
-
-        // Stop polling — the enrollment resolved directly
-        stopSyncPolling();
-        syncing.stop();
-
-        // Grace period for DB commit
-        await new Promise(resolve => setTimeout(resolve, 800));
-
-        // Re-fetch and apply fresh data
-        try {
-            invalidateCacheByPrefix('dashboard-bundle');
-            const bundle = await api.getDashboardBundle();
-            await applyFreshBundle(bundle);
-        } catch (e) {
-            console.error('❌ Failed to reload after enrollment:', e);
-            isRefreshing = false;
-            _enrollmentInFlight = false;
-        }
+        // Leave syncing active until the backend's sync-status endpoint reports completion.
+        // The global layout poller will stop the spinner and broadcast folio:sync-complete.
+        setTimeout(() => { _enrollmentInFlight = false; }, 2000);
     }
 
     /**
@@ -844,6 +829,8 @@
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
+            netWorthMomDelta = bundle.netWorthMomDelta ?? null;
+            netWorthYtdDelta = bundle.netWorthYtdDelta ?? null;
             trailingSavingsInfo = computeTrailingSavingsRate(monthly, 3);
             allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
             if (allMonths.length > 0 && !allMonths.includes(selectedCustomMonth)) {
@@ -895,7 +882,7 @@
 
         const _incomeDelta = _currentMonthData && _prevMonthData ? computeDelta(_currentMonthData.income, _prevMonthData.income) : null;
         const _expenseDelta = _currentMonthData && _prevMonthData ? computeDelta(_currentMonthData.expenses, _prevMonthData.expenses) : null;
-        const _netWorthDelta = _currentMonthData && _prevMonthData ? _currentMonthData.net - _prevMonthData.net : null;
+        const _netWorthDelta = netWorthMomDelta;
 
         // ── Savings rate (trailing) ──
         const _savingsRate = trailingSavingsInfo.rate;
@@ -1225,11 +1212,12 @@
         drillCreatingNewCategory = false;
         drillNewCategoryName = '';
         drillNewCategoryError = '';
+        drillPendingCategoryChange = null;
     }
 
-    async function drillUpdateCategory(txId, newCategory) {
+    async function drillUpdateCategory(txId, newCategory, oneOff = false) {
         try {
-            await api.updateCategory(txId, newCategory);
+            const result = await api.updateCategory(txId, newCategory, oneOff);
             const tx = sankeyDrillTxns.find(t => t.original_id === txId);
             if (tx) {
                 const oldCategory = tx.category;
@@ -1247,7 +1235,12 @@
 
             // Show feedback
             drillRecentlyUpdatedTxId = txId;
-            drillUpdateFeedback = `Categorized as "${newCategory}" — future similar transactions will auto-categorize`;
+            const retro = result?.retroactive_count ?? 0;
+            drillUpdateFeedback = oneOff
+                ? `Categorized as "${newCategory}" — this transaction only`
+                : retro > 0
+                    ? `Categorized as "${newCategory}" — updated ${retro} existing similar transaction${retro !== 1 ? 's' : ''}`
+                    : `Categorized as "${newCategory}"`;
 
             // Invalidate cache since category rules may have changed
             invalidateCache();
@@ -1257,8 +1250,38 @@
                 drillAllCategories = await api.getCategories();
             } catch (_) {}
 
-            // Refresh the Sankey data in the background so flows update
-            updatePeriod();
+            // Save drill category — updatePeriod() clears selectedSankeyCategory immediately
+            const prevCategory = selectedSankeyCategory;
+
+            // Refresh the Sankey so flows reflect the new categorization
+            await updatePeriod();
+
+            // Re-open the drill-down with fresh data so retroactively updated
+            // transactions are visible immediately without re-clicking
+            if (prevCategory) {
+                selectedSankeyCategory = prevCategory;
+                const targetMonth = ['this_month', 'last_month', 'custom'].includes(selectedPeriod)
+                    ? getMonthForPeriod(selectedPeriod) : null;
+                try {
+                    let allTxns = [];
+                    if (selectedPeriod === 'ytd') {
+                        const year = new Date().getFullYear().toString();
+                        const ytdMonthKeys = monthly.filter(m => m.month.startsWith(year)).map(m => m.month);
+                        const results = await Promise.all(
+                            ytdMonthKeys.map(m => api.getTransactions({ month: m, category: prevCategory, limit: 1000 }).then(r => r.data))
+                        );
+                        allTxns = results.flat();
+                    } else if (selectedPeriod === 'all') {
+                        allTxns = (await api.getTransactions({ category: prevCategory, limit: 1000 })).data;
+                    } else {
+                        const params = { limit: 1000 };
+                        if (targetMonth) params.month = targetMonth;
+                        params.category = prevCategory;
+                        allTxns = (await api.getTransactions(params)).data;
+                    }
+                    sankeyDrillTxns = allTxns.sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
+                } catch (_) { sankeyDrillTxns = []; }
+            }
 
             // Clear feedback after delay
             setTimeout(() => {
@@ -1284,14 +1307,20 @@
 
         if (drillAllCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
             const existing = drillAllCategories.find(c => c.toLowerCase() === name.toLowerCase());
-            await drillUpdateCategory(txId, existing);
+            drillPendingCategoryChange = { txId, category: existing };
+            drillCreatingNewCategory = false;
+            drillNewCategoryName = '';
+            drillNewCategoryError = '';
             return;
         }
 
         try {
             await api.createCategory(name);
             drillAllCategories = [...drillAllCategories, name].sort();
-            await drillUpdateCategory(txId, name);
+            drillPendingCategoryChange = { txId, category: name };
+            drillCreatingNewCategory = false;
+            drillNewCategoryName = '';
+            drillNewCategoryError = '';
         } catch (e) {
             drillNewCategoryError = 'Failed to create category';
             console.error(e);
@@ -1432,23 +1461,7 @@
     })();
 
 
-    /* ── YTD net-worth delta (derived from netWorthTrendData) ── */
-    $: ytdDelta = (() => {
-        if (!Array.isArray(netWorthTrendData) || netWorthTrendData.length === 0) return null;
-        const now = new Date();
-        const startOfYear = `${now.getFullYear()}-01`;
-        let janValue = null;
-        let latestValue = null;
-        for (const pt of netWorthTrendData) {
-            const month = pt.month || pt.date || '';
-            if (janValue === null && month >= startOfYear) {
-                janValue = pt.value ?? 0;
-            }
-            latestValue = pt.value ?? 0;
-        }
-        if (janValue === null || latestValue === null) return null;
-        return latestValue - janValue;
-    })();
+    $: ytdDelta = netWorthYtdDelta;
 
     /* ── Fixed vs. Variable spending breakdown ── */
     $: fixedVsVariable = (() => {
@@ -1644,6 +1657,9 @@
     }
 
     $: greeting = getGreeting();
+    $: isHousehold = $activeProfile === 'household';
+    $: activeProfileObj = $profiles.find(p => p.id === $activeProfile);
+    $: activeProfileName = activeProfileObj?.name ?? ($activeProfile ? $activeProfile.charAt(0).toUpperCase() + $activeProfile.slice(1) : '');
 </script>
 
 <svelte:window on:click={handleDrillWindowClick} />
@@ -1678,13 +1694,50 @@
 
 <div class="profile-transition" class:profile-loading={profileSwitching}>
 
+    <!-- ═══ MIGRATION BANNER ═══ -->
+    {#if migrationStatus?.needs_migration && !migrationBannerDismissed}
+        <div class="migration-banner fade-in">
+            <div class="migration-banner-left">
+                <span class="material-symbols-outlined migration-banner-icon">swap_horiz</span>
+                <div>
+                    <p class="migration-banner-title">Teller &amp; SimpleFIN overlap detected</p>
+                    <p class="migration-banner-sub">
+                        Both providers have {migrationStatus.overlap_days} days of overlapping data (from {migrationStatus.simplefin_window_start}).
+                        Migrate to avoid double-counting and keep your full history.
+                    </p>
+                </div>
+            </div>
+            <div class="migration-banner-actions">
+                <a href="/control-center?tab=connections" class="migration-banner-btn-primary">
+                    Review &amp; Migrate
+                </a>
+                <button
+                    class="migration-banner-btn-dismiss"
+                    on:click={() => {
+                        migrationBannerDismissed = true;
+                        localStorage.setItem('migration_banner_dismissed', '1');
+                    }}
+                    aria-label="Dismiss"
+                >
+                    <span class="material-symbols-outlined text-[16px]">close</span>
+                </button>
+            </div>
+        </div>
+    {/if}
+
     <!-- ═══ HEADER ═══ -->
     <div class="flex items-start justify-between mb-8 fade-in">
         <div>
-            <p class="text-[10px] font-bold tracking-[0.2em] uppercase mb-1.5" style="color: var(--accent)">{greeting}</p>
-            <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
-                Your finances at a glance
-            </h2>
+            {#if isHousehold}
+                <p class="text-[10px] font-bold tracking-[0.2em] uppercase mb-1.5" style="color: var(--accent)">{greeting}</p>
+                <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+                    Your finances at a glance
+                </h2>
+            {:else}
+                <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+                    {greeting}, {activeProfileName}.
+                </h2>
+            {/if}
         </div>
         <div class="flex items-center gap-3">
             <button
@@ -1699,7 +1752,12 @@
                 </span>
             </button>
             <ProfileSwitcher />
-            {#if tellerAppId}
+            {#if appConfig.demoMode}
+                <div class="pill-toggle-group" style="padding: 0 10px; font-size: 11px; color: var(--text-secondary);">
+                    Demo mode · bank linking disabled · recategorization resets after redeploy
+                </div>
+            {/if}
+            {#if appConfig.bankLinkingEnabled && tellerAppId}
                 <TellerConnect
                     applicationId={tellerAppId}
                     environment={tellerEnvironment}
@@ -1715,7 +1773,7 @@
          ═══════════════════════════════════════════════════════ -->
     <section class="mb-6 fade-in-up" style="animation-delay: 60ms">
         <div class="card-hero-unified" class:period-updating={isRefreshing}>
-            {#if isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+            {#if heroLoading}
                 <div class="shimmer-overlay"></div>
             {/if}
 
@@ -1989,8 +2047,8 @@
         </div>
 
         {#if periodSummary}
-            <div class="metric-ribbon fade-in" class:period-updating={periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}>
-                {#if periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+            <div class="metric-ribbon fade-in" class:period-updating={metricLoading}>
+                {#if metricLoading}
                     <div class="shimmer-overlay"></div>
                 {/if}
                 <div class="metric-ribbon-item">
@@ -2066,6 +2124,12 @@
             <div class="flex items-center gap-2">
                 <div class="section-accent-bar"></div>
                 <p class="section-header">Money Flow</p>
+                {#if debugLoadingMode}
+                    <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
+                        style="background: rgba(59, 130, 246, 0.10); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.18);">
+                        Debug loading: {debugLoadingMode}
+                    </span>
+                {/if}
                 {#if periodSummary && periodSummary.income < periodSummary.expenses + sankeySavingsTotal + sankeyPersonalTransferTotal}
                     <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
                         style="background: rgba(251, 191, 36, 0.12); color: var(--warning); border: 1px solid rgba(251, 191, 36, 0.20);">
@@ -2083,15 +2147,188 @@
         </div>
 
         <div class="sankey-theater"
-             class:period-updating={periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+             class:sankey-loading={sankeyLoading}
              bind:this={sankeyTheaterEl}
              on:mousemove={handleTheaterMouseMove}
              on:mouseleave={handleTheaterMouseLeave}>
-            {#if periodLoading || isRefreshing || ($syncing.active && $syncing.context === 'enrollment')}
+            {#if sankeyLoading}
                 <div class="shimmer-overlay"></div>
-            {/if}             
+                <div class="sankey-loading-skeleton" aria-hidden="true">
+                    <svg class="sankey-loading-svg" viewBox="0 0 1000 340" preserveAspectRatio="none">
+                        <defs>
+                            <path id="sankeyTubePathA" d="M110 104 C 240 104, 305 122, 418 136" />
+                            <path id="sankeyTubePathB" d="M110 238 C 230 238, 302 220, 418 204" />
+                            <path id="sankeyTubePathC" d="M446 122 C 600 104, 700 84, 840 70" />
+                            <path id="sankeyTubePathD" d="M446 146 C 610 142, 706 134, 840 124" />
+                            <path id="sankeyTubePathE" d="M446 180 C 604 190, 710 202, 840 216" />
+                            <path id="sankeyTubePathF" d="M446 214 C 602 236, 704 256, 840 286" />
+
+                            <linearGradient id="sankeySkeletonSourceGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.26" />
+                                <stop offset="48%" stop-color="#38BDF8" stop-opacity="0.52" />
+                                <stop offset="100%" stop-color="#93C5FD" stop-opacity="0.46" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonReserveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#34D399" stop-opacity="0.20" />
+                                <stop offset="44%" stop-color="#60A5FA" stop-opacity="0.40" />
+                                <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.34" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonOutflowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.28" />
+                                <stop offset="50%" stop-color="#BAE6FD" stop-opacity="0.82" />
+                                <stop offset="100%" stop-color="#60A5FA" stop-opacity="0.34" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonOutflowSoftGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.18" />
+                                <stop offset="50%" stop-color="#7DD3FC" stop-opacity="0.56" />
+                                <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.24" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonPacketGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.00" />
+                                <stop offset="20%" stop-color="#E0F2FE" stop-opacity="0.45" />
+                                <stop offset="50%" stop-color="#FFFFFF" stop-opacity="0.98" />
+                                <stop offset="80%" stop-color="#BAE6FD" stop-opacity="0.45" />
+                                <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.00" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonTubeCoreGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#07111F" stop-opacity="0.94" />
+                                <stop offset="48%" stop-color="#0D1A2B" stop-opacity="0.86" />
+                                <stop offset="100%" stop-color="#111A31" stop-opacity="0.92" />
+                            </linearGradient>
+                            <linearGradient id="sankeySkeletonParticleStreamGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#34D399" stop-opacity="0.00" />
+                                <stop offset="22%" stop-color="#67E8F9" stop-opacity="0.30" />
+                                <stop offset="50%" stop-color="#E0F2FE" stop-opacity="0.72" />
+                                <stop offset="78%" stop-color="#93C5FD" stop-opacity="0.26" />
+                                <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.00" />
+                            </linearGradient>
+
+                            <mask id="sankeyTubeMaskA" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathA" stroke="white" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                            <mask id="sankeyTubeMaskB" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathB" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                            <mask id="sankeyTubeMaskC" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathC" stroke="white" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                            <mask id="sankeyTubeMaskD" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathD" stroke="white" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                            <mask id="sankeyTubeMaskE" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathE" stroke="white" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                            <mask id="sankeyTubeMaskF" maskUnits="userSpaceOnUse">
+                                <rect width="1000" height="340" fill="black" />
+                                <use href="#sankeyTubePathF" stroke="white" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                            </mask>
+                        </defs>
+
+                        <g class="sankey-skeleton-node-aura-group">
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--primary" x="56" y="62" width="62" height="116" rx="22" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--secondary" x="62" y="214" width="50" height="52" rx="18" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--hub" x="408" y="86" width="54" height="160" rx="24" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="40" width="36" height="62" rx="16" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="102" width="36" height="50" rx="16" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="188" width="36" height="56" rx="16" />
+                            <rect class="sankey-skeleton-node-aura sankey-skeleton-node-aura--leaf" x="838" y="256" width="36" height="72" rx="16" />
+                        </g>
+
+                        <g class="sankey-skeleton-flow-glow-group">
+                            <use href="#sankeyTubePathA" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--a" />
+                            <use href="#sankeyTubePathB" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--b" />
+                            <use href="#sankeyTubePathC" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--c" />
+                            <use href="#sankeyTubePathD" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--d" />
+                            <use href="#sankeyTubePathE" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--e" />
+                            <use href="#sankeyTubePathF" class="sankey-skeleton-flow-glow sankey-skeleton-flow-glow--f" />
+                        </g>
+
+                        <g class="sankey-skeleton-tube-group">
+                            <use href="#sankeyTubePathA" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--a" />
+                            <use href="#sankeyTubePathB" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--b" />
+                            <use href="#sankeyTubePathC" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--c" />
+                            <use href="#sankeyTubePathD" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--d" />
+                            <use href="#sankeyTubePathE" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--e" />
+                            <use href="#sankeyTubePathF" class="sankey-skeleton-tube-shell sankey-skeleton-tube-shell--f" />
+
+                            <use href="#sankeyTubePathA" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--a" />
+                            <use href="#sankeyTubePathB" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--b" />
+                            <use href="#sankeyTubePathC" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--c" />
+                            <use href="#sankeyTubePathD" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--d" />
+                            <use href="#sankeyTubePathE" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--e" />
+                            <use href="#sankeyTubePathF" class="sankey-skeleton-tube-core sankey-skeleton-tube-core--f" />
+                        </g>
+
+                        <g class="sankey-skeleton-particle-group">
+                            <g mask="url(#sankeyTubeMaskA)">
+                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--a" />
+                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle sankey-skeleton-particle--a sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathA" class="sankey-skeleton-particle sankey-skeleton-particle--a sankey-skeleton-particle--trail" />
+                            </g>
+                            <g mask="url(#sankeyTubeMaskB)">
+                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--b" />
+                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle sankey-skeleton-particle--b sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathB" class="sankey-skeleton-particle sankey-skeleton-particle--b sankey-skeleton-particle--trail" />
+                            </g>
+                            <g mask="url(#sankeyTubeMaskC)">
+                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--c" />
+                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle sankey-skeleton-particle--c sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathC" class="sankey-skeleton-particle sankey-skeleton-particle--c sankey-skeleton-particle--trail" />
+                            </g>
+                            <g mask="url(#sankeyTubeMaskD)">
+                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--d" />
+                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle sankey-skeleton-particle--d sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathD" class="sankey-skeleton-particle sankey-skeleton-particle--d sankey-skeleton-particle--trail" />
+                            </g>
+                            <g mask="url(#sankeyTubeMaskE)">
+                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--e" />
+                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle sankey-skeleton-particle--e sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathE" class="sankey-skeleton-particle sankey-skeleton-particle--e sankey-skeleton-particle--trail" />
+                            </g>
+                            <g mask="url(#sankeyTubeMaskF)">
+                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle-stream sankey-skeleton-particle-stream--f" />
+                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle sankey-skeleton-particle--f sankey-skeleton-particle--lead" />
+                                <use href="#sankeyTubePathF" class="sankey-skeleton-particle sankey-skeleton-particle--f sankey-skeleton-particle--trail" />
+                            </g>
+                        </g>
+
+                        <g class="sankey-skeleton-junction-group">
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--source sankey-skeleton-port--a" cx="112" cy="104" r="8" />
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--source sankey-skeleton-port--b" cx="112" cy="238" r="7" />
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--c" cx="434" cy="136" r="8" />
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--d" cx="434" cy="164" r="7" />
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--e" cx="434" cy="196" r="7" />
+                            <circle class="sankey-skeleton-port sankey-skeleton-port--hub sankey-skeleton-port--f" cx="434" cy="224" r="8" />
+                            <circle class="sankey-skeleton-hub-ring sankey-skeleton-hub-ring--a" cx="435" cy="165" r="18" />
+                            <circle class="sankey-skeleton-hub-ring sankey-skeleton-hub-ring--b" cx="435" cy="207" r="18" />
+                        </g>
+
+                        <g class="sankey-skeleton-arrival-group">
+                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--a" cx="844" cy="71" r="7" />
+                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--b" cx="844" cy="127" r="6" />
+                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--c" cx="844" cy="216" r="7" />
+                            <circle class="sankey-skeleton-arrival sankey-skeleton-arrival--d" cx="844" cy="287" r="8" />
+                        </g>
+
+                        <g class="sankey-skeleton-node-group">
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--primary" x="74" y="74" width="30" height="92" rx="12" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--secondary" x="78" y="218" width="22" height="40" rx="10" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--hub" x="420" y="98" width="30" height="136" rx="12" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="48" width="20" height="46" rx="9" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="110" width="20" height="34" rx="9" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="196" width="20" height="40" rx="9" />
+                            <rect class="sankey-skeleton-node sankey-skeleton-node--leaf" x="846" y="264" width="20" height="56" rx="9" />
+                        </g>
+                    </svg>
+                </div>
+            {/if}
             <div class="sankey-theater-glow" style="opacity: {sankeyGlowOpacity};"></div>
-            {#if periodSummary}
+            {#if !sankeyLoading && periodSummary}
                 <SankeyChart
                     income={periodSummary.income}
                     expenses={periodSummary.expenses}
@@ -2219,79 +2456,122 @@
 
                                     {#if drillCatDropdownOpenForTx === tx.original_id}
                                         <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" on:click|stopPropagation>
-                                            <div class="tx-cat-dropdown-search-wrap">
-                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
-                                                <input
-                                                    bind:value={drillCatDropdownSearch}
-                                                    placeholder="Search categories..."
-                                                    class="tx-cat-dropdown-search"
-                                                    on:keydown={(e) => {
-                                                        if (e.key === 'Escape') cancelDrillEditing();
-                                                    }}
-                                                />
-                                            </div>
-                                            <div class="tx-cat-dropdown-list">
-                                                {#each drillFilteredCategories as cat}
-                                                    <button
-                                                        class="txn-filter-option"
-                                                        class:active={cat === tx.category}
-                                                        on:click={() => {
-                                                            if (cat !== tx.category) {
-                                                                drillUpdateCategory(tx.original_id, cat);
-                                                            } else {
-                                                                cancelDrillEditing();
-                                                            }
-                                                        }}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
-                                                                {CATEGORY_ICONS[cat] || 'label'}
-                                                            </span>
-                                                            <span>{cat}</span>
+                                            {#if drillPendingCategoryChange?.txId === tx.original_id}
+                                                <!-- Step 2: One-off vs Always confirmation -->
+                                                <div style="padding: 0.75rem 0.875rem 0.875rem;">
+                                                    <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
+                                                    <p class="text-[12px] font-semibold mb-3" style="color: var(--text-primary)">
+                                                        <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[drillPendingCategoryChange.category] || 'var(--text-muted)'}; vertical-align: middle;">
+                                                            {CATEGORY_ICONS[drillPendingCategoryChange.category] || 'label'}
                                                         </span>
-                                                        {#if cat === tx.category}
-                                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
-                                                        {/if}
-                                                    </button>
-                                                {/each}
-                                                {#if drillFilteredCategories.length === 0 && drillCatDropdownSearch}
-                                                    <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
-                                                        No matching categories
-                                                    </div>
-                                                {/if}
-                                            </div>
-                                            <div class="tx-cat-dropdown-footer">
-                                                {#if drillCreatingNewCategory}
-                                                    <div class="flex items-center gap-1.5 px-2 py-1.5">
-                                                        <input
-                                                            bind:value={drillNewCategoryName}
-                                                            placeholder="New category name..."
-                                                            class="tx-cat-dropdown-new-input"
-                                                            on:keydown={(e) => {
-                                                                if (e.key === 'Enter') drillCreateAndApplyCategory(tx.original_id);
-                                                                if (e.key === 'Escape') { drillCreatingNewCategory = false; drillNewCategoryName = ''; drillNewCategoryError = ''; }
-                                                            }}
-                                                        />
+                                                        {drillPendingCategoryChange.category}
+                                                    </p>
+                                                    <div style="display: flex; flex-direction: column; gap: 0.375rem;">
                                                         <button
-                                                            class="tx-edit-btn tx-edit-btn-confirm"
-                                                            on:click={() => drillCreateAndApplyCategory(tx.original_id)}
-                                                            disabled={!drillNewCategoryName.trim()}>
-                                                            <span class="material-symbols-outlined text-[13px]">check</span>
+                                                            class="txn-filter-option"
+                                                            style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                            on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, false)}>
+                                                            <span class="txn-filter-option-label">
+                                                                <span class="material-symbols-outlined text-[15px]" style="color: var(--accent)">all_inclusive</span>
+                                                                <span style="font-weight: 600;">Always for this merchant</span>
+                                                            </span>
+                                                            <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">updates similar transactions</span>
+                                                        </button>
+                                                        <button
+                                                            class="txn-filter-option"
+                                                            style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                            on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, true)}>
+                                                            <span class="txn-filter-option-label">
+                                                                <span class="material-symbols-outlined text-[15px]" style="color: var(--text-secondary)">looks_one</span>
+                                                                <span style="font-weight: 600;">Just this transaction</span>
+                                                            </span>
+                                                            <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">no rule created</span>
                                                         </button>
                                                     </div>
-                                                    {#if drillNewCategoryError}
-                                                        <span class="text-[9px] px-3" style="color: var(--negative)">{drillNewCategoryError}</span>
-                                                    {/if}
-                                                {:else}
                                                     <button
-                                                        class="txn-filter-option tx-cat-create-btn"
-                                                        on:click={() => { drillCreatingNewCategory = true; }}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
-                                                            <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
-                                                        </span>
+                                                        class="text-[10px] mt-2.5"
+                                                        style="color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 0; display: flex; align-items: center; gap: 3px;"
+                                                        on:click={() => { drillPendingCategoryChange = null; }}>
+                                                        <span class="material-symbols-outlined text-[12px]">arrow_back</span>
+                                                        Back
                                                     </button>
-                                                {/if}
-                                            </div>
+                                                </div>
+                                            {:else}
+                                                <!-- Step 1: Category list -->
+                                                <div class="tx-cat-dropdown-search-wrap">
+                                                    <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                                    <input
+                                                        bind:value={drillCatDropdownSearch}
+                                                        placeholder="Search categories..."
+                                                        class="tx-cat-dropdown-search"
+                                                        on:keydown={(e) => {
+                                                            if (e.key === 'Escape') cancelDrillEditing();
+                                                        }}
+                                                    />
+                                                </div>
+                                                <div class="tx-cat-dropdown-list">
+                                                    {#each drillFilteredCategories as cat}
+                                                        <button
+                                                            class="txn-filter-option"
+                                                            class:active={cat === tx.category}
+                                                            on:click={() => {
+                                                                if (cat !== tx.category) {
+                                                                    drillPendingCategoryChange = { txId: tx.original_id, category: cat };
+                                                                } else {
+                                                                    cancelDrillEditing();
+                                                                }
+                                                            }}>
+                                                            <span class="txn-filter-option-label">
+                                                                <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                                    {CATEGORY_ICONS[cat] || 'label'}
+                                                                </span>
+                                                                <span>{cat}</span>
+                                                            </span>
+                                                            {#if cat === tx.category}
+                                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
+                                                            {/if}
+                                                        </button>
+                                                    {/each}
+                                                    {#if drillFilteredCategories.length === 0 && drillCatDropdownSearch}
+                                                        <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                            No matching categories
+                                                        </div>
+                                                    {/if}
+                                                </div>
+                                                <div class="tx-cat-dropdown-footer">
+                                                    {#if drillCreatingNewCategory}
+                                                        <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                            <input
+                                                                bind:value={drillNewCategoryName}
+                                                                placeholder="New category name..."
+                                                                class="tx-cat-dropdown-new-input"
+                                                                on:keydown={(e) => {
+                                                                    if (e.key === 'Enter') drillCreateAndApplyCategory(tx.original_id);
+                                                                    if (e.key === 'Escape') { drillCreatingNewCategory = false; drillNewCategoryName = ''; drillNewCategoryError = ''; }
+                                                                }}
+                                                            />
+                                                            <button
+                                                                class="tx-edit-btn tx-edit-btn-confirm"
+                                                                on:click={() => drillCreateAndApplyCategory(tx.original_id)}
+                                                                disabled={!drillNewCategoryName.trim()}>
+                                                                <span class="material-symbols-outlined text-[13px]">check</span>
+                                                            </button>
+                                                        </div>
+                                                        {#if drillNewCategoryError}
+                                                            <span class="text-[9px] px-3" style="color: var(--negative)">{drillNewCategoryError}</span>
+                                                        {/if}
+                                                    {:else}
+                                                        <button
+                                                            class="txn-filter-option tx-cat-create-btn"
+                                                            on:click={() => { drillCreatingNewCategory = true; }}>
+                                                            <span class="txn-filter-option-label">
+                                                                <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                                <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                            </span>
+                                                        </button>
+                                                    {/if}
+                                                </div>
+                                            {/if}
                                         </div>
                                     {/if}
                                 </div>

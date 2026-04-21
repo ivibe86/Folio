@@ -18,9 +18,9 @@
     --steel-900: #102a43;
     --steel-950: #0a1929;
 
-    /* ── Cool Slate Foundation (CHANGED: neutralized) ── */
-    --bg-base:      #F5F5F5;
-    --bg-card:      #FFFFFF;
+    /* ── Cool Slate Foundation (CHANGED: warm paper) ── */
+    --bg-base:      #F5F0E8;
+    --bg-card:      #FAF7F2;
     --bg-recessed:  #EFEFEF;
     --bg-hero:      #1E293B;
     --border-focus:  #B0B0B0;
@@ -40,30 +40,30 @@
     --accent-glow:   rgba(37, 99, 235, 0.08);
     --accent-border: rgba(37, 99, 235, 0.22);
 
-    /* ── Surfaces — Clean White (CHANGED: removed blue tints) ── */
-    --body-bg:      #FAFAFA;
-    --surface:      rgba(255, 255, 255, 0.92);
-    --surface-alt:  rgba(248, 248, 248, 0.90);
-    --surface-100:  rgba(245, 245, 245, 0.92);
-    --surface-200:  rgba(235, 235, 235, 0.68);
-    --surface-300:  rgba(220, 220, 220, 0.58);
-    --surface-elevated: rgba(255, 255, 255, 0.97);
+    /* ── Surfaces — Warm Paper (CHANGED: cream tones) ── */
+    --body-bg:      #F5F0E8;
+    --surface:      rgba(250, 247, 242, 0.92);
+    --surface-alt:  rgba(245, 241, 235, 0.90);
+    --surface-100:  rgba(242, 238, 231, 0.92);
+    --surface-200:  rgba(235, 230, 222, 0.68);
+    --surface-300:  rgba(225, 219, 210, 0.58);
+    --surface-elevated: rgba(250, 247, 242, 0.97);
 
-    /* ── Glass tokens (CHANGED: neutral white glass) ── */
+    /* ── Glass tokens (CHANGED: warm paper glass) ── */
     --glass-blur:       16px;
     --glass-blur-heavy: 40px;
-    --glass-bg:         rgba(255, 255, 255, 0.85);
-    --glass-bg-strong:  rgba(255, 255, 255, 0.94);
-    --glass-bg-subtle:  rgba(245, 245, 245, 0.58);
-    --glass-border:     rgba(0, 0, 0, 0.08);
+    --glass-bg:         rgba(250, 247, 242, 0.88);
+    --glass-bg-strong:  rgba(250, 247, 242, 0.95);
+    --glass-bg-subtle:  rgba(242, 238, 231, 0.58);
+    --glass-border:     rgba(0, 0, 0, 0.06);
     --glass-shine:      linear-gradient(135deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.05) 45%, rgba(255,255,255,0.18) 100%);
 
-    /* ── Frosted Glass Hero (Layer 1) — used by NON-island cards (CHANGED: neutral) ── */
-    --frost-bg:         rgba(255, 255, 255, 0.70);
-    --frost-bg-strong:  rgba(255, 255, 255, 0.80);
+    /* ── Frosted Glass Hero (Layer 1) — used by NON-island cards (CHANGED: warm paper) ── */
+    --frost-bg:         rgba(250, 247, 242, 0.74);
+    --frost-bg-strong:  rgba(250, 247, 242, 0.84);
     --frost-blur:       40px;
     --frost-saturate:   1.2;
-    --frost-border:     rgba(0, 0, 0, 0.08);
+    --frost-border:     rgba(0, 0, 0, 0.06);
     --frost-shadow:
         0 1px 3px rgba(0, 0, 0, 0.05),
         0 4px 16px rgba(0, 0, 0, 0.06),
@@ -82,10 +82,10 @@
     --frost-edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85),
                             inset 0 -1px 0 rgba(0, 0, 0, 0.02);
 
-    /* ── Borders (CHANGED: neutral) ── */
-    --card-border:       rgba(0, 0, 0, 0.08);
+    /* ── Borders (CHANGED: warm paper) ── */
+    --card-border:       rgba(0, 0, 0, 0.06);
     --card-border-hover: rgba(37, 99, 235, 0.25);
-    --border-subtle:     rgba(0, 0, 0, 0.05);
+    --border-subtle:     rgba(0, 0, 0, 0.04);
 
     /* ── Text — Cool Slate ── */
     --text-primary:   #1A1F2B;
@@ -119,10 +119,10 @@
     --flow-tax:             #FBBF24;
     --flow-rose:            #FB7185;
 
-    /* ── Card System (CHANGED: clean white) ── */
-    --card-bg:        #FFFFFF;
-    --ribbon-bg:      rgba(255, 255, 255, 0.85);
-    --card-bg-flat:   #F8F8F8;
+    /* ── Card System (CHANGED: warm paper) ── */
+    --card-bg:        #FAF7F2;
+    --ribbon-bg:      rgba(250, 247, 242, 0.88);
+    --card-bg-flat:   #F2EDE4;
     --card-shadow:
         0 1px 2px rgba(0, 0, 0, 0.04),
         0 3px 10px rgba(0, 0, 0, 0.04),
@@ -137,8 +137,8 @@
         inset 0 1px 0 rgba(255, 255, 255, 0.95);
     --card-radius: 20px;
 
-    /* ── Sidebar — Premium Frosted (CHANGED: neutral white) ── */
-    --sidebar-bg:          rgba(255, 255, 255, 0.92);
+    /* ── Sidebar — Premium Frosted (CHANGED: warm paper) ── */
+    --sidebar-bg:          rgba(237, 232, 223, 0.95);
     --sidebar-border:      rgba(0, 0, 0, 0.06);
     --sidebar-text:        #5A6478;
     --sidebar-text-active: #1A1F2B;
@@ -146,8 +146,8 @@
     --sidebar-active-bg:   rgba(37, 99, 235, 0.08);
     --sidebar-logo-shadow: 0 4px 16px rgba(37, 99, 235, 0.25);
 
-    /* ── Glass Rail (CHANGED: neutral white) ── */
-    --rail-bg:                   rgba(255, 255, 255, 0.75);
+    /* ── Glass Rail (CHANGED: warm paper) ── */
+    --rail-bg:                   rgba(237, 232, 223, 0.82);
     --rail-blur:                 40px;
     --rail-saturate:             1.2;
     --rail-border:               rgba(0, 0, 0, 0.04);
@@ -174,8 +174,8 @@
     --rail-copilot-glow-hover:     0 0 20px rgba(37, 99, 235, 0.06);
     --rail-copilot-glow-active:    0 0 16px rgba(37, 99, 235, 0.10);
 
-    /* ── Topbar (CHANGED: neutral) ── */
-    --topbar-bg:     rgba(255, 255, 255, 0.80);
+    /* ── Topbar (CHANGED: warm paper) ── */
+    --topbar-bg:     rgba(237, 232, 223, 0.88);
     --topbar-border: rgba(0, 0, 0, 0.06);
 
     /* ═══════════════════════════════════════════
@@ -254,8 +254,8 @@
     --nw-container-shadow:     none;
 
     /* ── Category Pill Card — Light surface (no dark island) ── */
-    --pill-card-bg:          rgba(255, 255, 255, 0.92);
-    --pill-card-border:      rgba(0, 0, 0, 0.08);
+    --pill-card-bg:          rgba(250, 247, 242, 0.92);
+    --pill-card-border:      rgba(0, 0, 0, 0.06);
     --pill-card-shadow:
         0 1px 2px rgba(0, 0, 0, 0.04),
         0 3px 10px rgba(0, 0, 0, 0.04),

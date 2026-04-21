@@ -1,49 +1,243 @@
 <script>
     import '$lib/styles/copilot.css';
-    import { api, invalidateCache } from '$lib/api.js';
+    import { goto } from '$app/navigation';
+    import { page } from '$app/stores';
     import { onMount, tick } from 'svelte';
+    import { api, invalidateCache } from '$lib/api.js';
     import { activeProfile } from '$lib/stores/profileStore.js';
     import { formatCurrency, formatDate } from '$lib/utils.js';
+    import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
 
-    /**
-     * Message types:
-     * - role: 'user' | 'assistant'
-     * - content: string (main text)
-     * - operation: 'read' | 'write_preview' | 'write_executed' | 'error' | null
-     * - data: array | null (table data for read results)
-     * - sql: string | null (generated SQL, hidden by default)
-     * - needs_confirmation: boolean
-     * - rows_affected: number
-     * - confirmed: boolean (after user confirms)
-     * - original_question: string (for write confirmation)
-     */
+    let loading = false;
+    let sidebarLoading = true;
+    let actionNotice = '';
+    let lastLoadedProfile = undefined;
+    let input = '';
+    let chatContainer;
+    let showSqlForMsg = {};
+    let showSqlForHistory = {};
+    let historyOpen = false;
+
+    let recurringData = null;
+    let historyItems = [];
+
     let messages = [
         {
             role: 'assistant',
-            content: "Hi! I'm your Folio Copilot. I can query your financial data and even make changes for you.\n\nTry asking questions like \"How much did I spend on groceries last month?\" or give commands like \"Recategorize all Uber transactions as Transportation\".",
+            content: "Copilot is your language layer. Ask it to rename merchants, recategorize transactions, explain categorization, or preview a change before you confirm it.",
             operation: null,
             data: null,
             sql: null,
+            preview_changes: [],
             needs_confirmation: false,
             rows_affected: 0
         }
     ];
 
-    let input = '';
-    let loading = false;
-    let chatContainer;
-
-    // SQL visibility toggle per message
-    let showSqlForMsg = {};
-
-    const quickPrompts = [
-        "What's my biggest expense category this month?",
-        "How much did I spend on dining last quarter?",
-        "Show me all transactions over $200 in March",
-        "Recategorize all Uber transactions as Transportation",
-        "Compare my grocery spending this month vs last month",
-        "Which subscription costs the most?"
+    // ── Chip action descriptors ──
+    // Each chip describes a structured operation with its required inputs.
+    // Chips with no inputs execute immediately; others show an inline mini-form.
+    const chipActions = [
+        {
+            id: 'explain_category',
+            label: 'Explain why a merchant is categorized',
+            inputs: [
+                { key: 'merchant', label: 'Merchant name', type: 'text', placeholder: 'e.g. DoorDash', required: true },
+            ],
+        },
+        {
+            id: 'find_missing_categories',
+            label: 'Find merchants missing categories',
+            inputs: [],
+        },
+        {
+            id: 'bulk_recategorize',
+            label: 'Move a merchant\'s transactions to a category',
+            inputs: [
+                { key: 'merchant', label: 'Merchant', type: 'text', placeholder: 'e.g. Netflix', required: true },
+                { key: 'category', label: 'New category', type: 'select', required: true },
+            ],
+        },
+        {
+            id: 'create_rule',
+            label: 'Create a category rule',
+            inputs: [
+                { key: 'pattern', label: 'Merchant pattern', type: 'text', placeholder: 'e.g. CLAUDE PRO', required: true },
+                { key: 'category', label: 'Category', type: 'select', required: true },
+            ],
+        },
+        {
+            id: 'rename_merchant',
+            label: 'Rename a merchant',
+            inputs: [
+                { key: 'old_name', label: 'Current name', type: 'text', placeholder: 'e.g. AMZN MKTPLACE PMTS', required: true },
+                { key: 'new_name', label: 'New display name', type: 'text', placeholder: 'e.g. Amazon Marketplace', required: true },
+            ],
+        },
     ];
+
+    // Chip form state
+    let activeChip = null;       // id of the currently expanded chip, or null
+    let chipFormValues = {};     // { fieldKey: value } for the active form
+    let categories = [];         // loaded on mount for dropdown inputs
+
+    $: activeProfileId = $activeProfile || 'household';
+    $: scopedProfile = activeProfileId !== 'household' ? activeProfileId : null;
+    $: unreadEvents = recurringData?.events?.filter((event) => !event.is_read) || [];
+    $: recentHistory = historyItems.slice(0, 6);
+
+    onMount(async () => {
+        const prompt = $page.url.searchParams.get('prompt');
+        if (prompt) input = prompt;
+        await refreshSidebar();
+        lastLoadedProfile = activeProfileId;
+        // Load categories for chip form dropdowns
+        try {
+            const catRes = await api.getCategories();
+            categories = (catRes?.categories ?? catRes ?? []).filter(c => c.is_active !== 0);
+        } catch (e) { categories = []; }
+    });
+
+    $: if (activeProfileId && lastLoadedProfile !== undefined && activeProfileId !== lastLoadedProfile) {
+        lastLoadedProfile = activeProfileId;
+        refreshSidebar();
+    }
+
+    function setNotice(message) {
+        actionNotice = message;
+        setTimeout(() => {
+            if (actionNotice === message) actionNotice = '';
+        }, 3000);
+    }
+
+    function openHistory() {
+        historyOpen = true;
+    }
+
+    function closeHistory() {
+        historyOpen = false;
+    }
+
+    function formatDateTime(value) {
+        if (!value) return '—';
+        const normalized = String(value).includes('T') ? value : String(value).replace(' ', 'T');
+        const dt = new Date(normalized);
+        if (Number.isNaN(dt.getTime())) return String(value);
+        return dt.toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit'
+        });
+    }
+
+    function formatTableValue(key, value) {
+        if (value === null || value === undefined || value === '') return '—';
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (typeof value === 'number') {
+            const currencyKeys = ['amount', 'total', 'balance', 'sum', 'avg', 'spent', 'income', 'expense', 'net', 'owed', 'assets', 'budget'];
+            if (currencyKeys.some((token) => key.toLowerCase().includes(token))) return formatCurrency(value, 2);
+            return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+        }
+        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+            if (key.toLowerCase().includes('created') || key.toLowerCase().includes('updated') || key.toLowerCase().includes('synced')) {
+                return formatDateTime(value);
+            }
+            return formatDate(value);
+        }
+        return String(value);
+    }
+
+    function getColumns(data) {
+        if (!data || data.length === 0) return [];
+        return Object.keys(data[0]);
+    }
+
+    function pushAssistantMessage(content, operation = null, extras = {}) {
+        messages = [...messages, {
+            role: 'assistant',
+            content,
+            operation,
+            data: extras.data || null,
+            sql: extras.sql || null,
+            preview_changes: extras.preview_changes || [],
+            confirmation_id: extras.confirmation_id || null,
+            needs_confirmation: extras.needs_confirmation || false,
+            rows_affected: extras.rows_affected || 0,
+            original_question: extras.original_question || null
+        }];
+    }
+
+    async function refreshSidebar() {
+        sidebarLoading = true;
+        try {
+            const [recurringResult, historyResult] = await Promise.all([
+                api.getRecurring().catch(() => null),
+                api.getCopilotHistory(20).catch(() => ({ items: [] })),
+            ]);
+            recurringData = recurringResult;
+            historyItems = historyResult?.items || [];
+        } finally {
+            sidebarLoading = false;
+        }
+    }
+
+    async function openPage(path, params = new URLSearchParams()) {
+        const query = params.toString();
+        await goto(query ? `${path}?${query}` : path);
+    }
+
+    async function openControlCenter(tab, { prompt = '', merchantFilter = '' } = {}) {
+        const params = new URLSearchParams();
+        if (tab && tab !== 'merchants') params.set('tab', tab);
+        if (prompt) params.set('prompt', prompt);
+        if (merchantFilter) params.set('merchant_filter', merchantFilter);
+        await openPage('/control-center', params);
+    }
+
+    async function handleShortcut(question) {
+        const lower = question.toLowerCase();
+
+        if (/\b(open|show)\b/.test(lower) && /\b(transaction|transactions)\b/.test(lower)) {
+            await openPage('/transactions');
+            return "Opened Transactions.";
+        }
+        if (/\b(open|show)\b/.test(lower) && /\b(merchant|merchants)\b/.test(lower)) {
+            await openControlCenter('merchants');
+            return "Opened Control Center on Merchants.";
+        }
+        if (/\b(open|show)\b/.test(lower) && /\brules?\b/.test(lower)) {
+            await openControlCenter('rules');
+            return "Opened Control Center on Rules.";
+        }
+        if (/\b(open|show)\b/.test(lower) && /\b(categories|category)\b/.test(lower)) {
+            await openControlCenter('categories');
+            return "Opened Control Center on Categories.";
+        }
+        if (/\b(open|show)\b/.test(lower) && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
+            await openControlCenter('merchants', { merchantFilter: 'subscriptions' });
+            return "Opened Control Center on recurring merchants.";
+        }
+        if (/\b(open|show)\b/.test(lower) && /\bhistory\b/.test(lower)) {
+            openHistory();
+            return "Opened recent Copilot activity.";
+        }
+        if (/\b(sync|refresh)\b/.test(lower) && !/\bhistory\b/.test(lower)) {
+            const result = await runSync();
+            return `Sync finished: ${result.accounts} accounts and ${result.transactions} transactions processed.`;
+        }
+        if (/\b(redetect|rescan)\b/.test(lower) && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
+            await runRedetectSubscriptions();
+            return "Subscription detection has been re-run.";
+        }
+        if (/\b(mark|clear)\b/.test(lower) && /\b(alert|alerts|event|events)\b/.test(lower) && /\bread\b/.test(lower)) {
+            await markAllEventsRead();
+            return "Marked all subscription alerts as read.";
+        }
+
+        return null;
+    }
 
     async function send() {
         const question = input.trim();
@@ -55,6 +249,7 @@
             operation: null,
             data: null,
             sql: null,
+            preview_changes: [],
             needs_confirmation: false,
             rows_affected: 0
         }];
@@ -65,31 +260,25 @@
         scrollToBottom();
 
         try {
-            const profile = $activeProfile || 'household';
-            const res = await api.askCopilot(question, profile);
+            const shortcut = await handleShortcut(question);
+            if (shortcut) {
+                pushAssistantMessage(shortcut, 'success');
+                await refreshSidebar();
+                return;
+            }
 
-            messages = [...messages, {
-                role: 'assistant',
-                content: res.answer || 'No response received.',
-                operation: res.operation || null,
+            const res = await api.askCopilot(question, activeProfileId);
+            pushAssistantMessage(res.answer || 'No response received.', res.operation || null, {
                 data: res.data || null,
                 sql: res.sql || null,
-                // [FIX] Capture server-side confirmation_id for write previews
+                preview_changes: res.preview_changes || [],
                 confirmation_id: res.confirmation_id || null,
                 needs_confirmation: res.needs_confirmation || false,
                 rows_affected: res.rows_affected || 0,
                 original_question: question
-            }];
-        } catch (e) {
-            messages = [...messages, {
-                role: 'assistant',
-                content: "Sorry, I couldn't process that. Please try again.",
-                operation: 'error',
-                data: null,
-                sql: null,
-                needs_confirmation: false,
-                rows_affected: 0
-            }];
+            });
+        } catch (error) {
+            pushAssistantMessage("Sorry, I couldn't process that. Please try again.", 'error');
         } finally {
             loading = false;
             await tick();
@@ -99,46 +288,28 @@
 
     async function confirmWrite(msgIndex) {
         const msg = messages[msgIndex];
-        // [FIX] Require confirmation_id (server-side stored SQL) instead of raw SQL
         if (!msg || !msg.confirmation_id) return;
 
         loading = true;
         await tick();
 
         try {
-            const profile = $activeProfile || 'household';
-            const res = await api.confirmCopilotWrite(msg.original_question, msg.confirmation_id, profile);
-
-            // Update the message to show it's been executed
+            const res = await api.confirmCopilotWrite(msg.original_question, msg.confirmation_id, activeProfileId);
             messages[msgIndex] = {
                 ...messages[msgIndex],
                 needs_confirmation: false,
                 confirmed: true
             };
+            messages = [...messages];
 
-            // Add the result message
-            messages = [...messages, {
-                role: 'assistant',
-                content: res.answer || `Updated ${res.rows_affected} transaction(s).`,
-                operation: 'write_executed',
-                data: null,
-                sql: null,
-                needs_confirmation: false,
+            pushAssistantMessage(res.answer || `Updated ${res.rows_affected} transaction(s).`, 'write_executed', {
                 rows_affected: res.rows_affected || 0
-            }];
+            });
 
-            // Invalidate cache since data changed
             invalidateCache();
-        } catch (e) {
-            messages = [...messages, {
-                role: 'assistant',
-                content: "Failed to execute the operation. Please try again.",
-                operation: 'error',
-                data: null,
-                sql: null,
-                needs_confirmation: false,
-                rows_affected: 0
-            }];
+            await refreshSidebar();
+        } catch (error) {
+            pushAssistantMessage("Failed to execute the operation. Please try again.", 'error');
         } finally {
             loading = false;
             await tick();
@@ -152,25 +323,133 @@
             needs_confirmation: false,
             confirmed: false
         };
-        messages = [...messages, {
-            role: 'assistant',
-            content: "Operation cancelled.",
-            operation: null,
-            data: null,
-            sql: null,
-            needs_confirmation: false,
-            rows_affected: 0
-        }];
+        messages = [...messages];
+        pushAssistantMessage("Operation cancelled.");
     }
 
     function toggleSql(msgIndex) {
-        showSqlForMsg[msgIndex] = !showSqlForMsg[msgIndex];
-        showSqlForMsg = showSqlForMsg;
+        showSqlForMsg = { ...showSqlForMsg, [msgIndex]: !showSqlForMsg[msgIndex] };
     }
 
-    function usePrompt(prompt) {
-        input = prompt;
-        send();
+    function toggleHistorySql(id) {
+        showSqlForHistory = { ...showSqlForHistory, [id]: !showSqlForHistory[id] };
+    }
+
+    // ── Chip action functions ──
+
+    function buildChipMessage(chip, values) {
+        if (chip.id === 'explain_category') return `Why is ${values.merchant} categorized the way it is?`;
+        if (chip.id === 'find_missing_categories') return 'Show me merchants with missing categories';
+        if (chip.id === 'bulk_recategorize') return `Move all ${values.merchant} transactions to ${values.category}`;
+        if (chip.id === 'create_rule') return `Create a rule: ${values.pattern} → ${values.category}`;
+        if (chip.id === 'rename_merchant') return `Rename ${values.old_name} to ${values.new_name}`;
+        return chip.label;
+    }
+
+    async function executeChipAction(id, values) {
+        if (id === 'explain_category') {
+            const res = await api.explainCategory(values.merchant, scopedProfile);
+            pushAssistantMessage(res.answer, res.operation || 'read', {
+                data: res.samples?.length ? res.samples : null,
+            });
+        } else if (id === 'find_missing_categories') {
+            const res = await api.getMerchantsMissingCategory(scopedProfile);
+            pushAssistantMessage(res.answer, res.operation || 'read', {
+                data: res.items?.length ? res.items : null,
+            });
+        } else if (id === 'bulk_recategorize') {
+            const res = await api.bulkRecategorizePreview(values.merchant, values.category, scopedProfile);
+            if (!res.needs_confirmation) {
+                pushAssistantMessage(res.answer, 'read');
+            } else {
+                pushAssistantMessage(res.answer, 'write_preview', {
+                    data: res.samples?.length ? res.samples : null,
+                    preview_changes: res.preview_changes || [],
+                    confirmation_id: res.confirmation_id,
+                    needs_confirmation: true,
+                    rows_affected: res.count || 0,
+                    original_question: `Move all ${values.merchant} transactions to ${values.category}`,
+                });
+            }
+        } else if (id === 'create_rule') {
+            const res = await api.previewRuleCreation(values.pattern, values.category, scopedProfile);
+            pushAssistantMessage(res.answer, 'write_preview', {
+                data: res.samples?.length ? res.samples : null,
+                preview_changes: res.preview_changes || [],
+                confirmation_id: res.confirmation_id,
+                needs_confirmation: true,
+                rows_affected: res.count || 0,
+                original_question: `Create rule: ${values.pattern} → ${values.category}`,
+            });
+        } else if (id === 'rename_merchant') {
+            const res = await api.renameMerchantPreview(values.old_name, values.new_name, scopedProfile);
+            if (!res.needs_confirmation) {
+                pushAssistantMessage(res.answer, 'read');
+            } else {
+                pushAssistantMessage(res.answer, 'write_preview', {
+                    data: res.samples?.length ? res.samples : null,
+                    preview_changes: res.preview_changes || [],
+                    confirmation_id: res.confirmation_id,
+                    needs_confirmation: true,
+                    rows_affected: res.count || 0,
+                    original_question: `Rename ${values.old_name} to ${values.new_name}`,
+                });
+            }
+        }
+    }
+
+    async function activateChip(chip) {
+        if (chip.inputs.length === 0) {
+            // No inputs needed — execute immediately
+            const userMsg = buildChipMessage(chip, {});
+            messages = [...messages, {
+                role: 'user', content: userMsg, operation: null,
+                data: null, sql: null, preview_changes: [], needs_confirmation: false, rows_affected: 0,
+            }];
+            loading = true;
+            await tick();
+            scrollToBottom();
+            try {
+                await executeChipAction(chip.id, {});
+            } catch (err) {
+                pushAssistantMessage("Sorry, I couldn't process that. Please try again.", 'error');
+            } finally {
+                loading = false;
+                await tick();
+                scrollToBottom();
+            }
+        } else {
+            activeChip = chip.id;
+            chipFormValues = {};
+        }
+    }
+
+    async function submitChipForm() {
+        const chip = chipActions.find(c => c.id === activeChip);
+        if (!chip) return;
+        const userMsg = buildChipMessage(chip, chipFormValues);
+        messages = [...messages, {
+            role: 'user', content: userMsg, operation: null,
+            data: null, sql: null, preview_changes: [], needs_confirmation: false, rows_affected: 0,
+        }];
+        loading = true;
+        activeChip = null;
+        await tick();
+        scrollToBottom();
+        try {
+            await executeChipAction(chip.id, chipFormValues);
+        } catch (err) {
+            pushAssistantMessage("Sorry, I couldn't process that. Please try again.", 'error');
+        } finally {
+            loading = false;
+            await tick();
+            scrollToBottom();
+        }
+    }
+
+    function reuseHistoryPrompt(item) {
+        input = item.user_message || '';
+        closeHistory();
     }
 
     function scrollToBottom() {
@@ -184,276 +463,332 @@
         }
     }
 
-    /**
-     * Format a value for display in the data table.
-     * Detects currency amounts, dates, and other types.
-     */
-    function formatTableValue(key, value) {
-        if (value === null || value === undefined) return '—';
-        if (typeof value === 'number') {
-            // Heuristic: if the key contains 'amount', 'total', 'balance', 'sum', 'avg', 'spent', format as currency
-            const currencyKeys = ['amount', 'total', 'balance', 'sum', 'avg', 'spent', 'income', 'expense', 'net', 'owed', 'assets'];
-            if (currencyKeys.some(k => key.toLowerCase().includes(k))) {
-                return formatCurrency(value, 2);
-            }
-            // Round other numbers
-            return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+    async function runSync() {
+        try {
+            const result = await api.sync();
+            invalidateCache();
+            setNotice('Data sync completed.');
+            await refreshSidebar();
+            return result;
+        } catch (error) {
+            setNotice('Sync failed.');
+            throw error;
         }
-        // Date detection
-        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
-            return formatDate(value);
-        }
-        return String(value);
     }
 
-    /**
-     * Get column headers from data array.
-     */
-    function getColumns(data) {
-        if (!data || data.length === 0) return [];
-        return Object.keys(data[0]);
+    async function runRedetectSubscriptions() {
+        try {
+            await api.redetectSubscriptions(scopedProfile);
+            invalidateCache();
+            setNotice('Subscriptions re-scanned.');
+            await refreshSidebar();
+        } catch (error) {
+            setNotice('Subscription re-scan failed.');
+            throw error;
+        }
+    }
+
+    async function markAllEventsRead() {
+        if (!unreadEvents.length) {
+            setNotice('No unread alerts to clear.');
+            return;
+        }
+        try {
+            await api.markEventsRead(unreadEvents.map((event) => event.id));
+            await refreshSidebar();
+            setNotice('Alerts marked as read.');
+        } catch (error) {
+            setNotice('Failed to mark alerts read.');
+            throw error;
+        }
     }
 </script>
 
-<div class="flex flex-col h-[calc(100vh-7rem)]">
-    <!-- Header -->
-    <div class="mb-5 flex-shrink-0 fade-in">
+<div class="flex flex-col gap-4">
+    <div class="flex items-start justify-between gap-4 flex-wrap fade-in">
         <div class="flex items-center gap-3">
-            <div class="w-9 h-9 rounded-xl flex items-center justify-center"
-                style="background: linear-gradient(135deg, var(--accent), #7c5cbf);
-                       box-shadow: 0 4px 16px rgba(74, 144, 217, 0.3)">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center copilot-hero-icon">
                 <span class="material-symbols-outlined text-white text-[18px]">auto_awesome</span>
             </div>
             <div>
                 <h2 class="text-xl font-extrabold font-display" style="color: var(--text-primary)">Copilot</h2>
-                <p class="text-[11px]" style="color: var(--text-muted)">AI-powered financial insights · Ask questions or give commands</p>
+                <p class="text-[11px]" style="color: var(--text-muted)">Chat-first assistant for explanations, proposed edits, and confirmation-backed mutations.</p>
             </div>
+        </div>
+        <div class="copilot-header-actions">
+            <button
+                type="button"
+                class="copilot-side-pill"
+                class:copilot-side-pill-active={historyOpen}
+                on:click={openHistory}>
+                History
+            </button>
+            <ProfileSwitcher />
         </div>
     </div>
 
-    <!-- Chat area -->
-    <div bind:this={chatContainer}
-        class="flex-1 overflow-y-auto space-y-3.5 pr-2 mb-4" style="scrollbar-width: thin">
-        {#each messages as msg, i}
-            <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'} fade-in" style="animation-delay: {Math.min(i * 60, 300)}ms">
-                <div class="max-w-[85%] {msg.role === 'user' ? 'order-2' : ''}">
-                    {#if msg.role === 'assistant'}
-                        <div class="flex items-start gap-2.5">
-                            <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5"
-                                style="background: var(--accent-soft)">
-                                <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">auto_awesome</span>
-                            </div>
-                            <div class="copilot-msg-container">
-                                <!-- Operation badge -->
-                                {#if msg.operation === 'write_preview'}
-                                    <div class="copilot-op-badge copilot-op-write">
-                                        <span class="material-symbols-outlined text-[12px]">edit</span>
-                                        Write Operation · {msg.rows_affected} row{msg.rows_affected !== 1 ? 's' : ''}
-                                    </div>
-                                {:else if msg.operation === 'write_executed'}
-                                    <div class="copilot-op-badge copilot-op-success">
-                                        <span class="material-symbols-outlined text-[12px]">check_circle</span>
-                                        Executed · {msg.rows_affected} row{msg.rows_affected !== 1 ? 's' : ''} affected
-                                    </div>
-                                {:else if msg.operation === 'read' && msg.rows_affected > 0}
-                                    <div class="copilot-op-badge copilot-op-read">
-                                        <span class="material-symbols-outlined text-[12px]">search</span>
-                                        Query · {msg.rows_affected} result{msg.rows_affected !== 1 ? 's' : ''}
-                                    </div>
-                                {:else if msg.operation === 'error'}
-                                    <div class="copilot-op-badge copilot-op-error">
-                                        <span class="material-symbols-outlined text-[12px]">error</span>
-                                        Error
-                                    </div>
-                                {/if}
+    {#if actionNotice}
+        <div class="copilot-notice fade-in">{actionNotice}</div>
+    {/if}
 
-                                <!-- Main content -->
-                                <div class="card" style="padding: 0.75rem 1rem">
-                                    <p class="text-[13px] leading-relaxed whitespace-pre-wrap" style="color: var(--text-primary)">{msg.content}</p>
-                                </div>
-
-                                <!-- Data table for read results -->
-                                {#if msg.data && msg.data.length > 0}
-                                    {@const columns = getColumns(msg.data)}
-                                    <div class="copilot-data-table-wrap">
-                                        <table class="copilot-data-table">
-                                            <thead>
-                                                <tr>
-                                                    {#each columns as col}
-                                                        <th>{col.replace(/_/g, ' ')}</th>
-                                                    {/each}
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {#each msg.data.slice(0, 20) as row}
-                                                    <tr>
-                                                        {#each columns as col}
-                                                            <td>{formatTableValue(col, row[col])}</td>
-                                                        {/each}
-                                                    </tr>
-                                                {/each}
-                                            </tbody>
-                                        </table>
-                                        {#if msg.data.length > 20}
-                                            <p class="text-[10px] text-center py-2" style="color: var(--text-muted)">
-                                                Showing 20 of {msg.data.length} results
-                                            </p>
+    <div class="copilot-chat-layout fade-in-up">
+        <section class="copilot-chat-shell">
+            <div bind:this={chatContainer} class="flex-1 overflow-y-auto space-y-3.5 pr-2 mb-4" style="scrollbar-width: thin">
+                {#each messages as msg, i}
+                    <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'} fade-in" style="animation-delay: {Math.min(i * 40, 240)}ms">
+                        <div class="max-w-[90%] {msg.role === 'user' ? 'order-2' : ''}">
+                            {#if msg.role === 'assistant'}
+                                <div class="flex items-start gap-2.5">
+                                    <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5" style="background: var(--accent-soft)">
+                                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">auto_awesome</span>
+                                    </div>
+                                    <div class="copilot-msg-container">
+                                        {#if msg.operation === 'write_preview'}
+                                            <div class="copilot-op-badge copilot-op-write">
+                                                <span class="material-symbols-outlined text-[12px]">edit</span>
+                                                Write Preview · {msg.rows_affected} row{msg.rows_affected !== 1 ? 's' : ''}
+                                            </div>
+                                        {:else if msg.operation === 'write_executed' || msg.operation === 'success'}
+                                            <div class="copilot-op-badge copilot-op-success">
+                                                <span class="material-symbols-outlined text-[12px]">check_circle</span>
+                                                Completed
+                                            </div>
+                                        {:else if msg.operation === 'read' && msg.rows_affected > 0}
+                                            <div class="copilot-op-badge copilot-op-read">
+                                                <span class="material-symbols-outlined text-[12px]">search</span>
+                                                Query · {msg.rows_affected} result{msg.rows_affected !== 1 ? 's' : ''}
+                                            </div>
+                                        {:else if msg.operation === 'error'}
+                                            <div class="copilot-op-badge copilot-op-error">
+                                                <span class="material-symbols-outlined text-[12px]">error</span>
+                                                Error
+                                            </div>
                                         {/if}
-                                    </div>
-                                {/if}
 
-                                <!-- Write confirmation card -->
-                                {#if msg.needs_confirmation && !msg.confirmed}
-                                    <div class="copilot-confirm-card">
-                                        <p class="text-[11px] font-medium mb-3" style="color: var(--text-secondary)">
-                                            This will modify your data. Please review and confirm.
-                                        </p>
+                                        <div class="card" style="padding: 0.75rem 1rem">
+                                            <p class="text-[13px] leading-relaxed whitespace-pre-wrap" style="color: var(--text-primary)">{msg.content}</p>
+                                        </div>
 
-                                        <!-- Preview data if available -->
+                                        {#if msg.preview_changes && msg.preview_changes.length > 0}
+                                            <div class="copilot-change-list">
+                                                {#each msg.preview_changes as change}
+                                                    <span class="copilot-change-chip">
+                                                        {change.column}: {formatTableValue(change.column, change.new_value)}
+                                                    </span>
+                                                {/each}
+                                            </div>
+                                        {/if}
+
                                         {#if msg.data && msg.data.length > 0}
-                                            {@const previewCols = getColumns(msg.data)}
-                                            <div class="copilot-data-table-wrap" style="margin-bottom: 0.75rem">
-                                                <table class="copilot-data-table copilot-data-table-preview">
+                                            {@const columns = getColumns(msg.data)}
+                                            <div class="copilot-data-table-wrap">
+                                                <table class="copilot-data-table">
                                                     <thead>
                                                         <tr>
-                                                            {#each previewCols as col}
+                                                            {#each columns as col}
                                                                 <th>{col.replace(/_/g, ' ')}</th>
                                                             {/each}
                                                         </tr>
                                                     </thead>
                                                     <tbody>
-                                                        {#each msg.data.slice(0, 5) as row}
+                                                        {#each msg.data.slice(0, 20) as row}
                                                             <tr>
-                                                                {#each previewCols as col}
+                                                                {#each columns as col}
                                                                     <td>{formatTableValue(col, row[col])}</td>
                                                                 {/each}
                                                             </tr>
                                                         {/each}
                                                     </tbody>
                                                 </table>
-                                                {#if msg.data.length > 5}
-                                                    <p class="text-[10px] text-center py-1" style="color: var(--text-muted)">
-                                                        +{msg.data.length - 5} more...
-                                                    </p>
-                                                {/if}
                                             </div>
                                         {/if}
 
-                                        <div class="flex items-center gap-2">
-                                            <button
-                                                class="copilot-confirm-btn copilot-confirm-yes"
-                                                on:click={() => confirmWrite(i)}
-                                                disabled={loading}>
-                                                <span class="material-symbols-outlined text-[14px]">check</span>
-                                                Confirm
-                                            </button>
-                                            <button
-                                                class="copilot-confirm-btn copilot-confirm-no"
-                                                on:click={() => cancelWrite(i)}
-                                                disabled={loading}>
-                                                <span class="material-symbols-outlined text-[14px]">close</span>
-                                                Cancel
-                                            </button>
-                                        </div>
-                                    </div>
-                                {:else if msg.confirmed}
-                                    <div class="copilot-confirmed-badge">
-                                        <span class="material-symbols-outlined text-[12px]">check_circle</span>
-                                        Confirmed & executed
-                                    </div>
-                                {/if}
+                                        {#if msg.needs_confirmation && !msg.confirmed}
+                                            <div class="copilot-confirm-card">
+                                                <p class="text-[11px] font-medium mb-3" style="color: var(--text-secondary)">
+                                                    This will modify your data. Review the proposed changes and confirm.
+                                                </p>
+                                                <div class="flex items-center gap-2">
+                                                    <button class="copilot-confirm-btn copilot-confirm-yes" on:click={() => confirmWrite(i)} disabled={loading}>
+                                                        <span class="material-symbols-outlined text-[14px]">check</span>
+                                                        Confirm
+                                                    </button>
+                                                    <button class="copilot-confirm-btn copilot-confirm-no" on:click={() => cancelWrite(i)} disabled={loading}>
+                                                        <span class="material-symbols-outlined text-[14px]">close</span>
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        {:else if msg.confirmed}
+                                            <div class="copilot-confirmed-badge">
+                                                <span class="material-symbols-outlined text-[12px]">check_circle</span>
+                                                Confirmed & executed
+                                            </div>
+                                        {/if}
 
-                                <!-- SQL toggle -->
-                                {#if msg.sql}
-                                    <button class="copilot-sql-toggle" on:click={() => toggleSql(i)}>
-                                        <span class="material-symbols-outlined text-[12px]">code</span>
-                                        {showSqlForMsg[i] ? 'Hide SQL' : 'Show SQL'}
-                                    </button>
-                                    {#if showSqlForMsg[i]}
-                                        <pre class="copilot-sql-block">{msg.sql}</pre>
-                                    {/if}
-                                {/if}
+                                        {#if msg.sql}
+                                            <button class="copilot-sql-toggle" on:click={() => toggleSql(i)}>
+                                                <span class="material-symbols-outlined text-[12px]">code</span>
+                                                {showSqlForMsg[i] ? 'Hide SQL' : 'Show SQL'}
+                                            </button>
+                                            {#if showSqlForMsg[i]}
+                                                <pre class="copilot-sql-block">{msg.sql}</pre>
+                                            {/if}
+                                        {/if}
+                                    </div>
+                                </div>
+                            {:else}
+                                <div class="px-4 py-2.5 rounded-2xl rounded-br-md text-[13px] copilot-user-bubble">
+                                    {msg.content}
+                                </div>
+                            {/if}
+                        </div>
+                    </div>
+                {/each}
+
+                {#if loading}
+                    <div class="flex items-start gap-2.5 fade-in">
+                        <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style="background: var(--accent-soft)">
+                            <span class="material-symbols-outlined text-[14px] animate-spin" style="color: var(--accent)">progress_activity</span>
+                        </div>
+                        <div class="card" style="padding: 0.75rem 1rem">
+                            <div class="flex items-center gap-1.5">
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 0ms"></div>
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 150ms"></div>
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 300ms"></div>
+                            </div>
+                        </div>
+                    </div>
+                {/if}
+            </div>
+
+            {#if messages.length <= 1}
+                <div class="flex-shrink-0 mb-4 fade-in-up" style="animation-delay: 100ms">
+                    {#if activeChip}
+                        {@const chip = chipActions.find(c => c.id === activeChip)}
+                        <div class="card p-4 fade-in-up">
+                            <div class="flex items-center justify-between mb-3">
+                                <p class="text-[11px] font-semibold" style="color: var(--text-primary)">{chip.label}</p>
+                                <button on:click={() => { activeChip = null; chipFormValues = {}; }}
+                                    class="text-[11px] hover:underline" style="color: var(--text-muted)">Cancel</button>
+                            </div>
+                            <div class="flex flex-col gap-2.5">
+                                {#each chip.inputs as field}
+                                    <div>
+                                        <label class="text-[10px] font-medium mb-1 block" style="color: var(--text-muted)">{field.label}</label>
+                                        {#if field.type === 'select'}
+                                            <select bind:value={chipFormValues[field.key]}
+                                                class="w-full px-3 py-2 rounded-lg text-[12px] focus:ring-2 focus:ring-accent/40 outline-none"
+                                                style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border)">
+                                                <option value="">Select category…</option>
+                                                {#each categories as cat}
+                                                    <option value={cat.name ?? cat}>{cat.name ?? cat}</option>
+                                                {/each}
+                                            </select>
+                                        {:else}
+                                            <input type="text" bind:value={chipFormValues[field.key]}
+                                                placeholder={field.placeholder}
+                                                on:keydown={(e) => { if (e.key === 'Enter' && chip.inputs.filter(f => f.required).every(f => chipFormValues[f.key]?.trim())) submitChipForm(); }}
+                                                class="w-full px-3 py-2 rounded-lg text-[12px] focus:ring-2 focus:ring-accent/40 outline-none"
+                                                style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border)" />
+                                        {/if}
+                                    </div>
+                                {/each}
+                                <button on:click={submitChipForm}
+                                    disabled={!chip.inputs.filter(f => f.required).every(f => chipFormValues[f.key]?.trim())}
+                                    class="mt-1 px-4 py-2 rounded-lg text-[12px] font-semibold transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
+                                    style="background: var(--accent); color: white">
+                                    Run
+                                </button>
                             </div>
                         </div>
                     {:else}
-                        <div class="px-4 py-2.5 rounded-2xl rounded-br-md text-[13px]"
-                            style="background: linear-gradient(135deg, var(--accent), var(--accent-hover)); color: white;
-                                   box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25)">
-                            {msg.content}
+                        <p class="text-[9px] font-bold tracking-[0.2em] uppercase mb-2.5" style="color: var(--text-muted)">Try asking</p>
+                        <div class="flex flex-wrap gap-2">
+                            {#each chipActions as chip}
+                                <button on:click={() => activateChip(chip)} class="copilot-suggestion-btn">
+                                    {chip.label}
+                                </button>
+                            {/each}
                         </div>
                     {/if}
                 </div>
-            </div>
-        {/each}
+            {/if}
 
-        {#if loading}
-            <div class="flex items-start gap-2.5 fade-in">
-                <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style="background: var(--accent-soft)">
-                    <span class="material-symbols-outlined text-[14px] animate-spin" style="color: var(--accent)">progress_activity</span>
-                </div>
-                <div class="card" style="padding: 0.75rem 1rem">
-                    <div class="flex items-center gap-1.5">
-                        <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 0ms"></div>
-                        <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 150ms"></div>
-                        <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 300ms"></div>
+            <div class="flex-shrink-0">
+                <div class="flex items-end gap-2.5">
+                    <div class="flex-1 relative">
+                        <textarea bind:value={input} on:keydown={handleKeydown}
+                            placeholder="Ask Copilot to explain or change something in your app data…"
+                            rows="1"
+                            class="w-full px-4 py-3 rounded-2xl text-[13px] resize-none focus:ring-2 focus:ring-accent/50 transition-all"
+                            style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border); min-height: 48px; max-height: 120px; box-shadow: var(--card-shadow)"></textarea>
                     </div>
+                    <button on:click={send} disabled={!input.trim() || loading} class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed copilot-send-btn">
+                        <span class="material-symbols-outlined text-white text-[18px]">
+                            {loading ? 'progress_activity' : 'arrow_upward'}
+                        </span>
+                    </button>
                 </div>
+                <p class="text-[9px] text-center mt-2" style="color: var(--text-muted)">
+                    Copilot can explain decisions, prepare edits, and ask for confirmation before changes are executed.
+                </p>
             </div>
-        {/if}
+        </section>
     </div>
 
-    <!-- Quick prompts -->
-    {#if messages.length <= 1}
-        <div class="flex-shrink-0 mb-4 fade-in-up" style="animation-delay: 100ms">
-            <p class="text-[9px] font-bold tracking-[0.2em] uppercase mb-2.5" style="color: var(--text-muted)">Try asking</p>
-            <div class="flex flex-wrap gap-2">
-                {#each quickPrompts as prompt}
-                    <button on:click={() => usePrompt(prompt)}
-                        class="px-3 py-2 rounded-xl text-[11px] font-medium transition-all hover:scale-[1.02] active:scale-[0.98]"
-                        style="background: var(--card-bg); color: var(--text-secondary); border: 1px solid var(--card-border);
-                               box-shadow: var(--card-shadow)">
-                        {prompt}
+    {#if historyOpen}
+        <div class="copilot-history-overlay fade-in" role="presentation">
+            <button
+                type="button"
+                class="copilot-history-backdrop"
+                aria-label="Close history"
+                on:click={closeHistory}></button>
+
+            <aside class="copilot-history-drawer" role="dialog" aria-modal="true" aria-label="Recent Copilot Activity">
+                <div class="copilot-history-drawer-header">
+                    <div class="copilot-panel-header">
+                        <div>
+                            <h3>Recent Copilot Activity</h3>
+                            <p>Reuse a recent prompt or inspect the generated SQL.</p>
+                        </div>
+                    </div>
+                    <button type="button" class="copilot-history-close" on:click={closeHistory} aria-label="Close history">
+                        <span class="material-symbols-outlined text-[18px]">close</span>
                     </button>
-                {/each}
-            </div>
+                </div>
+
+                <div class="copilot-history-drawer-body">
+                    {#if sidebarLoading}
+                        <div class="copilot-empty-state">Loading recent activity…</div>
+                    {:else if recentHistory.length === 0}
+                        <div class="copilot-empty-state">No recent Copilot history yet.</div>
+                    {:else}
+                        <div class="copilot-history-list">
+                            {#each recentHistory as item}
+                                <div class="copilot-history-card">
+                                    <div class="flex items-start justify-between gap-3">
+                                        <div>
+                                            <p class="copilot-row-title">{item.user_message}</p>
+                                            <p class="copilot-row-subtitle">{item.operation_type} · {formatDateTime(item.created_at)}</p>
+                                        </div>
+                                        <button class="copilot-inline-btn" type="button" on:click={() => reuseHistoryPrompt(item)}>Reuse</button>
+                                    </div>
+                                    {#if item.generated_sql}
+                                        <button class="copilot-sql-toggle" on:click={() => toggleHistorySql(item.id)}>
+                                            <span class="material-symbols-outlined text-[12px]">code</span>
+                                            {showSqlForHistory[item.id] ? 'Hide SQL' : 'Show SQL'}
+                                        </button>
+                                        {#if showSqlForHistory[item.id]}
+                                            <pre class="copilot-sql-block">{item.generated_sql}</pre>
+                                        {/if}
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </aside>
         </div>
     {/if}
-
-    <!-- Input -->
-    <div class="flex-shrink-0">
-        <div class="flex items-end gap-2.5">
-            <div class="flex-1 relative">
-                <textarea bind:value={input} on:keydown={handleKeydown}
-                    placeholder="Ask about your finances or give a command..."
-                    rows="1"
-                    class="w-full px-4 py-3 rounded-2xl text-[13px] resize-none focus:ring-2 focus:ring-accent/50 transition-all"
-                    style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border);
-                           min-height: 48px; max-height: 120px; box-shadow: var(--card-shadow)"
-                ></textarea>
-            </div>
-            <button on:click={send} disabled={!input.trim() || loading}
-                class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all
-                       hover:scale-105 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-                style="background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-                       box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25)">
-                <span class="material-symbols-outlined text-white text-[18px]">
-                    {loading ? 'progress_activity' : 'arrow_upward'}
-                </span>
-            </button>
-        </div>
-        <p class="text-[9px] text-center mt-2" style="color: var(--text-muted)">
-            Copilot can read your data and make changes with your confirmation. Responses are AI-generated.
-        </p>
-    </div>
 </div>
-
-<style>
-    .animate-spin { animation: spin 1s linear infinite; }
-    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    .animate-bounce { animation: bounce 1.4s infinite; }
-    @keyframes bounce {
-        0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-6px); }
-    }
-</style>

@@ -32,13 +32,21 @@ export function formatCompact(value) {
 
 export function formatDate(dateStr) {
     if (!dateStr) return '';
-    const d = new Date(dateStr + 'T00:00:00');
+    const normalized = dateStr.includes('T')
+        ? dateStr
+        : (dateStr.includes(' ') ? dateStr.replace(' ', 'T') : dateStr + 'T00:00:00');
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 export function formatDateShort(dateStr) {
     if (!dateStr) return '';
-    const d = new Date(dateStr + 'T00:00:00');
+    const normalized = dateStr.includes('T')
+        ? dateStr
+        : (dateStr.includes(' ') ? dateStr.replace(' ', 'T') : dateStr + 'T00:00:00');
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
@@ -51,7 +59,9 @@ export function formatDateWithYear(dateStr) {
     if (!dateStr) return '';
     // If it's already a datetime string (contains 'T'), use as-is;
     // otherwise append T00:00:00 to avoid timezone-shift issues with date-only strings
-    const normalized = dateStr.includes('T') ? dateStr : dateStr + 'T00:00:00';
+    const normalized = dateStr.includes('T')
+        ? dateStr
+        : (dateStr.includes(' ') ? dateStr.replace(' ', 'T') : dateStr + 'T00:00:00');
     const d = new Date(normalized);
     if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });

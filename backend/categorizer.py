@@ -8,20 +8,18 @@ Two-phase categorization:
 import json
 import re
 import time
-import httpx
 import os
 from dotenv import load_dotenv
 from sanitizer import sanitize_transactions
 from enricher import enrich_transactions
 from log_config import get_logger
 from privacy import mask_amount, mask_counterparty
+from database import _extract_merchant_pattern
+import llm_client
 
 load_dotenv()
 
 logger = get_logger(__name__)
-
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 # Feature toggle: set ENABLE_LLM_CATEGORIZATION=false in .env to skip LLM categorization
 ENABLE_LLM = os.getenv("ENABLE_LLM_CATEGORIZATION", "true").lower() in ("true", "1", "yes")
@@ -97,6 +95,7 @@ SAVINGS_TRANSFER_PATTERNS = [
     r"transfer\s+from\s+sav",
     r"transfer\s+to\s+chk",
     r"savings\s+transfer",
+    r"\bdes:transfer\b",
 ]
 
 INTERNAL_TRANSFER_PATTERNS = [
@@ -113,6 +112,7 @@ P2P_PATTERNS = [
     r"\bcashapp\b",
     r"cash\s*app",
     r"paypal.*(?:send|p2p|instant)",
+    r"\bxoom\b",
 ]
 
 TAX_PATTERNS = [
@@ -206,13 +206,17 @@ def _rule_based_categorize(tx: dict) -> tuple[str | None, str]:
         return None, ""  # sanitizer handles this
 
     # Rule: Internal savings transfers (description clearly says "transfer to SAV" etc.)
-    if tx_type == "transfer" and _matches_any(description, SAVINGS_TRANSFER_PATTERNS):
+    if tx_type in ("transfer", "ach") and amount < 0 and _matches_any(description, SAVINGS_TRANSFER_PATTERNS):
         return "Savings Transfer", "rule-high"
 
     # Rule: Internal transfers between own accounts (not P2P)
-    if tx_type == "transfer" and _matches_any(description, INTERNAL_TRANSFER_PATTERNS):
+    if tx_type in ("transfer", "ach") and amount < 0 and _matches_any(description, INTERNAL_TRANSFER_PATTERNS):
         if not _matches_any(description, P2P_PATTERNS):
             return "Savings Transfer", "rule-high"
+
+    # Rule: Transfer/remittance services are not merchant spending.
+    if tx_type in ("transfer", "ach") and amount < 0 and _matches_any(description, [r"\bxoom\b"]):
+        return "Personal Transfer", "rule-high"
 
     # Rule: Fees on credit cards
     if tx_type == "fee" and is_credit:
@@ -336,26 +340,7 @@ Transactions:
 Respond ONLY with a JSON array, no markdown, no explanation:
 [{{"index": 0, "category": "Category Name", "confidence": "high/medium/low"}}, ...]"""
 
-    resp = httpx.post(
-        ANTHROPIC_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        json={
-            "model": "claude-3-haiku-20240307",
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=60.0,
-    )
-
-    result = resp.json()
-    if "content" not in result:
-        raise Exception(f"Anthropic API error: {result}")
-
-    raw = result["content"][0]["text"].strip()
+    raw = llm_client.complete(prompt, max_tokens=4096, purpose="categorize")
 
     # Strip markdown fences
     if raw.startswith("```"):
@@ -363,6 +348,76 @@ Respond ONLY with a JSON array, no markdown, no explanation:
         raw = re.sub(r"\n?```$", "", raw)
 
     return json.loads(raw.strip())
+
+
+def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple[str, str], dict]:
+    """
+    Build a lightweight merchant -> category memory from historical transactions.
+    This is not model training; it is operational reuse of prior categorizations.
+
+    We only trust:
+    - user / user-rule history strongly
+    - otherwise, a dominant non-fallback historical category for the same merchant
+    """
+    merchant_keys = {
+        (tx.get("profile", ""), (tx.get("merchant_name") or "").upper().strip())
+        for tx in transactions
+        if (tx.get("merchant_name") or "").strip()
+    }
+    if not merchant_keys:
+        return {}
+
+    merchant_names = sorted({merchant for _, merchant in merchant_keys if merchant})
+    placeholders = ",".join("?" for _ in merchant_names)
+    rows = conn.execute(
+        f"""
+        SELECT profile_id,
+               UPPER(TRIM(merchant_name)) AS merchant_key,
+               category,
+               COUNT(*) AS tx_count,
+               SUM(CASE WHEN categorization_source IN ('user', 'user-rule')
+                         OR confidence = 'manual'
+                        THEN 1 ELSE 0 END) AS trusted_count,
+               SUM(CASE WHEN categorization_source = 'fallback'
+                         OR confidence = 'fallback'
+                        THEN 1 ELSE 0 END) AS fallback_count
+        FROM transactions
+        WHERE merchant_name != ''
+          AND category IS NOT NULL
+          AND category != ''
+          AND category != 'Other'
+          AND UPPER(TRIM(merchant_name)) IN ({placeholders})
+        GROUP BY profile_id, merchant_key, category
+        """,
+        merchant_names,
+    ).fetchall()
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        key = (row[0] or "", row[1] or "")
+        grouped.setdefault(key, []).append(
+            {
+                "category": row[2],
+                "count": int(row[3] or 0),
+                "trusted_count": int(row[4] or 0),
+                "fallback_count": int(row[5] or 0),
+            }
+        )
+
+    memory: dict[tuple[str, str], dict] = {}
+    for key, options in grouped.items():
+        total = sum(item["count"] for item in options)
+        best = max(options, key=lambda item: (item["trusted_count"], item["count"]))
+        if total <= 0:
+            continue
+        dominance = best["count"] / total
+
+        if best["trusted_count"] > 0 and dominance >= 0.60:
+            memory[key] = {"category": best["category"], "strength": "high"}
+        elif best["fallback_count"] == 0 and best["count"] >= 2 and dominance >= 0.80:
+            memory[key] = {"category": best["category"], "strength": "medium"}
+
+    return memory
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -386,28 +441,48 @@ def categorize_transactions(
     # Phase 1.5: Enrich via Trove (adds merchant_name, industry, etc.)
     sanitized = enrich_transactions(sanitized)
 
-    # Phase 1.6: Check user-defined rules from database (highest priority)
+    # Phase 1.6: Apply DB-backed rules (user overrides first, then editable system defaults)
+    db_rule_count = 0
     user_rule_count = 0
     try:
         from database import get_db
         import re as _re
         with get_db() as conn:
-            user_rules = conn.execute(
-                """SELECT pattern, match_type, category FROM category_rules
-                   WHERE source = 'user' AND is_active = 1
-                   ORDER BY priority DESC"""
+            db_rules = conn.execute(
+                """SELECT pattern, match_type, category, source, profile_id
+                   FROM category_rules
+                   WHERE is_active = 1
+                   ORDER BY CASE source WHEN 'user' THEN 0 ELSE 1 END,
+                            CASE WHEN COALESCE(profile_id, '') = '' THEN 1 ELSE 0 END,
+                            priority DESC,
+                            id ASC"""
             ).fetchall()
+            merchant_memory = _load_merchant_category_memory(conn, sanitized)
     except Exception:
-        user_rules = []
+        db_rules = []
+        merchant_memory = {}
 
     for tx in sanitized:
-        desc = (tx.get("description") or "").upper()
+        raw_desc = tx.get("description") or ""
+        desc = raw_desc.upper()  # for 'exact' match_type
+        # Canonical form for 'contains' matching. description_normalized is not
+        # in the tx dict yet (it's computed and stored only at DB insert time),
+        # so we derive it here on the fly using the same function.
+        desc_normalized = _extract_merchant_pattern(raw_desc)
+        merchant_pattern = _extract_merchant_pattern(tx.get("merchant_name") or "")
         matched = False
-        for rule in user_rules:
-            pattern, match_type, category = rule[0], rule[1], rule[2]
-            if match_type == "contains" and pattern.upper() in desc:
-                matched = True
-            elif match_type == "regex" and _re.search(pattern, tx.get("description", ""), _re.IGNORECASE):
+        tx_profile = tx.get("profile") or tx.get("profile_id") or ""
+        for rule in db_rules:
+            pattern, match_type, category, source, rule_profile_id = rule[0], rule[1], rule[2], rule[3], rule[4]
+            if rule_profile_id and rule_profile_id != tx_profile:
+                continue
+            if match_type == "contains":
+                if (
+                    (desc_normalized and pattern == desc_normalized)
+                    or (merchant_pattern and pattern == merchant_pattern)
+                ):
+                    matched = True
+            elif match_type == "regex" and _re.search(pattern, raw_desc, _re.IGNORECASE):
                 matched = True
             elif match_type == "exact" and pattern.upper() == desc:
                 matched = True
@@ -415,11 +490,13 @@ def categorize_transactions(
             if matched:
                 tx["category"] = category
                 tx["confidence"] = "rule"
-                tx["categorization_source"] = "user-rule"
-                user_rule_count += 1
+                tx["categorization_source"] = "user-rule" if source == "user" else "system-rule"
+                db_rule_count += 1
+                if source == "user":
+                    user_rule_count += 1
                 break
 
-    logger.info("    User rules matched:      %d", user_rule_count)
+    logger.info("    DB rules matched:        %d", db_rule_count)
 
     # Phase 1b: Apply rule-based categorization (skip those already matched by user rules)
     high_confidence = []     # indices — skip LLM
@@ -427,13 +504,17 @@ def categorize_transactions(
     rule_high_count = 0
     rule_medium_count = 0
     no_rule_count = 0
+    memory_high_count = 0
+    memory_medium_count = 0
 
     for i, tx in enumerate(sanitized):
-        # Skip if already categorized by user rule
-        if tx.get("categorization_source") == "user-rule":
+        # Skip if an explicit DB rule already assigned the category
+        if (tx.get("categorization_source") or "").endswith("-rule"):
             continue
 
         category, confidence = _rule_based_categorize(tx)
+        merchant_key = (tx.get("profile", ""), (tx.get("merchant_name") or "").upper().strip())
+        memory = merchant_memory.get(merchant_key)
 
         if confidence == "rule-high":
             # Certain — apply directly, no LLM needed
@@ -442,8 +523,8 @@ def categorize_transactions(
             rule_high_count += 1
 
         elif confidence == "rule-medium":
-            # Likely correct, but let LLM validate
-            tx["category"] = category  # pre-fill (will be overwritten by LLM)
+            # Likely correct, but let LLM validate.
+            tx["category"] = category
             tx["confidence"] = "rule"
             needs_llm.append({
                 "tx": tx,
@@ -451,6 +532,22 @@ def categorize_transactions(
                 "original_idx": i,
             })
             rule_medium_count += 1
+
+        elif memory and memory["strength"] == "high":
+            # Strong historical consensus for this merchant.
+            tx["category"] = memory["category"]
+            tx["confidence"] = "rule"
+            tx["categorization_source"] = "merchant-memory"
+            memory_high_count += 1
+
+        elif memory:
+            # Use merchant memory as a suggestion for the LLM to validate.
+            needs_llm.append({
+                "tx": tx,
+                "suggestion": memory["category"],
+                "original_idx": i,
+            })
+            memory_medium_count += 1
 
         else:
             # No rule — full LLM categorization
@@ -464,11 +561,13 @@ def categorize_transactions(
     logger.info("    User rules (skip all):   %d", user_rule_count)
     logger.info("    Rule-high (skip LLM):    %d", rule_high_count)
     logger.info("    Rule-medium (validate):  %d", rule_medium_count)
+    logger.info("    Merchant memory (skip):  %d", memory_high_count)
+    logger.info("    Merchant memory (hint):  %d", memory_medium_count)
     logger.info("    No rule (full LLM):      %d", no_rule_count)
     logger.info("    Total for LLM:           %d", len(needs_llm))
 
     # Phase 2: LLM categorization + validation
-    if needs_llm and ENABLE_LLM and ANTHROPIC_API_KEY:
+    if needs_llm and ENABLE_LLM and llm_client.is_available():
         total_batches = -(-len(needs_llm) // batch_size)
 
         all_llm_results = []
@@ -533,7 +632,7 @@ def categorize_transactions(
             )
         else:
             logger.warning(
-                "    No ANTHROPIC_API_KEY set — using rule suggestions where available, 'Other' for rest"
+                "    LLM not available — using rule suggestions where available, 'Other' for rest"
             )
         for entry in needs_llm:
             idx = entry["original_idx"]
@@ -566,5 +665,15 @@ def categorize_transactions(
             orig_id = tx.get("original_id", "")
             if orig_id in _source_profiles:
                 tx["profile"] = _source_profiles[orig_id]
+
+        # Guard: credit card accounts never receive income — any positive inflow
+        # categorized as Income is a CC bill payment, not real income.
+        # Merchant refunds land in their original expense category (e.g. Shopping),
+        # not Income, so they are unaffected by this override.
+        acct_type = (tx.get("account_type") or "")
+        if acct_type in ("credit_card", "credit") and tx.get("category") == "Income":
+            tx["category"] = "Credit Card Payment"
+            tx["confidence"] = "rule"
+            tx["categorization_source"] = "rule-high"
 
     return sanitized

@@ -6,6 +6,9 @@
 data/*.db
 data/*.db-wal
 data/*.db-shm
+backend/Folio-demo.db
+backend/Folio-demo.db-wal
+backend/Folio-demo.db-shm
 
 # Python
 __pycache__/

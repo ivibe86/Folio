@@ -11,6 +11,17 @@
     export let params = {};
 
     let lastSynced = null;
+    let syncPollTimer = null;
+    let lastCompletedSyncKey = null;
+    let currentSyncKey = null;
+    let backendSyncSeen = false;
+    let noBackendSyncSeenCount = 0;
+    let appConfig = {
+        demoMode: false,
+        manualSyncEnabled: true,
+        bankLinkingEnabled: true,
+        demoPersistence: 'persistent'
+    };
 
     /* —— Navigation —— */
     const navPrimary = [
@@ -24,19 +35,121 @@
     ];
 
     const copilotItem = { path: '/copilot', icon: 'auto_awesome', label: 'Copilot' };
+    const controlCenterItem = { path: '/control-center', icon: 'tune', label: 'Control Center' };
 
     /* ── Sync ── */
     async function handleSync() {
+        if (!appConfig.manualSyncEnabled) return;
         syncing.start('manual-sync');
         try {
             const result = await api.sync();
-            lastSynced = result.last_updated;
+            lastSynced = result.last_updated || new Date().toISOString();
             loadProfiles();
+            await pollSyncStatus();
         } catch (e) {
             console.error('Sync failed:', e);
-        } finally {
-            syncing.stop();
         }
+    }
+
+    function notifySyncComplete(status) {
+        const key = `${status?.job_id || 'none'}:${status?.completed_at || 'none'}:${status?.status || 'completed'}`;
+        if (key === lastCompletedSyncKey) return;
+        lastCompletedSyncKey = key;
+        window.dispatchEvent(new CustomEvent('folio:sync-complete', {
+            detail: status || { status: 'completed' }
+        }));
+    }
+
+    function parseIsoMs(value) {
+        if (!value) return null;
+        const ms = Date.parse(value);
+        return Number.isFinite(ms) ? ms : null;
+    }
+
+    function statusMatchesCurrentSync(status) {
+        if (!$syncing.active || !$syncing.context || !status) return false;
+        if (status.source !== $syncing.context) return false;
+
+        const localStartedAt = Number($syncing.startedAt || 0);
+        if (!localStartedAt) return true;
+
+        const remoteStartedAt = parseIsoMs(status.started_at);
+        const remoteCompletedAt = parseIsoMs(status.completed_at);
+        const remoteRelevantAt = remoteStartedAt ?? remoteCompletedAt;
+        if (!remoteRelevantAt) return false;
+
+        // Allow small skew between the client clock and backend timestamps.
+        return remoteRelevantAt >= (localStartedAt - 5000);
+    }
+
+    function completeCurrentSync(status) {
+        if (status?.status === 'completed') {
+            lastSynced = status?.completed_at || lastSynced || new Date().toISOString();
+        }
+        stopSyncStatusPolling();
+        loadProfiles();
+        notifySyncComplete(status);
+        syncing.stop();
+    }
+
+    function clearStaleSyncState() {
+        stopSyncStatusPolling();
+        syncing.stop();
+        backendSyncSeen = false;
+        noBackendSyncSeenCount = 0;
+    }
+
+    function stopSyncStatusPolling() {
+        if (syncPollTimer) {
+            clearInterval(syncPollTimer);
+            syncPollTimer = null;
+        }
+    }
+
+    async function pollSyncStatus() {
+        try {
+            const status = await api.getSyncStatus();
+            if (status?.active) {
+                if (statusMatchesCurrentSync(status)) {
+                    backendSyncSeen = true;
+                    noBackendSyncSeenCount = 0;
+                }
+                return;
+            }
+
+            // Ignore "inactive" responses until we've seen either:
+            // 1. a backend job that matches this client-side sync, or
+            // 2. a completed matching job snapshot with a matching timestamp.
+            if (!statusMatchesCurrentSync(status)) {
+                if ($syncing.active && !backendSyncSeen) {
+                    noBackendSyncSeenCount += 1;
+
+                    // Recover from stale sessionStorage state after backend restarts
+                    // or after a previously rate-limited poller never observed a real job.
+                    if (noBackendSyncSeenCount >= 5) {
+                        clearStaleSyncState();
+                    }
+                }
+                return;
+            }
+
+            if (status?.status === 'completed') {
+                completeCurrentSync(status);
+                return;
+            }
+
+            if (status?.status === 'failed' && backendSyncSeen) {
+                completeCurrentSync(status);
+            }
+        } catch (e) {
+            console.warn('Sync status poll failed (will retry):', e.message);
+        }
+    }
+
+    function startSyncStatusPolling() {
+        if (syncPollTimer) return;
+        syncPollTimer = setInterval(pollSyncStatus, 3000);
+        setTimeout(pollSyncStatus, 250);
     }
 
     /* —— Mouse tracking —— */
@@ -90,6 +203,9 @@
 
     onMount(async () => {
         loadProfiles();
+        try {
+            appConfig = { ...appConfig, ...(await api.getAppConfig()) };
+        } catch (_) {}
         setTimeout(async () => {
             try {
                 const summary = await api.getSummary();
@@ -97,8 +213,26 @@
             } catch (_) {}
         }, 100);
         window.addEventListener('mousemove', handleCardMouseMove, { passive: true });
-        return () => window.removeEventListener('mousemove', handleCardMouseMove);
+        return () => {
+            stopSyncStatusPolling();
+            window.removeEventListener('mousemove', handleCardMouseMove);
+        };
     });
+
+    $: if ($syncing.active) {
+        startSyncStatusPolling();
+    } else {
+        stopSyncStatusPolling();
+    }
+
+    $: {
+        const nextSyncKey = $syncing.active ? `${$syncing.context}:${$syncing.startedAt}` : null;
+        if (nextSyncKey !== currentSyncKey) {
+            currentSyncKey = nextSyncKey;
+            backendSyncSeen = false;
+            noBackendSyncSeenCount = 0;
+        }
+    }
 
     /* ââ Suppress backdrop-filter during navigation ââ */
     beforeNavigate(() => {
@@ -162,7 +296,7 @@
         </div>
         <div class="rail-brand-text">
             <span class="rail-brand-name">Folio</span>
-            <span class="rail-brand-sub">Personal Finance Studio</span>
+            <span class="rail-brand-sub">Personal Finance Dashboard</span>
         </div>
     </div>
 
@@ -214,7 +348,7 @@
         <!-- ✅ CHANGED: Glowing separator before Copilot -->
         <div class="rail-glow-separator" aria-hidden="true"></div>
 
-        <!-- Copilot — now a regular nav link in its own group, directly below Budgets -->
+        <!-- Copilot group -->
         <div class="rail-nav-group rail-nav-group--copilot">
             <a href={copilotItem.path}
                class="rail-link rail-link--copilot"
@@ -231,6 +365,17 @@
                     <span class="rail-copilot-badge-inline">AI</span>
                 {/if}
             </a>
+            <a href={controlCenterItem.path}
+               class="rail-link rail-link--sm"
+               class:rail-link--active={isActive(controlCenterItem.path, currentPath)}
+               aria-current={isActive(controlCenterItem.path, currentPath) ? 'page' : undefined}>
+                {#if isActive(controlCenterItem.path, currentPath)}<span class="rail-active-bar" aria-hidden="true"></span>{/if}
+                <span class="rail-link-icon material-symbols-outlined"
+                      style={isActive(controlCenterItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                    {controlCenterItem.icon}
+                </span>
+                <span class="rail-link-label">{controlCenterItem.label}</span>
+            </a>
         </div>
 
         <!-- ✅ CHANGED: Spacer pushes footer down (Copilot no longer at bottom) -->
@@ -242,23 +387,30 @@
 
     <!-- Footer — Status Bar -->
     <div class="rail-footer">
-        <button on:click={handleSync} disabled={$syncing.active}
-                class="rail-footer-row rail-footer-row--interactive">
-            <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
-            <span class="rail-footer-label">
-                {#if $syncing.active}
-                    Syncing...¦
-                {:else if lastSynced}
-                    <span class="rail-footer-accent">Synced</span> · {relativeTime(lastSynced)}
-                {:else}
-                    Sync now
-                {/if}
-            </span>
-            <span class="material-symbols-outlined rail-footer-action"
-                  class:animate-spin={$syncing.active}>
-                {$syncing.active ? 'progress_activity' : 'sync'}
-            </span>
-        </button>
+        {#if appConfig.manualSyncEnabled}
+            <button on:click={handleSync} disabled={$syncing.active}
+                    class="rail-footer-row rail-footer-row--interactive">
+                <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
+                <span class="rail-footer-label">
+                    {#if $syncing.active}
+                        Syncing...¦
+                    {:else if lastSynced}
+                        <span class="rail-footer-accent">Synced</span> · {relativeTime(lastSynced)}
+                    {:else}
+                        Sync now
+                    {/if}
+                </span>
+                <span class="material-symbols-outlined rail-footer-action"
+                      class:animate-spin={$syncing.active}>
+                    {$syncing.active ? 'progress_activity' : 'sync'}
+                </span>
+            </button>
+        {:else}
+            <div class="rail-footer-row">
+                <span class="material-symbols-outlined rail-footer-icon">visibility</span>
+                <span class="rail-footer-label">Public demo</span>
+            </div>
+        {/if}
 
         <button on:click={() => darkMode.toggle()}
                 class="rail-footer-row rail-footer-row--interactive"
@@ -346,7 +498,7 @@
                 <!-- ✅ CHANGED: Mobile glowing separator before Copilot -->
                 <div class="rail-glow-separator" aria-hidden="true"></div>
 
-                <!-- Mobile Copilot — now inline nav link -->
+                <!-- Mobile Copilot group -->
                 <div class="rail-nav-group rail-nav-group--copilot">
                     <a href={copilotItem.path} on:click={() => mobileMenuOpen = false}
                        class="rail-link rail-link--copilot"
@@ -363,6 +515,17 @@
                             <span class="rail-copilot-badge-inline">AI</span>
                         {/if}
                     </a>
+                    <a href={controlCenterItem.path} on:click={() => mobileMenuOpen = false}
+                       class="rail-link rail-link--sm"
+                       class:rail-link--active={isActive(controlCenterItem.path, currentPath)}
+                       aria-current={isActive(controlCenterItem.path, currentPath) ? 'page' : undefined}>
+                        {#if isActive(controlCenterItem.path, currentPath)}<span class="rail-active-bar"></span>{/if}
+                        <span class="rail-link-icon material-symbols-outlined"
+                              style={isActive(controlCenterItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                            {controlCenterItem.icon}
+                        </span>
+                        <span class="rail-link-label">{controlCenterItem.label}</span>
+                    </a>
                 </div>
 
                 <div class="flex-1"></div>
@@ -371,13 +534,15 @@
             <div class="rail-divider"></div>
 
             <div class="rail-footer">
-                <button on:click={handleSync} disabled={$syncing.active}
-                        class="rail-footer-row rail-footer-row--interactive">
-                    <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
-                    <span class="rail-footer-label">
-                        {$syncing.active ? 'Syncingâ¦' : 'Sync'}
-                    </span>
-                </button>
+                {#if appConfig.manualSyncEnabled}
+                    <button on:click={handleSync} disabled={$syncing.active}
+                            class="rail-footer-row rail-footer-row--interactive">
+                        <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
+                        <span class="rail-footer-label">
+                            {$syncing.active ? 'Syncingâ¦' : 'Sync'}
+                        </span>
+                    </button>
+                {/if}
                 <button on:click={() => darkMode.toggle()}
                         class="rail-footer-row rail-footer-row--interactive">
                     <span class="material-symbols-outlined rail-footer-icon">
@@ -403,10 +568,14 @@
     <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
         Folio
     </span>
-    <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
-            style="color: var(--sidebar-text-active)">
-        <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
-    </button>
+    {#if appConfig.manualSyncEnabled}
+        <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
+                style="color: var(--sidebar-text-active)">
+            <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
+        </button>
+    {:else}
+        <span class="material-symbols-outlined text-[20px]" style="color: var(--sidebar-text-active)">visibility</span>
+    {/if}
 </div>
 
 <!-- Main content -->
@@ -447,7 +616,7 @@
         border-right: 1px solid var(--rail-border);
         box-shadow:
             var(--rail-shadow),
-            inset 0 0 30px rgba(90, 159, 212, 0.03),
+            inset 0 0 30px rgba(148, 163, 184, 0.02),
             inset 0 1px 0 rgba(255, 255, 255, 0.04),
             inset -1px 0 0 rgba(255, 255, 255, 0.02);
         overflow: hidden;
@@ -477,8 +646,8 @@
             var(--rail-shadow),
             0 0 0 1px rgba(148, 163, 184, 0.04),
             0 0 30px rgba(0, 0, 0, 0.15),
-            inset 0 0 40px rgba(148, 163, 184, 0.02),
             inset 0 1px 0 rgba(255, 255, 255, 0.04),
+            inset 0 -1px 0 rgba(148, 163, 184, 0.02),
             inset -1px 0 0 rgba(255, 255, 255, 0.02);
     }
 
@@ -495,8 +664,8 @@
             var(--rail-shadow),
             0 0 0 1px rgba(148, 163, 184, 0.06),
             0 0 40px rgba(0, 0, 0, 0.18),
-            inset 0 0 50px rgba(148, 163, 184, 0.03),
             inset 0 1px 0 rgba(255, 255, 255, 0.05),
+            inset 0 -1px 0 rgba(148, 163, 184, 0.03),
             inset -1px 0 0 rgba(255, 255, 255, 0.03);
     }
 
@@ -696,16 +865,16 @@
         background: linear-gradient(
             90deg,
             transparent 0%,
-            rgba(56, 189, 248, 0.14) 5%,
-            rgba(56, 189, 248, 0.30) 30%,
-            rgba(56, 189, 248, 0.42) 50%,
-            rgba(56, 189, 248, 0.30) 70%,
-            rgba(56, 189, 248, 0.14) 95%,
+            color-mix(in srgb, var(--rail-separator-glow) 92%, transparent) 5%,
+            color-mix(in srgb, var(--rail-separator-glow-center) 92%, transparent) 30%,
+            var(--rail-separator-glow-center) 50%,
+            color-mix(in srgb, var(--rail-separator-glow-center) 92%, transparent) 70%,
+            color-mix(in srgb, var(--rail-separator-glow) 92%, transparent) 95%,
             transparent 100%
         );
         box-shadow:
-            0 0 24px rgba(56, 189, 248, 0.20),
-            0 0 56px rgba(56, 189, 248, 0.12);
+            0 0 20px color-mix(in srgb, var(--rail-separator-glow-center) 52%, transparent),
+            0 0 38px color-mix(in srgb, var(--rail-separator-glow) 34%, transparent);
     }
 
     /* ✅ NEW: Glowing Separator — premium luminous line matching dashboard glow language */
@@ -733,16 +902,16 @@
         background: linear-gradient(
             90deg,
             transparent 0%,
-            rgba(56, 189, 248, 0.14) 5%,
-            rgba(56, 189, 248, 0.30) 30%,
-            rgba(56, 189, 248, 0.42) 50%,
-            rgba(56, 189, 248, 0.30) 70%,
-            rgba(56, 189, 248, 0.14) 95%,
+            color-mix(in srgb, var(--rail-separator-glow) 92%, transparent) 5%,
+            color-mix(in srgb, var(--rail-separator-glow-center) 88%, transparent) 30%,
+            var(--rail-separator-glow-center) 50%,
+            color-mix(in srgb, var(--rail-separator-glow-center) 88%, transparent) 70%,
+            color-mix(in srgb, var(--rail-separator-glow) 92%, transparent) 95%,
             transparent 100%
         );
         box-shadow:
-            0 0 24px rgba(56, 189, 248, 0.20),
-            0 0 56px rgba(56, 189, 248, 0.12);
+            0 0 18px color-mix(in srgb, var(--rail-separator-glow-center) 54%, transparent),
+            0 0 34px color-mix(in srgb, var(--rail-separator-glow) 32%, transparent);
     }
 
     /* —— Nav —— */
@@ -1153,6 +1322,7 @@
         height: 100%;
         background: rgba(0, 0, 0, 0.06);
         opacity: 1;
+        box-shadow: none;
         pointer-events: none;
         z-index: 1;
         mask-image: none;
@@ -1161,13 +1331,11 @@
 
     /* ✅ CHANGED: Dark mode edge glow — neutral silver instead of cyan */
     :global(.dark) .rail-glow-edge::after {
-        opacity: 0.20;
-        background: linear-gradient(
-            to left,
-            rgba(148, 163, 184, 0.18) 0%,
-            rgba(148, 163, 184, 0.05) 40%,
-            transparent 100%
-        );
+        opacity: 0.95;
+        background: rgba(160, 160, 170, 0.10);
+        box-shadow:
+            0 0 8px rgba(210, 210, 220, 0.05),
+            0 0 18px rgba(180, 180, 190, 0.03);
     }
 
 </style>

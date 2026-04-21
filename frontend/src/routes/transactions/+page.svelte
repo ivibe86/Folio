@@ -110,6 +110,7 @@
     // ── Category re-tag dropdown state ──
     let catDropdownOpenForTx = null;   // original_id of tx whose dropdown is open
     let catDropdownSearch = '';         // search/filter within the dropdown
+    let pendingCategoryChange = null;  // { txId, category } — awaiting one-off vs always choice
 
     // Recategorization feedback
     let recentlyUpdatedTxId = null;
@@ -160,6 +161,26 @@
     }
 
     onMount(async () => {
+        const handleSyncComplete = async (event) => {
+            const detail = event?.detail || {};
+            if (detail.status && detail.status !== 'completed') return;
+            if (!['enrollment', 'manual-sync', 'simplefin'].includes(detail.source)) return;
+
+            try {
+                invalidateCache();
+                await fetchTransactions();
+
+                const allResult = await api.getTransactions({ limit: 1000 });
+                const allTxns = allResult.data || [];
+                const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
+                months = [...monthSet].sort().reverse();
+                accountNames = [...new Set(allTxns.map(t => t.account_name).filter(Boolean))].sort();
+            } catch (e) {
+                console.error('Failed to refresh transactions after sync:', e);
+            }
+        };
+
+        window.addEventListener('folio:sync-complete', handleSyncComplete);
         try {
             const [result, cats] = await Promise.all([
                 api.getTransactions({ limit: pageLimit, offset: 0 }),
@@ -185,6 +206,10 @@
         } finally {
             loading = false;
         }
+
+        return () => {
+            window.removeEventListener('folio:sync-complete', handleSyncComplete);
+        };
     });
 
     async function fetchTransactions() {
@@ -322,9 +347,9 @@
         return sorted[0] ? { name: sorted[0][0], total: sorted[0][1] } : null;
     })();
 
-    async function updateCategory(txId, newCategory) {
+    async function updateCategory(txId, newCategory, oneOff = false) {
         try {
-            const result = await api.updateCategory(txId, newCategory);
+            const result = await api.updateCategory(txId, newCategory, oneOff);
             const tx = transactions.find(t => t.original_id === txId);
             if (tx) {
                 tx.category = newCategory;
@@ -340,12 +365,22 @@
                 subscriptionPromptAmount = result.amount || Math.abs(parseFloat(tx?.amount || 0));
             }
 
-            // Show feedback
+            // Show feedback — one-off gets a distinct message
             recentlyUpdatedTxId = txId;
-            updateFeedback = `Categorized as "${newCategory}" — future similar transactions will auto-categorize`;
+            const retro = result?.retroactive_count ?? 0;
+            updateFeedback = oneOff
+                ? `Categorized as "${newCategory}" — this transaction only`
+                : retro > 0
+                    ? `Categorized as "${newCategory}" — updated ${retro} similar transaction${retro !== 1 ? 's' : ''}`
+                    : `Categorized as "${newCategory}"`;
 
             // Invalidate cache since category rules may have changed
             invalidateCache();
+
+            // Refresh transactions list so retroactively updated rows are visible immediately
+            try {
+                await fetchTransactions();
+            } catch (_) {}
 
             // Refresh categories list in case a new one was created
             try {
@@ -364,6 +399,7 @@
             updateFeedback = 'Failed to update category';
             setTimeout(() => { updateFeedback = ''; }, 3000);
         }
+        pendingCategoryChange = null;
         editingTxId = null;
         creatingNewCategory = false;
         newCategoryName = '';
@@ -378,16 +414,20 @@
 
         // Check if it already exists (case-insensitive)
         if (allCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
-            // Just apply the existing one
             const existing = allCategories.find(c => c.toLowerCase() === name.toLowerCase());
-            await updateCategory(txId, existing);
+            creatingNewCategory = false;
+            newCategoryName = '';
+            newCategoryError = '';
+            pendingCategoryChange = { txId, category: existing };
             return;
         }
 
         try {
             await api.createCategory(name);
             allCategories = [...allCategories, name].sort();
-            await updateCategory(txId, name);
+            creatingNewCategory = false;
+            newCategoryName = '';
+            pendingCategoryChange = { txId, category: name };
         } catch (e) {
             newCategoryError = 'Failed to create category';
             console.error(e);
@@ -410,6 +450,7 @@
         creatingNewCategory = false;
         newCategoryName = '';
         newCategoryError = '';
+        pendingCategoryChange = null;
     }
 
     // Filtered category list for the re-tag dropdown search
@@ -436,6 +477,24 @@
             return `${base}, ${dateStr.substring(0, 4)}`;
         }
         return base;
+    }
+
+    function getMerchantMetaLine(tx) {
+        const description = (tx.description || '').trim();
+        const merchantDisplay = (tx.merchant_display_name || '').trim();
+        const merchantName = (tx.merchant_name || '').trim();
+        const accountName = (tx.account_name || '').trim();
+        const parts = [];
+
+        const merchantLabel = merchantDisplay || merchantName;
+        if (merchantLabel && merchantLabel.toUpperCase() !== description.toUpperCase()) {
+            parts.push(merchantLabel);
+        }
+        if (accountName && accountName !== merchantLabel) {
+            parts.push(accountName);
+        }
+
+        return parts.join(' · ');
     }
 
     /**
@@ -710,7 +769,7 @@
         {/each}
     </div>
 {:else}
-    <div class="card fade-in-up" style="padding: 0; animation-delay: 140ms; overflow: visible;">
+    <div class="card tx-ledger-card fade-in-up" style="padding: 0; animation-delay: 140ms; overflow: visible;">
         {#if groupedTxns.length > 0}
             <div class="tx-column-headers">
                 <span>Description</span>
@@ -729,7 +788,7 @@
                 {@const daySpent = txns.filter(t => parseFloat(t.amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0)}
                 {@const dayIncome = txns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0)}
 
-                <div class="day-header" style="{gi > 0 ? 'border-top: 1px solid var(--card-border)' : ''}">
+                <div class="day-header tx-ledger-day-header" style="{gi > 0 ? 'border-top: 1px solid rgba(78, 88, 108, 0.16);' : ''}">
                     <span class="text-[11px] font-semibold" style="color: var(--text-primary)">{formatDayHeaderFull(date)}</span>
                     <div class="flex items-center gap-3">
                         {#if dayIncome > 0}
@@ -745,9 +804,8 @@
                     {@const amount = parseFloat(tx.amount)}
                     {@const sourceInfo = getSourceLabel(tx)}
                     {@const isRecentlyUpdated = recentlyUpdatedTxId === tx.original_id}
-                    <div class="tx-row-grid group transition-colors tx-row"
-                        class:tx-row-updated={isRecentlyUpdated}
-                        style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
+                    <div class="tx-row-grid group transition-colors tx-row tx-ledger-row"
+                        class:tx-row-updated={isRecentlyUpdated}>
 
                         <!-- Zone 1: Icon + Description + Account -->
                         <div class="tx-zone-desc">
@@ -762,7 +820,7 @@
                                 <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
                                     {tx.description || '—'}
                                 </p>
-                                <span class="text-[10px] mt-0.5 block" style="color: var(--text-muted)">{tx.account_name || ''}</span>
+                                <span class="text-[10px] mt-0.5 block" style="color: var(--text-muted)">{getMerchantMetaLine(tx)}</span>
                             </div>
                         </div>
 
@@ -793,79 +851,122 @@
 
                                 {#if catDropdownOpenForTx === tx.original_id}
                                     <div class="txn-filter-dropdown tx-cat-dropdown" on:click|stopPropagation>
-                                        <div class="tx-cat-dropdown-search-wrap">
-                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
-                                            <input
-                                                bind:value={catDropdownSearch}
-                                                placeholder="Search categories..."
-                                                class="tx-cat-dropdown-search"
-                                                on:keydown={(e) => {
-                                                    if (e.key === 'Escape') cancelEditing();
-                                                }}
-                                            />
-                                        </div>
-                                        <div class="tx-cat-dropdown-list">
-                                            {#each filteredEditCategories as cat}
-                                                <button
-                                                    class="txn-filter-option"
-                                                    class:active={cat === tx.category}
-                                                    on:click={() => {
-                                                        if (cat !== tx.category) {
-                                                            updateCategory(tx.original_id, cat);
-                                                        } else {
-                                                            cancelEditing();
-                                                        }
-                                                    }}>
-                                                    <span class="txn-filter-option-label">
-                                                        <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
-                                                            {CATEGORY_ICONS[cat] || 'label'}
-                                                        </span>
-                                                        <span>{cat}</span>
+                                        {#if pendingCategoryChange?.txId === tx.original_id}
+                                            <!-- Step 2: One-off vs Always confirmation -->
+                                            <div style="padding: 0.75rem 0.875rem 0.875rem;">
+                                                <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
+                                                <p class="text-[12px] font-semibold mb-3" style="color: var(--text-primary)">
+                                                    <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[pendingCategoryChange.category] || 'var(--text-muted)'}; vertical-align: middle;">
+                                                        {CATEGORY_ICONS[pendingCategoryChange.category] || 'label'}
                                                     </span>
-                                                    {#if cat === tx.category}
-                                                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
-                                                    {/if}
-                                                </button>
-                                            {/each}
-                                            {#if filteredEditCategories.length === 0 && catDropdownSearch}
-                                                <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
-                                                    No matching categories
-                                                </div>
-                                            {/if}
-                                        </div>
-                                        <div class="tx-cat-dropdown-footer">
-                                            {#if creatingNewCategory}
-                                                <div class="flex items-center gap-1.5 px-2 py-1.5">
-                                                    <input
-                                                        bind:value={newCategoryName}
-                                                        placeholder="New category name..."
-                                                        class="tx-cat-dropdown-new-input"
-                                                        on:keydown={(e) => {
-                                                            if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
-                                                            if (e.key === 'Escape') { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }
-                                                        }}
-                                                    />
+                                                    {pendingCategoryChange.category}
+                                                </p>
+                                                <div style="display: flex; flex-direction: column; gap: 0.375rem;">
                                                     <button
-                                                        class="tx-edit-btn tx-edit-btn-confirm"
-                                                        on:click={() => createAndApplyCategory(tx.original_id)}
-                                                        disabled={!newCategoryName.trim()}>
-                                                        <span class="material-symbols-outlined text-[13px]">check</span>
+                                                        class="txn-filter-option"
+                                                        style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                        on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, false)}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined text-[15px]" style="color: var(--accent)">all_inclusive</span>
+                                                            <span style="font-weight: 600;">Always for this merchant</span>
+                                                        </span>
+                                                        <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">updates similar transactions</span>
+                                                    </button>
+                                                    <button
+                                                        class="txn-filter-option"
+                                                        style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                        on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, true)}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined text-[15px]" style="color: var(--text-secondary)">looks_one</span>
+                                                            <span style="font-weight: 600;">Just this transaction</span>
+                                                        </span>
+                                                        <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">no rule created</span>
                                                     </button>
                                                 </div>
-                                                {#if newCategoryError}
-                                                    <span class="text-[9px] px-3" style="color: var(--negative)">{newCategoryError}</span>
-                                                {/if}
-                                            {:else}
                                                 <button
-                                                    class="txn-filter-option tx-cat-create-btn"
-                                                    on:click={() => { creatingNewCategory = true; }}>
-                                                    <span class="txn-filter-option-label">
-                                                        <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
-                                                        <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
-                                                    </span>
+                                                    class="text-[10px] mt-2.5"
+                                                    style="color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 0; display: flex; align-items: center; gap: 3px;"
+                                                    on:click={() => { pendingCategoryChange = null; }}>
+                                                    <span class="material-symbols-outlined text-[12px]">arrow_back</span>
+                                                    Back
                                                 </button>
-                                            {/if}
-                                        </div>
+                                            </div>
+                                        {:else}
+                                            <!-- Step 1: Category list -->
+                                            <div class="tx-cat-dropdown-search-wrap">
+                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                                <input
+                                                    bind:value={catDropdownSearch}
+                                                    placeholder="Search categories..."
+                                                    class="tx-cat-dropdown-search"
+                                                    on:keydown={(e) => {
+                                                        if (e.key === 'Escape') cancelEditing();
+                                                    }}
+                                                />
+                                            </div>
+                                            <div class="tx-cat-dropdown-list">
+                                                {#each filteredEditCategories as cat}
+                                                    <button
+                                                        class="txn-filter-option"
+                                                        class:active={cat === tx.category}
+                                                        on:click={() => {
+                                                            if (cat !== tx.category) {
+                                                                pendingCategoryChange = { txId: tx.original_id, category: cat };
+                                                            } else {
+                                                                cancelEditing();
+                                                            }
+                                                        }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                                {CATEGORY_ICONS[cat] || 'label'}
+                                                            </span>
+                                                            <span>{cat}</span>
+                                                        </span>
+                                                        {#if cat === tx.category}
+                                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
+                                                        {/if}
+                                                    </button>
+                                                {/each}
+                                                {#if filteredEditCategories.length === 0 && catDropdownSearch}
+                                                    <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                        No matching categories
+                                                    </div>
+                                                {/if}
+                                            </div>
+                                            <div class="tx-cat-dropdown-footer">
+                                                {#if creatingNewCategory}
+                                                    <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                        <input
+                                                            bind:value={newCategoryName}
+                                                            placeholder="New category name..."
+                                                            class="tx-cat-dropdown-new-input"
+                                                            on:keydown={(e) => {
+                                                                if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
+                                                                if (e.key === 'Escape') { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }
+                                                            }}
+                                                        />
+                                                        <button
+                                                            class="tx-edit-btn tx-edit-btn-confirm"
+                                                            on:click={() => createAndApplyCategory(tx.original_id)}
+                                                            disabled={!newCategoryName.trim()}>
+                                                            <span class="material-symbols-outlined text-[13px]">check</span>
+                                                        </button>
+                                                    </div>
+                                                    {#if newCategoryError}
+                                                        <span class="text-[9px] px-3" style="color: var(--negative)">{newCategoryError}</span>
+                                                    {/if}
+                                                {:else}
+                                                    <button
+                                                        class="txn-filter-option tx-cat-create-btn"
+                                                        on:click={() => { creatingNewCategory = true; }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                            <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                        </span>
+                                                    </button>
+                                                {/if}
+                                            </div>
+                                        {/if}
                                     </div>
                                 {/if}
                             </div>
