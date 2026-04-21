@@ -229,10 +229,10 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
         progress = months - months_ago - 1
 
         # Give each month a different personality so charts feel less synthetic.
-        month_profile = [0.84, 0.92, 1.05, 0.97, 1.18, 0.89, 1.27, 1.01][progress % 8]
-        grocery_profile = [0.88, 0.95, 1.02, 1.08, 1.16, 0.93, 1.24, 0.98][progress % 8]
-        dining_profile = [0.82, 0.9, 1.12, 0.96, 1.22, 0.92, 1.3, 1.04][progress % 8]
-        transit_profile = [0.9, 1.0, 1.05, 0.93, 1.15, 0.94, 1.18, 0.97][progress % 8]
+        month_profile = [0.72, 0.86, 1.02, 0.94, 1.24, 0.81, 1.42, 1.08][progress % 8]
+        grocery_profile = [0.76, 0.88, 1.0, 1.06, 1.22, 0.84, 1.34, 1.02][progress % 8]
+        dining_profile = [0.7, 0.84, 1.08, 0.9, 1.32, 0.82, 1.5, 1.1][progress % 8]
+        transit_profile = [0.8, 0.94, 1.04, 0.88, 1.22, 0.86, 1.36, 1.0][progress % 8]
 
         # Income
         for payday in (1, 15):
@@ -342,7 +342,7 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
                 f"demo_tx_{tx_counter:04d}",
                 primary_credit if purchase.category in {"Shopping", "Transportation"} else primary_checking,
                 clamp_day(year, month, 21),
-                -rng.uniform(purchase.amount_min, purchase.amount_max),
+                -rng.uniform(purchase.amount_min * 1.25, purchase.amount_max * 1.65),
                 purchase.category,
                 purchase,
                 purchase.display,
@@ -360,6 +360,20 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
                 merchant.category,
                 merchant,
                 f"{merchant.display} Group Dinner",
+            )
+            tx_counter += 1
+
+        if progress % 6 == 4:
+            purchase = SPECIAL_PURCHASES[(progress + 1) % len(SPECIAL_PURCHASES)]
+            insert_tx(
+                rows,
+                f"demo_tx_{tx_counter:04d}",
+                primary_credit if purchase.category in {"Shopping", "Transportation"} else primary_checking,
+                clamp_day(year, month, 26),
+                -rng.uniform(purchase.amount_min * 0.9, purchase.amount_max * 1.25),
+                purchase.category,
+                purchase,
+                f"{purchase.display} Weekend Trip",
             )
             tx_counter += 1
 
