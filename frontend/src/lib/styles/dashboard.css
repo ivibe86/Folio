@@ -52,8 +52,8 @@
 }
 
 :root:not(.dark) .card-hero-unified:hover {
-    border-color: var(--island-border-hover);
-    box-shadow: var(--island-glow-hover);
+    border-color: var(--island-border);
+    box-shadow: var(--island-glow);
 }
 
 .card-hero-unified::before {
@@ -104,6 +104,14 @@
 
 .card-hero-unified:hover::before { opacity: 1; }
 .card-hero-unified > * { position: relative; z-index: 1; }
+
+:root:not(.dark) .card-hero-unified:hover {
+    transform: translateY(-1px) translateZ(0);
+}
+
+:root:not(.dark) .card-hero-unified:hover::before {
+    opacity: 0;
+}
 
 .dark .card-hero-unified {
     background: linear-gradient(135deg, rgba(17, 19, 23, 0.94) 0%, rgba(15, 17, 20, 0.96) 50%, rgba(13, 14, 17, 0.98) 100%);
@@ -561,7 +569,7 @@
 
 /* Light mode island: chart SVG gets dark-mode-level glow */
 :root:not(.dark) .nw-chart-container svg {
-    filter: drop-shadow(0 0 16px rgba(56, 189, 248, 0.30));
+    filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.14));
 }
 
 .nw-chart-container svg {
@@ -659,7 +667,7 @@
         transparent 100%
     );
     background-size: 200% 100%;
-    animation: shimmer-sweep 1.5s ease-in-out infinite;
+    animation: shimmer-sweep 1.85s ease-in-out infinite;
 }
 
 @keyframes shimmer-sweep {
@@ -672,13 +680,13 @@
     background: linear-gradient(
         90deg,
         transparent 0%,
-        rgba(56, 189, 248, 0.08) 20%,
-        rgba(56, 189, 248, 0.18) 50%,
-        rgba(56, 189, 248, 0.08) 80%,
+        rgba(56, 189, 248, 0.05) 20%,
+        rgba(56, 189, 248, 0.12) 50%,
+        rgba(56, 189, 248, 0.05) 80%,
         transparent 100%
     );
     background-size: 200% 100%;
-    animation: shimmer-sweep 1.5s ease-in-out infinite;
+    animation: shimmer-sweep 2.45s ease-in-out infinite;
 }
 
 .metric-ribbon,
@@ -686,613 +694,94 @@
     transition: opacity 0.15s ease-out;
 }
 
+.sankey-theater {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+}
+
 .sankey-loading {
     pointer-events: none;
 }
 
-.sankey-loading-skeleton {
-    position: absolute;
-    inset: 0;
-    padding: 1rem 0.75rem;
-    pointer-events: none;
-    isolation: isolate;
-    overflow: hidden;
-}
-
-.sankey-loading-skeleton::before,
-.sankey-loading-skeleton::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-}
-
-.sankey-loading-skeleton::before {
-    background:
-        radial-gradient(42% 72% at 14% 50%, rgba(45, 212, 191, 0.14) 0%, transparent 72%),
-        radial-gradient(24% 48% at 44% 48%, rgba(186, 230, 253, 0.09) 0%, transparent 74%),
-        radial-gradient(38% 66% at 84% 54%, rgba(99, 102, 241, 0.10) 0%, transparent 78%);
-    opacity: 0.92;
-    transform: scale(1.04);
-    animation: sankey-skeleton-stage-drift 12s ease-in-out infinite alternate;
-}
-
-.sankey-loading-skeleton::after {
-    background:
-        radial-gradient(18% 34% at 43.5% 48%, rgba(186, 230, 253, 0.13) 0%, transparent 74%),
-        linear-gradient(90deg, transparent 0%, rgba(186, 230, 253, 0.00) 32%, rgba(186, 230, 253, 0.06) 50%, rgba(186, 230, 253, 0.00) 68%, transparent 100%);
-    opacity: 0.78;
-    mix-blend-mode: screen;
-    animation: sankey-skeleton-stage-glow 6s ease-in-out infinite;
-}
-
-.sankey-loading-svg {
-    width: 100%;
-    height: 100%;
-    display: block;
-    overflow: visible;
+.sankey-chart-shell {
     position: relative;
     z-index: 1;
-}
-
-.sankey-skeleton-node-aura {
-    fill: rgba(56, 189, 248, 0.10);
-    filter: blur(18px);
-    opacity: 0.72;
-    animation: sankey-skeleton-aura-breathe 4.8s ease-in-out infinite;
-}
-
-.sankey-skeleton-node-aura--secondary {
-    animation-delay: -1.2s;
-}
-
-.sankey-skeleton-node-aura--hub {
-    fill: rgba(125, 211, 252, 0.15);
-    animation-delay: -0.8s;
-}
-
-.sankey-skeleton-node-aura--leaf {
-    fill: rgba(96, 165, 250, 0.08);
-    animation-delay: -1.6s;
-}
-
-.sankey-skeleton-flow-glow,
-.sankey-skeleton-tube-shell,
-.sankey-skeleton-tube-core,
-.sankey-skeleton-particle-stream,
-.sankey-skeleton-particle {
-    fill: none;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-}
-
-.sankey-skeleton-flow-glow {
-    stroke: rgba(96, 165, 250, 0.22);
-    opacity: 0.54;
-    filter: blur(13px);
-    mix-blend-mode: screen;
-    animation: sankey-skeleton-flow-glow-breathe 5s ease-in-out infinite;
-}
-
-.sankey-skeleton-tube-shell {
-    opacity: 0.94;
-    filter:
-        drop-shadow(0 0 8px rgba(125, 211, 252, 0.24))
-        drop-shadow(0 0 22px rgba(56, 189, 248, 0.16));
-    animation: sankey-skeleton-tube-shell-breathe 4.4s ease-in-out infinite;
-}
-
-.sankey-skeleton-tube-core {
-    stroke: url(#sankeySkeletonTubeCoreGrad);
-    opacity: 0.94;
-    filter:
-        drop-shadow(0 0 6px rgba(8, 15, 28, 0.44))
-        drop-shadow(0 0 18px rgba(15, 23, 42, 0.26));
-    animation: sankey-skeleton-tube-core-breathe 4.6s ease-in-out infinite;
-}
-
-.sankey-skeleton-particle-stream {
-    stroke: url(#sankeySkeletonParticleStreamGrad);
-    opacity: 0;
-    mix-blend-mode: screen;
-    filter:
-        drop-shadow(0 0 8px rgba(186, 230, 253, 0.20))
-        drop-shadow(0 0 18px rgba(56, 189, 248, 0.16));
-    animation: sankey-skeleton-particle-stream-travel var(--stream-duration, 3.4s) linear infinite;
-    animation-delay: var(--stream-delay, 0s);
-}
-
-.sankey-skeleton-particle {
-    stroke: url(#sankeySkeletonPacketGrad);
-    opacity: 0;
-    mix-blend-mode: screen;
-    filter:
-        drop-shadow(0 0 6px rgba(255, 255, 255, 0.34))
-        drop-shadow(0 0 16px rgba(186, 230, 253, 0.26));
-    animation: sankey-skeleton-particle-travel var(--packet-duration, 2.8s) linear infinite;
-    animation-delay: var(--packet-delay, 0s);
-}
-
-.sankey-skeleton-tube-shell--a {
-    stroke: url(#sankeySkeletonSourceGrad);
-}
-
-.sankey-skeleton-tube-shell--b {
-    stroke: url(#sankeySkeletonReserveGrad);
-}
-
-.sankey-skeleton-tube-shell--c,
-.sankey-skeleton-tube-shell--e {
-    stroke: url(#sankeySkeletonOutflowGrad);
-}
-
-.sankey-skeleton-tube-shell--d {
-    stroke: url(#sankeySkeletonOutflowSoftGrad);
-}
-
-.sankey-skeleton-tube-shell--f {
-    stroke: url(#sankeySkeletonReserveGrad);
-}
-
-.sankey-skeleton-flow-glow--a {
-    stroke-width: 40;
-}
-
-.sankey-skeleton-flow-glow--b {
-    stroke-width: 28;
-}
-
-.sankey-skeleton-flow-glow--c {
-    stroke-width: 34;
-}
-
-.sankey-skeleton-flow-glow--d {
-    stroke-width: 22;
-}
-
-.sankey-skeleton-flow-glow--e {
-    stroke-width: 30;
-}
-
-.sankey-skeleton-flow-glow--f {
-    stroke-width: 32;
-}
-
-.sankey-skeleton-tube-shell--a {
-    stroke-width: 28;
-}
-
-.sankey-skeleton-tube-shell--b {
-    stroke-width: 20;
-}
-
-.sankey-skeleton-tube-shell--c {
-    stroke-width: 24;
-}
-
-.sankey-skeleton-tube-shell--d {
-    stroke-width: 16;
-}
-
-.sankey-skeleton-tube-shell--e {
-    stroke-width: 20;
-}
-
-.sankey-skeleton-tube-shell--f {
-    stroke-width: 22;
-}
-
-.sankey-skeleton-tube-core--a {
-    stroke-width: 18;
-}
-
-.sankey-skeleton-tube-core--b {
-    stroke-width: 12;
-}
-
-.sankey-skeleton-tube-core--c {
-    stroke-width: 14;
-}
-
-.sankey-skeleton-tube-core--d {
-    stroke-width: 9;
-}
-
-.sankey-skeleton-tube-core--e {
-    stroke-width: 11;
-}
-
-.sankey-skeleton-tube-core--f {
-    stroke-width: 13;
-}
-
-.sankey-skeleton-particle-stream--a {
-    stroke-width: 13;
-    stroke-dasharray: 80 220;
-    stroke-dashoffset: 300;
-    --stream-duration: 3.4s;
-    --stream-delay: -0.6s;
-}
-
-.sankey-skeleton-particle-stream--b {
-    stroke-width: 8;
-    stroke-dasharray: 52 192;
-    stroke-dashoffset: 244;
-    --stream-duration: 3.8s;
-    --stream-delay: -1.7s;
-}
-
-.sankey-skeleton-particle-stream--c {
-    stroke-width: 10;
-    stroke-dasharray: 68 232;
-    stroke-dashoffset: 300;
-    --stream-duration: 3.1s;
-    --stream-delay: -1.1s;
-}
-
-.sankey-skeleton-particle-stream--d {
-    stroke-width: 6;
-    stroke-dasharray: 42 170;
-    stroke-dashoffset: 212;
-    --stream-duration: 4.2s;
-    --stream-delay: -2.2s;
-}
-
-.sankey-skeleton-particle-stream--e {
-    stroke-width: 7;
-    stroke-dasharray: 46 180;
-    stroke-dashoffset: 226;
-    --stream-duration: 3.6s;
-    --stream-delay: -2.5s;
-}
-
-.sankey-skeleton-particle-stream--f {
-    stroke-width: 8;
-    stroke-dasharray: 56 196;
-    stroke-dashoffset: 252;
-    --stream-duration: 3.9s;
-    --stream-delay: -2.9s;
-}
-
-.sankey-skeleton-particle--a {
-    stroke-width: 6;
-    --packet-duration: 2.6s;
-    --packet-delay: -0.3s;
-}
-
-.sankey-skeleton-particle--b {
-    stroke-width: 4;
-    --packet-duration: 3.1s;
-    --packet-delay: -1.6s;
-}
-
-.sankey-skeleton-particle--c {
-    stroke-width: 5;
-    --packet-duration: 2.4s;
-    --packet-delay: -0.7s;
-}
-
-.sankey-skeleton-particle--d {
-    stroke-width: 3;
-    --packet-duration: 3.4s;
-    --packet-delay: -1.1s;
-}
-
-.sankey-skeleton-particle--e {
-    stroke-width: 4;
-    --packet-duration: 2.9s;
-    --packet-delay: -2.1s;
-}
-
-.sankey-skeleton-particle--f {
-    stroke-width: 4.5;
-    --packet-duration: 3.2s;
-    --packet-delay: -2.5s;
-}
-
-.sankey-skeleton-particle--lead {
-    stroke-dasharray: 16 136;
-    stroke-dashoffset: 190;
-}
-
-.sankey-skeleton-particle--trail {
-    stroke-dasharray: 12 144;
-    stroke-dashoffset: 240;
-    opacity: 0;
-    filter:
-        drop-shadow(0 0 4px rgba(255, 255, 255, 0.18))
-        drop-shadow(0 0 10px rgba(125, 211, 252, 0.20));
-    animation-delay: calc(var(--packet-delay, 0s) - 1.05s);
-}
-
-.sankey-skeleton-tube-shell--a,
-.sankey-skeleton-flow-glow--a,
-.sankey-skeleton-tube-core--a {
-    animation-delay: -0.2s;
-}
-
-.sankey-skeleton-tube-shell--b,
-.sankey-skeleton-flow-glow--b,
-.sankey-skeleton-tube-core--b {
-    animation-delay: -1.4s;
-}
-
-.sankey-skeleton-tube-shell--c,
-.sankey-skeleton-flow-glow--c,
-.sankey-skeleton-tube-core--c {
-    animation-delay: -0.5s;
-}
-
-.sankey-skeleton-tube-shell--d,
-.sankey-skeleton-flow-glow--d,
-.sankey-skeleton-tube-core--d {
-    animation-delay: -1.1s;
-}
-
-.sankey-skeleton-tube-shell--e,
-.sankey-skeleton-flow-glow--e,
-.sankey-skeleton-tube-core--e {
-    animation-delay: -1.8s;
-}
-
-.sankey-skeleton-tube-shell--f,
-.sankey-skeleton-flow-glow--f,
-.sankey-skeleton-tube-core--f {
-    animation-delay: -2.3s;
-}
-
-.sankey-skeleton-node {
-    fill: rgba(12, 18, 30, 0.72);
-    stroke: rgba(125, 211, 252, 0.22);
-    stroke-width: 1.2;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: sankey-skeleton-node-pulse 2.8s ease-in-out infinite;
-    filter:
-        drop-shadow(0 0 10px rgba(56, 189, 248, 0.08))
-        drop-shadow(0 0 22px rgba(15, 23, 42, 0.18));
-}
-
-.sankey-skeleton-node--secondary {
-    animation-delay: -0.8s;
-}
-
-.sankey-skeleton-node--hub {
-    animation-delay: -1.1s;
-}
-
-.sankey-skeleton-node--leaf:nth-of-type(4) {
-    animation-delay: -0.3s;
-}
-
-.sankey-skeleton-node--leaf:nth-of-type(5) {
-    animation-delay: -0.9s;
-}
-
-.sankey-skeleton-node--leaf:nth-of-type(6) {
-    animation-delay: -1.4s;
-}
-
-.sankey-skeleton-node--leaf:nth-of-type(7) {
-    animation-delay: -1.9s;
-}
-
-.sankey-skeleton-port {
-    fill: rgba(186, 230, 253, 0.74);
-    opacity: 0.86;
-    transform-box: fill-box;
-    transform-origin: center;
-    filter:
-        drop-shadow(0 0 6px rgba(186, 230, 253, 0.25))
-        drop-shadow(0 0 18px rgba(56, 189, 248, 0.16));
-    animation: sankey-skeleton-port-pulse 2.8s ease-in-out infinite;
-}
-
-.sankey-skeleton-port--source {
-    fill: rgba(110, 231, 183, 0.72);
-}
-
-.sankey-skeleton-port--a {
-    animation-delay: -0.3s;
-}
-
-.sankey-skeleton-port--b {
-    animation-delay: -1.4s;
-}
-
-.sankey-skeleton-port--c {
-    animation-delay: -0.6s;
-}
-
-.sankey-skeleton-port--d {
-    animation-delay: -1.2s;
-}
-
-.sankey-skeleton-port--e {
-    animation-delay: -1.8s;
-}
-
-.sankey-skeleton-port--f {
-    animation-delay: -2.2s;
-}
-
-.sankey-skeleton-hub-ring {
-    fill: none;
-    stroke: rgba(186, 230, 253, 0.28);
-    stroke-width: 1.6;
-    opacity: 0;
-    transform-origin: center;
-    transform-box: fill-box;
-    animation: sankey-skeleton-hub-ring 3.2s ease-out infinite;
-}
-
-.sankey-skeleton-hub-ring--a {
-    animation-delay: -0.5s;
-}
-
-.sankey-skeleton-hub-ring--b {
-    animation-delay: -1.8s;
-}
-
-.sankey-skeleton-arrival {
-    fill: rgba(186, 230, 253, 0.24);
-    stroke: rgba(186, 230, 253, 0.40);
-    stroke-width: 1.2;
-    opacity: 0.85;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: sankey-skeleton-arrival-pulse 2.6s ease-in-out infinite;
-}
-
-.sankey-skeleton-arrival--a {
-    animation-delay: -0.2s;
-}
-
-.sankey-skeleton-arrival--b {
-    animation-delay: -0.9s;
-}
-
-.sankey-skeleton-arrival--c {
-    animation-delay: -1.4s;
-}
-
-.sankey-skeleton-arrival--d {
-    animation-delay: -2.0s;
-}
-
-@keyframes sankey-skeleton-stage-drift {
+    transition: filter 220ms ease-out, opacity 220ms ease-out;
+}
+
+.sankey-chart-shell--live-sync {
+    opacity: 1;
+    filter: none;
+}
+
+.sankey-loading-badge {
+    position: absolute;
+    top: 0.9rem;
+    right: 0.9rem;
+    bottom: auto;
+    left: auto;
+    z-index: 4;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.45rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(8, 13, 24, 0.62);
+    border: 1px solid rgba(125, 211, 252, 0.16);
+    box-shadow:
+        0 10px 24px rgba(2, 6, 23, 0.24),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    color: rgba(224, 242, 254, 0.9);
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+
+.sankey-loading-badge--live {
+    background: rgba(7, 11, 22, 0.78);
+    border-color: rgba(125, 211, 252, 0.26);
+    box-shadow:
+        0 14px 30px rgba(2, 6, 23, 0.32),
+        0 0 24px rgba(56, 189, 248, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.sankey-loading-badge-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: rgba(103, 232, 249, 0.96);
+    box-shadow:
+        0 0 0 0 rgba(103, 232, 249, 0.32),
+        0 0 10px rgba(103, 232, 249, 0.4);
+    animation: sankey-loading-badge-pulse 1.8s ease-out infinite;
+}
+
+@keyframes sankey-loading-badge-pulse {
     0% {
-        transform: translate3d(-1.5%, -1%, 0) scale(1.04);
+        box-shadow:
+            0 0 0 0 rgba(103, 232, 249, 0.32),
+            0 0 10px rgba(103, 232, 249, 0.32);
+    }
+    70% {
+        box-shadow:
+            0 0 0 9px rgba(103, 232, 249, 0),
+            0 0 14px rgba(103, 232, 249, 0.46);
     }
     100% {
-        transform: translate3d(1.5%, 1%, 0) scale(1.08);
+        box-shadow:
+            0 0 0 0 rgba(103, 232, 249, 0),
+            0 0 10px rgba(103, 232, 249, 0.28);
     }
 }
 
-@keyframes sankey-skeleton-stage-glow {
-    0%, 100% {
-        opacity: 0.64;
-    }
-    50% {
-        opacity: 0.96;
-    }
-}
-
-@keyframes sankey-skeleton-aura-breathe {
-    0%, 100% {
-        opacity: 0.50;
-        transform: scale(0.98);
-    }
-    50% {
-        opacity: 0.90;
-        transform: scale(1.04);
-    }
-}
-
-@keyframes sankey-skeleton-flow-glow-breathe {
-    0%, 100% {
-        opacity: 0.34;
-    }
-    50% {
-        opacity: 0.62;
-    }
-}
-
-@keyframes sankey-skeleton-tube-shell-breathe {
-    0%, 100% {
-        opacity: 0.84;
-    }
-    50% {
-        opacity: 1;
-    }
-}
-
-@keyframes sankey-skeleton-tube-core-breathe {
-    0%, 100% {
-        opacity: 0.84;
-    }
-    50% {
-        opacity: 0.98;
-    }
-}
-
-@keyframes sankey-skeleton-particle-stream-travel {
-    0% {
-        opacity: 0;
-    }
-    10% {
-        opacity: 0.62;
-    }
-    82% {
-        opacity: 0.54;
-    }
-    100% {
-        stroke-dashoffset: 0;
-        opacity: 0;
-    }
-}
-
-@keyframes sankey-skeleton-particle-travel {
-    0% {
-        opacity: 0;
-    }
-    12% {
-        opacity: 0.96;
-    }
-    88% {
-        opacity: 0.88;
-    }
-    100% {
-        stroke-dashoffset: 0;
-        opacity: 0;
-    }
-}
-
-@keyframes sankey-skeleton-node-pulse {
-    0%, 100% {
-        fill: rgba(12, 18, 30, 0.70);
-        stroke: rgba(125, 211, 252, 0.18);
-    }
-    50% {
-        fill: rgba(18, 30, 46, 0.82);
-        stroke: rgba(186, 230, 253, 0.30);
-    }
-}
-
-@keyframes sankey-skeleton-port-pulse {
-    0%, 100% {
-        opacity: 0.52;
-        transform: scale(0.95);
-    }
-    50% {
-        opacity: 1;
-        transform: scale(1.14);
-    }
-}
-
-@keyframes sankey-skeleton-hub-ring {
-    0% {
-        opacity: 0;
-        transform: scale(0.72);
-    }
-    18% {
-        opacity: 0.42;
-    }
-    100% {
-        opacity: 0;
-        transform: scale(1.8);
-    }
-}
-
-@keyframes sankey-skeleton-arrival-pulse {
-    0%, 100% {
-        opacity: 0.36;
-        transform: scale(0.92);
-    }
-    50% {
-        opacity: 1;
-        transform: scale(1.24);
+@media (prefers-reduced-motion: reduce) {
+    .sankey-loading-badge-dot {
+        animation: none;
     }
 }
 

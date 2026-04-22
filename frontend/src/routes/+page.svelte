@@ -1,6 +1,7 @@
 <script>
     import '$lib/styles/dashboard.css';
     import '$lib/styles/transactions.css';
+    import { page } from '$app/stores';
     import { onMount, onDestroy, tick } from 'svelte';
     import { api, invalidateCacheByPrefix, invalidateCache } from '$lib/api.js';
     import {
@@ -12,6 +13,7 @@
     import { darkMode, syncing, selectedPeriodStore, selectedCustomMonthStore, privacyMode } from '$lib/stores.js';
     import { profiles, activeProfile } from '$lib/stores/profileStore.js';
     import SankeyChart from '$lib/components/SankeyChart.svelte';
+    import SankeyLoadingStage from '$lib/components/SankeyLoadingStage.svelte';
     import IncomeVsSpendingChart from '$lib/components/IncomeVsSpendingChart.svelte';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
     import TellerConnect from '$lib/components/TellerConnect.svelte';  
@@ -129,10 +131,26 @@
     // Sankey theater mouse-tracking glow
     let sankeyTheaterEl = null;
     let sankeyGlowOpacity = 0;
+    let debugLoadingMode = '';
+    let hasRenderableSankeyData = false;
+
+    $: debugLoadingMode = $page.url.searchParams.get('debugLoading') || '';
+    $: forceHeroLoading = ['hero', 'all'].includes(debugLoadingMode);
+    $: forceMetricLoading = ['metrics', 'all'].includes(debugLoadingMode);
+    $: forceSankeyLiveLoading = ['sankey', 'sankey-live', 'sankey-sync', 'all'].includes(debugLoadingMode) && hasRenderableSankeyData;
+    $: forceSankeyEmptyLoading = debugLoadingMode === 'sankey-empty';
     $: enrollmentLoadingActive = $syncing.active && $syncing.context === 'enrollment';
-    $: heroLoading = isRefreshing || enrollmentLoadingActive;
-    $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive;
-    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive;
+    $: hasRenderableSankeyData =
+        sankeyCategoryList.some((cat) => !cat.isDirectFlow && (cat.total || 0) > 0) ||
+        sankeySavingsTotal > 0 ||
+        sankeyPersonalTransferTotal > 0 ||
+        (periodSummary?.cc_repaid || 0) > 0;
+    $: heroLoading = isRefreshing || enrollmentLoadingActive || forceHeroLoading;
+    $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceMetricLoading;
+    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceSankeyLiveLoading || forceSankeyEmptyLoading;
+    $: showSankeyLoadingStage = forceSankeyEmptyLoading || (sankeyLoading && !hasRenderableSankeyData);
+    $: showLiveSankeySyncState = sankeyLoading && hasRenderableSankeyData && !showSankeyLoadingStage;
+    $: showSankeyChart = Boolean(periodSummary) && !showSankeyLoadingStage && !showLiveSankeySyncState;
 
     function handleTheaterMouseMove(e) {
         if (!sankeyTheaterEl) return;
@@ -1781,43 +1799,40 @@
                             on:mouseleave={handleChartLeave}>
                             <defs>
                                 <linearGradient id="nwAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%"   stop-color={CYAN_LINE}  stop-opacity="0.55"/>
-                                    <stop offset="5%"   stop-color={CYAN_LINE}  stop-opacity="0.40"/>
-                                    <stop offset="15%"  stop-color="#2DD4BF"     stop-opacity="0.35"/>
-                                    <stop offset="30%"  stop-color={TEAL_AREA}   stop-opacity="0.30"/>
-                                    <stop offset="50%"  stop-color={TEAL_AREA}   stop-opacity="0.22"/>
-                                    <stop offset="70%"  stop-color={TEAL_AREA}   stop-opacity="0.14"/>
-                                    <stop offset="85%"  stop-color={TEAL_AREA}   stop-opacity="0.07"/>
+                                    <stop offset="0%"   stop-color={CYAN_LINE}  stop-opacity="0.66"/>
+                                    <stop offset="5%"   stop-color={CYAN_LINE}  stop-opacity="0.50"/>
+                                    <stop offset="15%"  stop-color="#5EEAD4"     stop-opacity="0.42"/>
+                                    <stop offset="30%"  stop-color={TEAL_AREA}   stop-opacity="0.36"/>
+                                    <stop offset="50%"  stop-color={TEAL_AREA}   stop-opacity="0.26"/>
+                                    <stop offset="70%"  stop-color={TEAL_AREA}   stop-opacity="0.16"/>
+                                    <stop offset="85%"  stop-color={TEAL_AREA}   stop-opacity="0.08"/>
                                     <stop offset="100%" stop-color={TEAL_AREA}   stop-opacity="0.02"/>
                                 </linearGradient>
                                 <linearGradient id="nwLineGradCyan" x1="0" y1="0" x2="1" y2="0">
-                                    <stop offset="0%"   stop-color={CYAN_LINE} stop-opacity="0.30"/>
-                                    <stop offset="20%"  stop-color={CYAN_LINE} stop-opacity="0.7"/>
-                                    <stop offset="45%"  stop-color={CYAN_GLOW} stop-opacity="1"/>
-                                    <stop offset="55%"  stop-color="#BAE6FD"   stop-opacity="0.9"/>
-                                    <stop offset="80%"  stop-color={CYAN_GLOW} stop-opacity="1"/>
-                                    <stop offset="100%" stop-color={CYAN_LINE} stop-opacity="0.8"/>
+                                    <stop offset="0%"   stop-color={CYAN_LINE} stop-opacity="0.72"/>
+                                    <stop offset="30%"  stop-color={CYAN_GLOW} stop-opacity="0.94"/>
+                                    <stop offset="58%"  stop-color="#E0F2FE"   stop-opacity="0.98"/>
+                                    <stop offset="82%"  stop-color={CYAN_GLOW} stop-opacity="0.90"/>
+                                    <stop offset="100%" stop-color={CYAN_LINE} stop-opacity="0.80"/>
                                 </linearGradient>
                                 <filter id="nwGlow" x="-20%" y="-20%" width="140%" height="140%">
-                                    <feGaussianBlur in="SourceGraphic" stdDeviation="8"  result="outerBlur"/>
-                                    <feGaussianBlur in="SourceGraphic" stdDeviation="3"  result="midBlur"/>
-                                    <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="innerBlur"/>
+                                    <feGaussianBlur in="SourceGraphic" stdDeviation="5.5" result="outerBlur"/>
+                                    <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="midBlur"/>
                                     <feMerge>
                                         <feMergeNode in="outerBlur"/>
                                         <feMergeNode in="midBlur"/>
-                                        <feMergeNode in="innerBlur"/>
                                         <feMergeNode in="SourceGraphic"/>
                                     </feMerge>
                                 </filter>
                                 <filter id="nwAreaGlow" x="-10%" y="-10%" width="120%" height="120%">
-                                    <feGaussianBlur stdDeviation="18" result="areaBlur"/>
+                                    <feGaussianBlur stdDeviation="14" result="areaBlur"/>
                                     <feMerge>
                                         <feMergeNode in="areaBlur"/>
                                         <feMergeNode in="SourceGraphic"/>
                                     </feMerge>
                                 </filter>
                                 <filter id="nwDotGlow" x="-50%" y="-50%" width="200%" height="200%">
-                                    <feGaussianBlur stdDeviation="5" result="dotBlur"/>
+                                    <feGaussianBlur stdDeviation="3.5" result="dotBlur"/>
                                     <feMerge>
                                         <feMergeNode in="dotBlur"/>
                                         <feMergeNode in="SourceGraphic"/>
@@ -1827,16 +1842,14 @@
                             {#each nwChart.gridLines as gl}
                                 <line x1="0" y1={gl.y} x2="600" y2={gl.y} stroke="var(--text-muted)" stroke-width="1" opacity="0.06" />
                             {/each}
-                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" filter="url(#nwAreaGlow)" opacity="0.7" />
-                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" />
-                            <path d={nwChart.linePath} fill="none" stroke={CYAN_GLOW} stroke-width="18" stroke-linecap="round" stroke-linejoin="round" filter="url(#nwGlow)" opacity="0.18" />
-                            <path d={nwChart.linePath} fill="none" stroke={CYAN_LINE} stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.30" />
-                            <path d={nwChart.linePath} fill="none" stroke="url(#nwLineGradCyan)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />
-                            <path d={nwChart.linePath} fill="none" stroke="white" stroke-width="1.0" opacity="0.45" stroke-linecap="round" stroke-linejoin="round" />
+                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" filter="url(#nwAreaGlow)" opacity="0.5" />
+                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" opacity="0.8" />
+                            <path d={nwChart.linePath} fill="none" stroke={CYAN_GLOW} stroke-width="10" stroke-linecap="round" stroke-linejoin="round" filter="url(#nwGlow)" opacity="0.14" />
+                            <path d={nwChart.linePath} fill="none" stroke="url(#nwLineGradCyan)" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round" />
+                            <path d={nwChart.linePath} fill="none" stroke="#F0F9FF" stroke-width="0.9" opacity="0.34" stroke-linecap="round" stroke-linejoin="round" />
                             {#if nwChart.endPoint}
-                                <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="16" fill="none" stroke={CYAN_GLOW} stroke-width="1.5" opacity="0.12" filter="url(#nwDotGlow)" class="pulse-dot" />
-                                <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="9" fill="none" stroke={CYAN_LINE} stroke-width="1.2" opacity="0.35" class="pulse-dot" />
-                                <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="4" fill="#CCFBF1" stroke={CYAN_DEEP} stroke-width="2" filter="url(#nwDotGlow)" class="pulse-dot" />
+                                <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="9" fill={CYAN_GLOW} opacity="0.12" filter="url(#nwDotGlow)" />
+                                <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="4.25" fill="#E6FFFB" stroke={CYAN_DEEP} stroke-width="1.6" />
                             {/if}
                             {#each nwChart.monthLabels as ml}
                                 <line x1={ml.x} y1={ml.y - 14} x2={ml.x} y2={ml.y - 10} stroke="var(--text-secondary)" stroke-width="1" opacity="0.3" />
@@ -2118,6 +2131,12 @@
             <div class="flex items-center gap-2">
                 <div class="section-accent-bar"></div>
                 <p class="section-header">Money Flow</p>
+                {#if debugLoadingMode}
+                    <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
+                        style="background: rgba(59, 130, 246, 0.10); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.18);">
+                        Debug loading: {debugLoadingMode}
+                    </span>
+                {/if}
                 {#if periodSummary && periodSummary.income < periodSummary.expenses + sankeySavingsTotal + sankeyPersonalTransferTotal}
                     <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
                         style="background: rgba(251, 191, 36, 0.12); color: var(--warning); border: 1px solid rgba(251, 191, 36, 0.20);">
@@ -2139,23 +2158,31 @@
              bind:this={sankeyTheaterEl}
              on:mousemove={handleTheaterMouseMove}
              on:mouseleave={handleTheaterMouseLeave}>
-            {#if sankeyLoading}
+            {#if showSankeyLoadingStage}
                 <div class="shimmer-overlay"></div>
             {/if}
             <div class="sankey-theater-glow" style="opacity: {sankeyGlowOpacity};"></div>
-            {#if periodSummary}
-                <SankeyChart
-                    income={periodSummary.income}
-                    expenses={periodSummary.expenses}
-                    savingsTransfer={sankeySavingsTotal}
-                    personalTransfer={sankeyPersonalTransferTotal}
-                    ccRepaid={periodSummary.cc_repaid || 0}
-                    categories={sankeyCategoryList.filter(c => !c.isDirectFlow)}
-                    selectedCategory={selectedSankeyCategory}
-                    height={340}
-                    autoHeight={true}
-                    on:select={handleSankeySelect}
-                />
+            {#if showSankeyLoadingStage}
+                <SankeyLoadingStage height={340} />
+            {/if}
+            {#if showSankeyChart}
+                <div class="sankey-chart-shell">
+                    <SankeyChart
+                        income={periodSummary.income}
+                        expenses={periodSummary.expenses}
+                        savingsTransfer={sankeySavingsTotal}
+                        personalTransfer={sankeyPersonalTransferTotal}
+                        ccRepaid={periodSummary.cc_repaid || 0}
+                        categories={sankeyCategoryList.filter(c => !c.isDirectFlow)}
+                        selectedCategory={selectedSankeyCategory}
+                        height={340}
+                        autoHeight={true}
+                        on:select={handleSankeySelect}
+                    />
+                </div>
+            {/if}
+            {#if showLiveSankeySyncState}
+                <SankeyLoadingStage mode="sync" height={340} eyebrow="Syncing money flow" />
             {/if}
         </div>
 
@@ -2273,34 +2300,32 @@
                                         <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" on:click|stopPropagation>
                                             {#if drillPendingCategoryChange?.txId === tx.original_id}
                                                 <!-- Step 2: One-off vs Always confirmation -->
-                                                <div style="padding: 0.75rem 0.875rem 0.875rem;">
+                                                <div class="tx-cat-apply-panel">
                                                     <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
-                                                    <p class="text-[12px] font-semibold mb-3" style="color: var(--text-primary)">
-                                                        <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[drillPendingCategoryChange.category] || 'var(--text-muted)'}; vertical-align: middle;">
+                                                    <p class="tx-cat-apply-target" style="color: var(--text-primary)">
+                                                        <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[drillPendingCategoryChange.category] || 'var(--text-muted)'};">
                                                             {CATEGORY_ICONS[drillPendingCategoryChange.category] || 'label'}
                                                         </span>
-                                                        {drillPendingCategoryChange.category}
+                                                        <span>{drillPendingCategoryChange.category}</span>
                                                     </p>
-                                                    <div style="display: flex; flex-direction: column; gap: 0.375rem;">
+                                                    <div class="tx-cat-apply-choice-list">
                                                         <button
-                                                            class="txn-filter-option"
-                                                            style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                            class="tx-cat-apply-choice"
                                                             on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, false)}>
-                                                            <span class="txn-filter-option-label">
-                                                                <span class="material-symbols-outlined text-[15px]" style="color: var(--accent)">all_inclusive</span>
-                                                                <span style="font-weight: 600;">Always for this merchant</span>
+                                                            <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--accent)">all_inclusive</span>
+                                                            <span class="tx-cat-apply-choice-body">
+                                                                <span class="tx-cat-apply-choice-title">Always</span>
+                                                                <span class="tx-cat-apply-choice-note">Rule + similar</span>
                                                             </span>
-                                                            <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">updates similar transactions</span>
                                                         </button>
                                                         <button
-                                                            class="txn-filter-option"
-                                                            style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                            class="tx-cat-apply-choice"
                                                             on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, true)}>
-                                                            <span class="txn-filter-option-label">
-                                                                <span class="material-symbols-outlined text-[15px]" style="color: var(--text-secondary)">looks_one</span>
-                                                                <span style="font-weight: 600;">Just this transaction</span>
+                                                            <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--text-secondary)">looks_one</span>
+                                                            <span class="tx-cat-apply-choice-body">
+                                                                <span class="tx-cat-apply-choice-title">Just once</span>
+                                                                <span class="tx-cat-apply-choice-note">Only this tx</span>
                                                             </span>
-                                                            <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">no rule created</span>
                                                         </button>
                                                     </div>
                                                     <button

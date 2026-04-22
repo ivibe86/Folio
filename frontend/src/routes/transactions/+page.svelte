@@ -853,34 +853,32 @@
                                     <div class="txn-filter-dropdown tx-cat-dropdown" on:click|stopPropagation>
                                         {#if pendingCategoryChange?.txId === tx.original_id}
                                             <!-- Step 2: One-off vs Always confirmation -->
-                                            <div style="padding: 0.75rem 0.875rem 0.875rem;">
+                                            <div class="tx-cat-apply-panel">
                                                 <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
-                                                <p class="text-[12px] font-semibold mb-3" style="color: var(--text-primary)">
-                                                    <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[pendingCategoryChange.category] || 'var(--text-muted)'}; vertical-align: middle;">
+                                                <p class="tx-cat-apply-target" style="color: var(--text-primary)">
+                                                    <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[pendingCategoryChange.category] || 'var(--text-muted)'};">
                                                         {CATEGORY_ICONS[pendingCategoryChange.category] || 'label'}
                                                     </span>
-                                                    {pendingCategoryChange.category}
+                                                    <span>{pendingCategoryChange.category}</span>
                                                 </p>
-                                                <div style="display: flex; flex-direction: column; gap: 0.375rem;">
+                                                <div class="tx-cat-apply-choice-list">
                                                     <button
-                                                        class="txn-filter-option"
-                                                        style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                        class="tx-cat-apply-choice"
                                                         on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, false)}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined text-[15px]" style="color: var(--accent)">all_inclusive</span>
-                                                            <span style="font-weight: 600;">Always for this merchant</span>
+                                                        <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--accent)">all_inclusive</span>
+                                                        <span class="tx-cat-apply-choice-body">
+                                                            <span class="tx-cat-apply-choice-title">Always</span>
+                                                            <span class="tx-cat-apply-choice-note">Rule + similar</span>
                                                         </span>
-                                                        <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">updates similar transactions</span>
                                                     </button>
                                                     <button
-                                                        class="txn-filter-option"
-                                                        style="border: 1px solid var(--card-border); border-radius: 10px; padding: 0.5rem 0.75rem;"
+                                                        class="tx-cat-apply-choice"
                                                         on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, true)}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined text-[15px]" style="color: var(--text-secondary)">looks_one</span>
-                                                            <span style="font-weight: 600;">Just this transaction</span>
+                                                        <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--text-secondary)">looks_one</span>
+                                                        <span class="tx-cat-apply-choice-body">
+                                                            <span class="tx-cat-apply-choice-title">Just once</span>
+                                                            <span class="tx-cat-apply-choice-note">Only this tx</span>
                                                         </span>
-                                                        <span class="text-[9px]" style="color: var(--text-muted); white-space: nowrap;">no rule created</span>
                                                     </button>
                                                 </div>
                                                 <button

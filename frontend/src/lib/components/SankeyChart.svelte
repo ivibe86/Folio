@@ -13,6 +13,7 @@ export let categories = [];
 export let selectedCategory = null;
 export let height = 400;
 export let autoHeight = true;
+export let syncOverlay = false;
 
 const dispatch = createEventDispatcher();
 
@@ -458,18 +459,31 @@ function getLinkOpacity(link) {
     const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
 
+    let opacity;
+
     if (selectedCategory) {
-        if (resolvedCategory === selectedCategory) return 0.75;
+        if (resolvedCategory === selectedCategory) {
+            opacity = 0.75;
+        } else if ((sourceNode?.id === 'income' || sourceNode?.id === 'from_balance') && targetNode?.id === 'expenses') {
         // Dim source→expenses trunk links (from income OR from_balance)
-        if ((sourceNode?.id === 'income' || sourceNode?.id === 'from_balance') && targetNode?.id === 'expenses') {
             const isExpenseCat = nodes.some(n => n.id === selectedCategory && n.id !== 'savings_transfer' && n.id !== 'personal_transfer' && n.id !== 'from_balance' && n.id !== 'to_balance');
-            if (isExpenseCat) return 0.15;
+            opacity = isExpenseCat ? 0.15 : 0.06;
+        } else if (sourceNode?.id === 'expenses' && targetNode?.id === selectedCategory) {
+            opacity = 0.75;
+        } else {
+            opacity = 0.06;
         }
-        if (sourceNode?.id === 'expenses' && targetNode?.id === selectedCategory) return 0.75;
-        return 0.06;
+    } else if (hoveredLink) {
+        opacity = link === hoveredLink ? 0.75 : 0.18;
+    } else {
+        opacity = 0.50;
     }
-    if (hoveredLink) return link === hoveredLink ? 0.75 : 0.18;
-    return 0.50;
+
+    if (syncOverlay) {
+        return opacity * 0.42;
+    }
+
+    return opacity;
 }
 
 function getLinkStrokeWidth(link) {
@@ -503,38 +517,111 @@ function getLinkGradientId(link) {
 }
 
 function getLinkSourceColor(link) {
+    if (syncOverlay) return '#6f8098';
     const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
     return sourceNode?.color || '#94A3B8';
 }
 
 function getLinkTargetColor(link) {
+    if (syncOverlay) return '#c2cfdf';
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
     return targetNode?.color || '#94A3B8';
 }
 
+function getNodeRenderColor(node) {
+    if (!syncOverlay) return node.color;
+
+    if (node.id === 'income' || node.id === 'from_balance') return '#7f8ea2';
+    if (node.id === 'expenses') return '#9fb1c8';
+    if (node.id === 'to_balance') return '#95a8bb';
+    return '#b7c4d5';
+}
+
 function getNodeOpacity(node) {
     if (isHiddenNode(node)) return 0;
-    if (!selectedCategory) return 1;
-    if (node.id === selectedCategory) return 1;
-    if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') return 1;
-    if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') return 1;
-    if (node.id === 'income' || node.id === 'from_balance' || node.id === 'to_balance') return 0.4;
-    if (node.id === 'expenses') {
+    let opacity = 1;
+
+    if (!selectedCategory) {
+        opacity = 1;
+    } else if (node.id === selectedCategory) {
+        opacity = 1;
+    } else if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') {
+        opacity = 1;
+    } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
+        opacity = 1;
+    } else if (node.id === 'income' || node.id === 'from_balance' || node.id === 'to_balance') {
+        opacity = 0.4;
+    } else if (node.id === 'expenses') {
         const isExpenseCat = nodes.some(n => n.id === selectedCategory && n.id !== 'savings_transfer' && n.id !== 'personal_transfer' && n.id !== 'income' && n.id !== 'expenses' && n.id !== 'from_balance' && n.id !== 'to_balance');
-        if (isExpenseCat) return 0.4;
-        return 0.1;
+        opacity = isExpenseCat ? 0.4 : 0.1;
+    } else {
+        opacity = 0.1;
     }
-    return 0.1;
+
+    if (syncOverlay) {
+        return opacity * 0.52;
+    }
+
+    return opacity;
 }
 
 function getNodeLabelOpacity(node) {
     if (isHiddenNode(node)) return 0;
-    if (!selectedCategory) return 1;
-    if (node.id === selectedCategory) return 1;
-    if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') return 1;
-    if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') return 1;
-    if (node.id === 'income' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') return 0.4;
-    return 0.1;
+    let opacity = 1;
+
+    if (!selectedCategory) {
+        opacity = 1;
+    } else if (node.id === selectedCategory) {
+        opacity = 1;
+    } else if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') {
+        opacity = 1;
+    } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
+        opacity = 1;
+    } else if (node.id === 'income' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') {
+        opacity = 0.4;
+    } else {
+        opacity = 0.1;
+    }
+
+    if (syncOverlay) {
+        return opacity * 0.66;
+    }
+
+    return opacity;
+}
+
+function getNodeById(id) {
+    return nodes.find(node => node.id === id);
+}
+
+let maxLinkValue = 1;
+
+$: maxLinkValue = links.length > 0
+    ? Math.max(...links.map(link => link.value || 0), 1)
+    : 1;
+
+function getSyncMaskWidth(link) {
+    return Math.max(getLinkStrokeWidth(link) + 5, 8);
+}
+
+function getSyncMaskOpacity(link) {
+    const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
+    const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
+    const ratio = Math.min((link.value || 0) / maxLinkValue, 1);
+    let opacity = 0.24 + ratio * 0.28;
+
+    if (targetNode?.id === 'expenses') opacity += 0.06;
+    if (sourceNode?.id === 'expenses') opacity += 0.02;
+    if (targetNode?.id === 'to_balance') opacity += 0.03;
+
+    return Math.min(opacity, 1);
+}
+
+function getSyncNodeMaskOpacity(node) {
+    if (node.id === 'expenses') return 0.18;
+    if (node.id === 'income' || node.id === 'from_balance' || node.id === 'to_balance') return 0.62;
+    if (node.id === 'savings_transfer' || node.id === 'personal_transfer') return 0.5;
+    return 0.4;
 }
 
 function isLeafNode(node) {
@@ -726,6 +813,103 @@ onMount(() => {
                         </linearGradient>
                     {/if}
                 {/each}
+                <filter id="syncGasBlur" x="-40%" y="-60%" width="180%" height="220%">
+                    <feGaussianBlur stdDeviation="12" />
+                </filter>
+                <linearGradient id="syncGasStreamA" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0" />
+                    <stop offset="24%" stop-color="#2dd4bf" stop-opacity="1" />
+                    <stop offset="48%" stop-color="#67e8f9" stop-opacity="1" />
+                    <stop offset="68%" stop-color="#e0f2fe" stop-opacity="1" />
+                    <stop offset="82%" stop-color="#818cf8" stop-opacity="1" />
+                    <stop offset="100%" stop-color="#bae6fd" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="syncGasStreamB" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#bae6fd" stop-opacity="0" />
+                    <stop offset="28%" stop-color="#bae6fd" stop-opacity="1" />
+                    <stop offset="52%" stop-color="#38bdf8" stop-opacity="1" />
+                    <stop offset="72%" stop-color="#818cf8" stop-opacity="1" />
+                    <stop offset="86%" stop-color="#c4b5fd" stop-opacity="1" />
+                    <stop offset="100%" stop-color="#818cf8" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="syncGasStreamC" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#99f6e4" stop-opacity="0" />
+                    <stop offset="24%" stop-color="#2dd4bf" stop-opacity="1" />
+                    <stop offset="46%" stop-color="#a5f3fc" stop-opacity="1" />
+                    <stop offset="56%" stop-color="#ffffff" stop-opacity="1" />
+                    <stop offset="74%" stop-color="#c4b5fd" stop-opacity="1" />
+                    <stop offset="88%" stop-color="#818cf8" stop-opacity="1" />
+                    <stop offset="100%" stop-color="#c4b5fd" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="syncGasStreamD" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#f0abfc" stop-opacity="0" />
+                    <stop offset="22%" stop-color="#c084fc" stop-opacity="1" />
+                    <stop offset="48%" stop-color="#93c5fd" stop-opacity="1" />
+                    <stop offset="68%" stop-color="#67e8f9" stop-opacity="1" />
+                    <stop offset="82%" stop-color="#e0e7ff" stop-opacity="1" />
+                    <stop offset="100%" stop-color="#67e8f9" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="syncGasStreamE" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#5eead4" stop-opacity="0" />
+                    <stop offset="24%" stop-color="#22d3ee" stop-opacity="1" />
+                    <stop offset="48%" stop-color="#e0f2fe" stop-opacity="1" />
+                    <stop offset="66%" stop-color="#67e8f9" stop-opacity="1" />
+                    <stop offset="80%" stop-color="#818cf8" stop-opacity="1" />
+                    <stop offset="100%" stop-color="#818cf8" stop-opacity="0" />
+                </linearGradient>
+                {#if syncOverlay}
+                    <mask id="syncTopologyMask" maskUnits="userSpaceOnUse" x="0" y="0" width={svgWidth} height={computedHeight}>
+                        <rect x="0" y="0" width={svgWidth} height={computedHeight} fill="black" />
+                        <g>
+                            {#each links as link (link.id + '_sync-mask')}
+                                {#if !isHiddenLink(link)}
+                                    <path
+                                        d={linkPath(link)}
+                                        fill="none"
+                                        stroke="white"
+                                        stroke-linecap="butt"
+                                        stroke-linejoin="round"
+                                        stroke-width={getSyncMaskWidth(link)}
+                                        stroke-opacity={getSyncMaskOpacity(link)}
+                                    />
+                                {/if}
+                            {/each}
+                            {#each nodes as node (node.id + '_sync-mask')}
+                                {#if !isHiddenNode(node) && !node.isGhost}
+                                    <rect
+                                        x={node.x0 - 1}
+                                        y={node.y0 - 1}
+                                        width={node.x1 - node.x0 + 2}
+                                        height={Math.max(node.y1 - node.y0, 2) + 2}
+                                        rx="8"
+                                        fill="white"
+                                        fill-opacity={getSyncNodeMaskOpacity(node)}
+                                    />
+                                {/if}
+                            {/each}
+                            {#if ghostFlowPath && ghostNode}
+                                <path
+                                    d={ghostFlowPath.d}
+                                    fill="none"
+                                    stroke="white"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                    stroke-width="18"
+                                    stroke-opacity="0.38"
+                                />
+                                <rect
+                                    x={ghostNode.x0 - 1}
+                                    y={ghostNode.y0 - 1}
+                                    width={ghostNode.x1 - ghostNode.x0 + 2}
+                                    height={ghostNode.y1 - ghostNode.y0 + 2}
+                                    rx="8"
+                                    fill="white"
+                                    fill-opacity="0.44"
+                                />
+                            {/if}
+                        </g>
+                    </mask>
+                {/if}
             </defs>
 
             <!-- ── Dark theater background ── -->
@@ -735,7 +919,7 @@ onMount(() => {
 
             <!-- ── Flow links: glow underlayer (bloom effect) ── -->
             <!-- Single CSS filter on parent <g> instead of per-element SVG filter -->
-            <g class="sankey-links-glow" style="pointer-events: none; filter: blur(1.2px);">
+            <g class="sankey-links-glow" class:sankey-links-glow--sync={syncOverlay} style="pointer-events: none;">
                 {#each links as link, i (link.id + '_glow_' + selectedCategory)}
                     {#if !isHiddenLink(link)}
                         <path
@@ -751,7 +935,7 @@ onMount(() => {
             </g>
 
             <!-- ── Flow links: main ribbons ── -->
-            <g class="sankey-links">
+            <g class="sankey-links" class:sankey-links--sync={syncOverlay}>
                 {#each links as link, i (link.id + '_' + selectedCategory)}
                     {#if !isHiddenLink(link)}
                         <path
@@ -772,9 +956,86 @@ onMount(() => {
                 {/each}
             </g>
 
+            {#if syncOverlay}
+                <g class="sankey-live-sync" aria-hidden="true">
+                    <g class="sankey-live-sync__topology" mask="url(#syncTopologyMask)">
+                        <rect
+                            x="0"
+                            y="0"
+                            width={svgWidth}
+                            height={computedHeight}
+                            class="sankey-live-sync__topology-wash"
+                        />
+                            <rect
+                                x={-svgWidth * 0.18}
+                                y={computedHeight * 0.17}
+                                width={svgWidth * 0.96}
+                                height={computedHeight * 0.115}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--upper"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.14}
+                            y={computedHeight * 0.44}
+                                width={svgWidth * 0.92}
+                                height={computedHeight * 0.12}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--lower"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.12}
+                            y={computedHeight * 0.31}
+                                width={svgWidth * 0.9}
+                                height={computedHeight * 0.11}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--accent"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.16}
+                            y={computedHeight * 0.24}
+                                width={svgWidth * 0.98}
+                                height={computedHeight * 0.09}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--shear"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.10}
+                            y={computedHeight * 0.36}
+                                width={svgWidth * 0.92}
+                                height={computedHeight * 0.085}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--undertow"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.20}
+                            y={computedHeight * 0.22}
+                                width={svgWidth * 1.08}
+                                height={computedHeight * 0.11}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--violet-drift"
+                                filter="url(#syncGasBlur)"
+                            />
+                        <rect
+                            x={-svgWidth * 0.18}
+                            y={computedHeight * 0.34}
+                                width={svgWidth * 1.04}
+                                height={computedHeight * 0.095}
+                                rx={999}
+                                class="sankey-live-sync__stream sankey-live-sync__stream--teal-drift"
+                                filter="url(#syncGasBlur)"
+                            />
+                    </g>
+                </g>
+            {/if}
+
             <!-- ── Animated flow pulse overlay ── -->
             {#if animateIn}
-                <g class="sankey-flow-overlay" style="pointer-events: none;">
+                <g class="sankey-flow-overlay" class:sankey-flow-overlay--sync={syncOverlay} style="pointer-events: none;">
                     {#each links as link, i (link.id + '_pulse')}
                         {#if !isHiddenLink(link)}
                             <path
@@ -791,7 +1052,7 @@ onMount(() => {
             {/if}
 
             <!-- ── Nodes with luminous glow ── -->
-            <g class="sankey-nodes">
+            <g class="sankey-nodes" class:sankey-nodes--sync={syncOverlay}>
                 {#each nodes as node (node.id + '_' + selectedCategory)}
                     {#if !isHiddenNode(node) && !node.isGhost}
                         <!-- Outer ambient glow — filter only on hover/selected for perf -->
@@ -799,7 +1060,7 @@ onMount(() => {
                             x={node.x0 - 5} y={node.y0 - 5}
                             width={node.x1 - node.x0 + 10}
                             height={Math.max(node.y1 - node.y0, 2) + 10}
-                            fill={node.color} rx="12"
+                            fill={getNodeRenderColor(node)} rx="12"
                             opacity={getNodeOpacity(node) * 0.18}
                             filter={(selectedCategory === getClickCategory(node) || (hoveredLink && (typeof hoveredLink.target === 'object' ? hoveredLink.target.id : '') === node.id)) ? 'url(#nodeGlow)' : 'none'}
                             class="sankey-node-halo"
@@ -811,7 +1072,7 @@ onMount(() => {
                             width={node.x1 - node.x0 + 4}
                             height={Math.max(node.y1 - node.y0, 2) + 4}
                             fill="none" rx="8"
-                            stroke={node.color}
+                            stroke={getNodeRenderColor(node)}
                             stroke-width="1"
                             stroke-opacity={getNodeOpacity(node) * 0.35}
                             class="sankey-node-ring"
@@ -822,9 +1083,9 @@ onMount(() => {
                             x={node.x0} y={node.y0}
                             width={node.x1 - node.x0}
                             height={Math.max(node.y1 - node.y0, 2)}
-                            fill={node.color} rx="6"
+                            fill={getNodeRenderColor(node)} rx="6"
                             opacity={getNodeOpacity(node) * 0.92}
-                            stroke={node.color}
+                            stroke={getNodeRenderColor(node)}
                             stroke-width="1"
                             stroke-opacity={getNodeOpacity(node) * 0.50}
                             class="sankey-node"
@@ -852,7 +1113,7 @@ onMount(() => {
                                 cx={node.x1}
                                 cy={(node.y0 + node.y1) / 2}
                                 r="3.5"
-                                fill={node.color}
+                                fill={getNodeRenderColor(node)}
                                 class="sankey-pulse-dot"
                                 opacity={getNodeOpacity(node)}
                             />
@@ -877,11 +1138,11 @@ onMount(() => {
 
             <!-- ── Ghost Flow Layer (CC Repaid) ── -->
             {#if ghostFlowPath && ghostNode}
-                <g class="ghost-flow-layer" opacity="0.6">
+                <g class="ghost-flow-layer" class:ghost-flow-layer--sync={syncOverlay} opacity="0.6">
                     <defs>
                         <linearGradient id="ghost-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.45" />
-                            <stop offset="100%" stop-color="#f472b6" stop-opacity="0.55" />
+                            <stop offset="0%" stop-color={syncOverlay ? '#6f8098' : '#a78bfa'} stop-opacity={syncOverlay ? '0.2' : '0.45'} />
+                            <stop offset="100%" stop-color={syncOverlay ? '#bfcbdb' : '#f472b6'} stop-opacity={syncOverlay ? '0.28' : '0.55'} />
                         </linearGradient>
                     </defs>
 
@@ -890,10 +1151,10 @@ onMount(() => {
                         d={ghostFlowPath.d}
                         fill="url(#ghost-grad)"
                         fill-opacity="0.16"
-                        stroke="#f472b6"
+                        stroke={syncOverlay ? '#b4c2d3' : '#f472b6'}
                         stroke-width="1.5"
                         stroke-dasharray="8 4"
-                        stroke-opacity="0.6"
+                        stroke-opacity={syncOverlay ? '0.34' : '0.6'}
                     >
                         <title>CC Repaid: {formatCurrency(ghostNode.value)}</title>
                     </path>
@@ -905,9 +1166,9 @@ onMount(() => {
                         width={ghostNode.x1 - ghostNode.x0}
                         height={ghostNode.y1 - ghostNode.y0}
                         rx="6"
-                        fill="#f472b6"
-                        fill-opacity="0.30"
-                        stroke="#f472b6"
+                        fill={syncOverlay ? '#bcc8d7' : '#f472b6'}
+                        fill-opacity={syncOverlay ? '0.16' : '0.30'}
+                        stroke={syncOverlay ? '#bcc8d7' : '#f472b6'}
                         stroke-width="1.5"
                         stroke-dasharray="6 3"
                         on:mouseenter={(e) => {
@@ -929,8 +1190,8 @@ onMount(() => {
                         y={(ghostNode.y0 + ghostNode.y1) / 2}
                         dy="0.35em"
                         text-anchor="end"
-                        fill="#f472b6"
-                        opacity="0.85"
+                        fill={syncOverlay ? '#c5d0de' : '#f472b6'}
+                        opacity={syncOverlay ? '0.54' : '0.85'}
                         style="font-style: italic;"
                     >
                         <tspan font-family="'Inter', system-ui, sans-serif" font-size="11.5" font-weight="600">CC Repaid</tspan>
@@ -981,11 +1242,198 @@ onMount(() => {
         animation: flowDash 2.5s ease-in-out forwards;
     }
 
+    .sankey-links-glow {
+        filter: blur(1.2px);
+    }
+
+    .sankey-links-glow--sync {
+        opacity: 0.18;
+        filter: blur(1.6px) saturate(0.7);
+    }
+
+    .sankey-links--sync {
+        filter: saturate(0.58) brightness(0.82) contrast(0.94);
+    }
+
+    .sankey-flow-overlay--sync {
+        opacity: 0.12;
+    }
+
+    .sankey-nodes--sync {
+        filter: saturate(0.72) brightness(0.86);
+    }
+
+    .ghost-flow-layer--sync {
+        opacity: 0.32;
+    }
+
+    .sankey-live-sync {
+        pointer-events: none;
+        mix-blend-mode: screen;
+        isolation: isolate;
+    }
+
+    .sankey-live-sync__topology {
+        pointer-events: none;
+    }
+
+    .sankey-live-sync__topology-wash {
+        fill: rgba(6, 12, 24, 0.006);
+    }
+
+    .sankey-live-sync__stream {
+        transform-box: fill-box;
+        transform-origin: center;
+        will-change: transform, opacity;
+    }
+
+    .sankey-live-sync__stream--upper {
+        fill: url(#syncGasStreamA);
+        opacity: 1;
+        animation: syncGasStreamA 18s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--lower {
+        fill: url(#syncGasStreamB);
+        opacity: 0.9;
+        animation: syncGasStreamB 20s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--accent {
+        fill: url(#syncGasStreamC);
+        opacity: 0.96;
+        animation: syncGasStreamC 16s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--shear {
+        fill: url(#syncGasStreamD);
+        opacity: 0.78;
+        animation: syncGasStreamShear 22s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--undertow {
+        fill: url(#syncGasStreamB);
+        opacity: 0.62;
+        animation: syncGasStreamUndertow 24s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--violet-drift {
+        fill: url(#syncGasStreamD);
+        opacity: 0.84;
+        animation: syncGasStreamViolet 21s ease-in-out infinite;
+    }
+
+    .sankey-live-sync__stream--teal-drift {
+        fill: url(#syncGasStreamE);
+        opacity: 0.9;
+        animation: syncGasStreamTeal 19s ease-in-out infinite;
+    }
+
     @keyframes flowDash {
         0%   { stroke-dashoffset: 2000; opacity: 0; }
         5%   { opacity: 0.5; }
         80%  { opacity: 0.3; }
         100% { stroke-dashoffset: 0; opacity: 0; }
+    }
+
+    @keyframes syncGasStreamA {
+        0% {
+            transform: translate3d(-4%, -3%, 0) rotate(-6deg) scaleX(0.96) scaleY(0.9);
+            opacity: 0.34;
+        }
+        50% {
+            transform: translate3d(62%, 1%, 0) rotate(-2deg) scaleX(1.04) scaleY(1.08);
+            opacity: 0.88;
+        }
+        100% {
+            transform: translate3d(132%, 4%, 0) rotate(3deg) scaleX(1.12) scaleY(0.98);
+            opacity: 0.4;
+        }
+    }
+
+    @keyframes syncGasStreamC {
+        0% {
+            transform: translate3d(-6%, -2%, 0) rotate(-4deg) scaleX(0.92) scaleY(0.94);
+            opacity: 0.18;
+        }
+        32% {
+            opacity: 0.96;
+        }
+        100% {
+            transform: translate3d(146%, 3%, 0) rotate(4deg) scaleX(1.12) scaleY(1.08);
+            opacity: 0.22;
+        }
+    }
+
+    @keyframes syncGasStreamB {
+        0% {
+            transform: translate3d(-5%, 4%, 0) rotate(6deg) scaleX(0.94) scaleY(0.96);
+            opacity: 0.24;
+        }
+        48% {
+            transform: translate3d(68%, -2%, 0) rotate(1deg) scaleX(1.04) scaleY(1.1);
+            opacity: 0.82;
+        }
+        100% {
+            transform: translate3d(136%, -4%, 0) rotate(-4deg) scaleX(1.1) scaleY(0.98);
+            opacity: 0.34;
+        }
+    }
+
+    @keyframes syncGasStreamShear {
+        0% {
+            transform: translate3d(-8%, -3%, 0) rotate(-8deg) scaleX(0.9) scaleY(0.92);
+            opacity: 0.16;
+        }
+        38% {
+            opacity: 0.74;
+        }
+        100% {
+            transform: translate3d(138%, 5%, 0) rotate(6deg) scaleX(1.12) scaleY(1.08);
+            opacity: 0.22;
+        }
+    }
+
+    @keyframes syncGasStreamUndertow {
+        0% {
+            transform: translate3d(-7%, 3%, 0) rotate(7deg) scaleX(0.92) scaleY(0.9);
+            opacity: 0.12;
+        }
+        46% {
+            opacity: 0.58;
+        }
+        100% {
+            transform: translate3d(126%, -5%, 0) rotate(-6deg) scaleX(1.08) scaleY(1.04);
+            opacity: 0.18;
+        }
+    }
+
+    @keyframes syncGasStreamViolet {
+        0% {
+            transform: translate3d(-6%, -2%, 0) rotate(-5deg) scaleX(0.92) scaleY(0.96);
+            opacity: 0.14;
+        }
+        44% {
+            opacity: 0.78;
+        }
+        100% {
+            transform: translate3d(138%, 3%, 0) rotate(3deg) scaleX(1.1) scaleY(1.06);
+            opacity: 0.18;
+        }
+    }
+
+    @keyframes syncGasStreamTeal {
+        0% {
+            transform: translate3d(-5%, 2%, 0) rotate(4deg) scaleX(0.94) scaleY(0.94);
+            opacity: 0.18;
+        }
+        52% {
+            opacity: 0.84;
+        }
+        100% {
+            transform: translate3d(132%, -3%, 0) rotate(-3deg) scaleX(1.08) scaleY(1.08);
+            opacity: 0.22;
+        }
     }
 
     /* ── Pulsing endpoint dot ── */
@@ -1165,5 +1613,11 @@ onMount(() => {
     @keyframes ghostPulse {
         0%   { stroke-opacity: 0.4; fill-opacity: 0.10; }
         100% { stroke-opacity: 0.7; fill-opacity: 0.22; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .sankey-live-sync__stream {
+            animation: none;
+        }
     }
 </style>
