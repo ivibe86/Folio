@@ -16,12 +16,14 @@
     let currentSyncKey = null;
     let backendSyncSeen = false;
     let noBackendSyncSeenCount = 0;
-    let appConfig = {
+let appConfig = {
         demoMode: false,
         manualSyncEnabled: true,
         bankLinkingEnabled: true,
         demoPersistence: 'persistent'
     };
+
+    $: isDashboardRoute = $page.url.pathname === '/';
 
     /* —— Navigation —— */
     const navPrimary = [
@@ -561,27 +563,31 @@
 {/if}
 
 <!-- Mobile top bar -->
-<div class="md:hidden fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14"
-     style="background: var(--sidebar-bg); backdrop-filter: blur(20px); border-bottom: 1px solid var(--sidebar-border);">
-    <button on:click={() => mobileMenuOpen = !mobileMenuOpen} class="p-1.5 rounded-lg"
-            style="color: var(--sidebar-text-active)">
-        <span class="material-symbols-outlined">{mobileMenuOpen ? 'close' : 'menu'}</span>
-    </button>
-    <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
-        Folio
-    </span>
-    {#if appConfig.manualSyncEnabled}
-        <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
+{#if !isDashboardRoute}
+    <div class="md:hidden fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14"
+         style="background: var(--sidebar-bg); backdrop-filter: blur(20px); border-bottom: 1px solid var(--sidebar-border);">
+        <button on:click={() => mobileMenuOpen = !mobileMenuOpen} class="p-1.5 rounded-lg"
                 style="color: var(--sidebar-text-active)">
-            <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
+            <span class="material-symbols-outlined">{mobileMenuOpen ? 'close' : 'menu'}</span>
         </button>
-    {:else}
-        <span class="mobile-topbar-spacer" aria-hidden="true"></span>
-    {/if}
-</div>
+        <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
+            Folio
+        </span>
+        {#if appConfig.manualSyncEnabled}
+            <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
+                    style="color: var(--sidebar-text-active)">
+                <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
+            </button>
+        {:else}
+            <span class="mobile-topbar-spacer" aria-hidden="true"></span>
+        {/if}
+    </div>
+{/if}
 
 <!-- Main content -->
-<main class="md:ml-[var(--rail-width)] pt-14 md:pt-0 min-h-screen transition-all duration-300 relative z-[1]">
+<main class="md:ml-[var(--rail-width)] min-h-screen transition-all duration-300 relative z-[1]"
+      class:pt-14={!isDashboardRoute}
+      class:pt-0={isDashboardRoute}>
     <div class="max-w-[1800px] mx-auto px-4 md:px-8 py-8">
         <slot />
     </div>
