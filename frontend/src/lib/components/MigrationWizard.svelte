@@ -17,7 +17,7 @@
 
     let preview = null;     // analyze_migration response
     let userMappings = [];  // [{teller_account_id, sf_account_id (null=skip)}]
-    let deactivateTeller = true;
+    let deactivateTeller = false;
     let result = null;      // execute_migration response
 
     export function show() {
@@ -27,7 +27,7 @@
         preview = null;
         userMappings = [];
         result = null;
-        deactivateTeller = true;
+        deactivateTeller = false;
         loadPreview();
     }
 
@@ -164,8 +164,8 @@
                     {:else if preview}
                         <p class="mw-intro">
                             This wizard will deduplicate transactions in the overlap period,
-                            preserve your full Teller history, and optionally disable Teller
-                            so SimpleFIN takes over going forward.
+                            preserve your full Teller history, and optionally disable all
+                            Teller connections so SimpleFIN takes over going forward.
                         </p>
 
                         <div class="mw-stat-grid">
@@ -264,11 +264,14 @@
 
                     <label class="mw-checkbox-row">
                         <input type="checkbox" bind:checked={deactivateTeller} />
-                        <span>Disable Teller after migration ({preview.estimates?.total_teller_enrollments ?? 0} enrollment{preview.estimates?.total_teller_enrollments !== 1 ? 's' : ''})</span>
+                        <span>Disable all Teller connections after migration ({preview.estimates?.total_teller_enrollments ?? 0} enrollment{preview.estimates?.total_teller_enrollments !== 1 ? 's' : ''})</span>
                     </label>
+                    <div class="mw-notice mw-warn">
+                        This turns off Teller for all active Teller profiles in Folio. Only use it after all household Teller accounts have been added and any desired migrations are complete.
+                    </div>
                     {#if !deactivateTeller}
                         <div class="mw-notice mw-warn">
-                            Teller will keep syncing. On the next Teller sync, previously deduplicated transactions may reappear.
+                            Teller will keep syncing. On the next Teller sync, previously deduplicated transactions may reappear. Disable Teller as soon as you finish migrating all accounts.
                         </div>
                     {/if}
 

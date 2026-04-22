@@ -4,7 +4,7 @@
     import { page } from '$app/stores';
     import { onMount } from 'svelte';
     import { api, invalidateCache } from '$lib/api.js';
-    import { activeProfile } from '$lib/stores/profileStore.js';
+    import { activeProfile, loadProfiles } from '$lib/stores/profileStore.js';
     import { formatCurrency, formatDate } from '$lib/utils.js';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
     import SimpleFINConnect from '$lib/components/SimpleFINConnect.svelte';
@@ -77,7 +77,51 @@
         demoMode: false,
         bankLinkingEnabled: true,
         manualSyncEnabled: true,
-        demoPersistence: 'persistent'
+        demoPersistence: 'persistent',
+        localLlmEnabled: false,
+        localLlmProvider: 'anthropic',
+        memoryTier: '16gb',
+        localAiProfile: 'balanced',
+        lowPowerMode: false,
+        expertMode: false,
+        selectedCategorizeModel: '',
+        selectedCopilotModel: ''
+    };
+    let localLlmCatalog = {
+        tiers: [],
+        models: [],
+        recommendedDefaults: {},
+        presets: {},
+        expertModeAvailable: true,
+    };
+    let localLlmStatus = {
+        provider: 'anthropic',
+        ollamaReachable: false,
+        memoryTier: '16gb',
+        memoryLabel: '16 GB',
+        ramGb: null,
+        installedModels: [],
+        selectedCategorizeModel: '',
+        selectedCopilotModel: '',
+        preset: 'balanced',
+        lowPowerMode: false,
+        expertMode: false,
+        categorizeBatchSize: 25,
+        interBatchDelayMs: 600,
+    };
+    let localLlmLoading = false;
+    let localLlmSaving = false;
+    let localLlmInstallingModel = '';
+    let localLlmError = '';
+    let localLlmForm = {
+        llm_provider: 'anthropic',
+        preset: 'balanced',
+        categorize_model: '',
+        copilot_model: '',
+        low_power_mode: false,
+        expert_mode: false,
+        categorize_batch_size: 25,
+        inter_batch_delay_ms: 600,
     };
 
     // ── Profile reactivity ───────────────────────────────────────
@@ -196,6 +240,9 @@
         selectedHistoryId = visibleHistory[0].id;
     }
     $: selectedHistory = visibleHistory.find((item) => item.id === selectedHistoryId) || null;
+    $: localLlmPresetOptions = Object.entries(localLlmCatalog?.presets || {}).map(([key, value]) => ({ key, ...value }));
+    $: localLlmTierGroups = Array.isArray(localLlmCatalog?.tiers) ? localLlmCatalog.tiers : [];
+    $: localLlmInstalledCount = Array.isArray(localLlmStatus?.installedModels) ? localLlmStatus.installedModels.length : 0;
 
     // ── Lifecycle ────────────────────────────────────────────────
     onMount(async () => {
@@ -286,17 +333,118 @@
 
     async function loadConnections() {
         connectionsLoading = true;
+        localLlmLoading = true;
+        localLlmError = '';
         try {
             const [enrollments, sfConns, config] = await Promise.all([
                 api.getEnrollments().catch(() => []),
                 api.getSimpleFINConnections().catch(() => []),
                 api.getTellerConfig().catch(() => null),
             ]);
+            const [llmCatalogResult, llmStatusResult] = await Promise.allSettled([
+                api.getLocalLlmCatalog(),
+                api.getLocalLlmStatus(),
+            ]);
             tellerEnrollments = enrollments || [];
             simplefinConnections = sfConns || [];
             tellerConfig = config;
+
+            if (llmCatalogResult.status === 'fulfilled') {
+                localLlmCatalog = llmCatalogResult.value || localLlmCatalog;
+            }
+            if (llmStatusResult.status === 'fulfilled') {
+                localLlmStatus = llmStatusResult.value || localLlmStatus;
+            }
+            if (llmCatalogResult.status === 'rejected' || llmStatusResult.status === 'rejected') {
+                const error = llmCatalogResult.status === 'rejected'
+                    ? llmCatalogResult.reason
+                    : llmStatusResult.reason;
+                localLlmError = error?.message || 'Failed to load Local AI status from the backend.';
+            }
+            syncLocalLlmForm(localLlmStatus);
         } finally {
             connectionsLoading = false;
+            localLlmLoading = false;
+        }
+    }
+
+    function syncLocalLlmForm(status) {
+        if (!status) return;
+        localLlmForm = {
+            llm_provider: status.provider || 'anthropic',
+            preset: status.preset || 'balanced',
+            categorize_model: status.selectedCategorizeModel || '',
+            copilot_model: status.selectedCopilotModel || '',
+            low_power_mode: !!status.lowPowerMode,
+            expert_mode: !!status.expertMode,
+            categorize_batch_size: status.categorizeBatchSize ?? 25,
+            inter_batch_delay_ms: status.interBatchDelayMs ?? 600,
+        };
+    }
+
+    function applyLocalLlmPreset(presetKey) {
+        const preset = localLlmCatalog?.presets?.[presetKey];
+        if (!preset) return;
+        localLlmForm = {
+            ...localLlmForm,
+            preset: presetKey,
+            categorize_model: preset.categorize_model || localLlmForm.categorize_model,
+            copilot_model: preset.copilot_model || localLlmForm.copilot_model,
+            categorize_batch_size: preset.default_batch_size ?? localLlmForm.categorize_batch_size,
+            inter_batch_delay_ms: preset.inter_batch_delay_ms ?? localLlmForm.inter_batch_delay_ms,
+        };
+    }
+
+    function applyLocalLlmModel(target, modelId) {
+        if (!modelId) return;
+        localLlmForm = {
+            ...localLlmForm,
+            [target]: modelId,
+        };
+    }
+
+    async function saveLocalLlmSettings() {
+        if (localLlmSaving) return;
+        localLlmSaving = true;
+        try {
+            const result = await api.updateLocalLlmSettings(localLlmForm);
+            if (result?.status) {
+                localLlmStatus = result.status;
+                syncLocalLlmForm(localLlmStatus);
+            }
+            if (result?.config) {
+                appConfig = { ...appConfig, ...result.config };
+            }
+            invalidateCache();
+            setNotice('Local AI settings updated.');
+            await loadConnections();
+        } catch (error) {
+            setNotice(error?.message || 'Failed to update Local AI settings.');
+        } finally {
+            localLlmSaving = false;
+        }
+    }
+
+    async function installLocalLlmModel(modelId) {
+        if (!modelId || localLlmInstallingModel || localLlmStatus.provider !== 'ollama' || !localLlmStatus.ollamaReachable) return;
+        localLlmInstallingModel = modelId;
+        localLlmError = '';
+        try {
+            const result = await api.installLocalLlmModel(modelId);
+            if (result?.status) {
+                localLlmStatus = result.status;
+                syncLocalLlmForm(localLlmStatus);
+            }
+            if (result?.config) {
+                appConfig = { ...appConfig, ...result.config };
+            }
+            await loadConnections();
+            setNotice(`${modelId} installed in Ollama.`);
+        } catch (error) {
+            localLlmError = error?.message || `Failed to install ${modelId}.`;
+            setNotice(localLlmError);
+        } finally {
+            localLlmInstallingModel = '';
         }
     }
 
@@ -324,6 +472,7 @@
 
     function handleSimpleFINConnected() {
         invalidateCache();
+        loadProfiles();
         loadConnections();
     }
 
@@ -694,6 +843,206 @@
                             </button>
                         </div>
                     {/each}
+                {/if}
+            </div>
+
+            <div class="cc-conn-section">
+                <div class="cc-conn-section-header cc-local-llm-header">
+                    <div>
+                        <div class="cc-conn-section-title">
+                            <span class="cc-provider-badge cc-provider-local-ai">Local AI</span>
+                            <span class="cc-conn-count">{localLlmInstalledCount} installed model{localLlmInstalledCount !== 1 ? 's' : ''}</span>
+                        </div>
+                        <div class="cc-conn-meta">
+                            Curated Ollama model selection for categorization and Copilot, with laptop-aware defaults.
+                        </div>
+                    </div>
+                    <div class="cc-local-llm-status-row">
+                        <span class="cc-badge" class:cc-badge-positive={localLlmStatus.ollamaReachable} class:cc-badge-muted={!localLlmStatus.ollamaReachable}>
+                            {localLlmStatus.ollamaReachable ? 'Ollama reachable' : 'Ollama unavailable'}
+                        </span>
+                        <span class="cc-badge cc-badge-muted">{localLlmStatus.memoryLabel || '16 GB'} tier</span>
+                    </div>
+                </div>
+
+                {#if localLlmLoading}
+                    <div class="cc-conn-empty">Loading Local AI settings…</div>
+                {:else}
+                    {#if localLlmError}
+                        <div class="cc-notice cc-notice-local-error">{localLlmError}</div>
+                    {/if}
+
+                    <div class="cc-local-llm-grid">
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Provider</span>
+                            <strong>{localLlmStatus.provider || 'anthropic'}</strong>
+                            <small>{localLlmStatus.ramGb ? `${localLlmStatus.ramGb} GB detected` : 'RAM auto-detect unavailable'}</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Current Preset</span>
+                            <strong>{localLlmStatus.preset || 'balanced'}</strong>
+                            <small>{localLlmStatus.lowPowerMode ? 'Low power mode on' : 'Normal thermal profile'}</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Categorization</span>
+                            <strong>{localLlmStatus.selectedCategorizeModel || '—'}</strong>
+                            <small>{localLlmStatus.categorizeBatchSize || 20} tx per batch</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Copilot</span>
+                            <strong>{localLlmStatus.selectedCopilotModel || '—'}</strong>
+                            <small>{localLlmInstalledCount} model{localLlmInstalledCount !== 1 ? 's' : ''} installed</small>
+                        </div>
+                    </div>
+
+                    <div class="cc-local-llm-form">
+                        <div class="cc-form-grid">
+                            <div class="cc-field">
+                                <span>Provider</span>
+                                <select class="cc-select" bind:value={localLlmForm.llm_provider}>
+                                    <option value="anthropic">Anthropic / cloud</option>
+                                    <option value="ollama">Ollama / local</option>
+                                </select>
+                            </div>
+                            <div class="cc-field">
+                                <span>Preset</span>
+                                <select class="cc-select" bind:value={localLlmForm.preset}>
+                                    {#each localLlmPresetOptions as preset}
+                                        <option value={preset.key}>{preset.label}</option>
+                                    {/each}
+                                </select>
+                            </div>
+                            <label class="cc-local-toggle">
+                                <input type="checkbox" bind:checked={localLlmForm.low_power_mode} />
+                                <span>Low power mode</span>
+                            </label>
+                            <label class="cc-local-toggle">
+                                <input type="checkbox" bind:checked={localLlmForm.expert_mode} />
+                                <span>Expert models</span>
+                            </label>
+                        </div>
+
+                        <div class="cc-local-preset-row">
+                            {#each localLlmPresetOptions as preset}
+                                <button
+                                    type="button"
+                                    class="cc-secondary-btn"
+                                    class:cc-secondary-btn-active={localLlmForm.preset === preset.key}
+                                    on:click={() => applyLocalLlmPreset(preset.key)}
+                                >
+                                    {preset.label}
+                                </button>
+                            {/each}
+                        </div>
+
+                        <div class="cc-form-grid">
+                            <div class="cc-field cc-field-full">
+                                <span>Categorization model</span>
+                                <select class="cc-select" bind:value={localLlmForm.categorize_model}>
+                                    {#each localLlmTierGroups as group}
+                                        <optgroup label={group.label}>
+                                            {#each group.models as model}
+                                                <option value={model.id} disabled={model.expert_only && !localLlmForm.expert_mode}>
+                                                    {model.label} · {model.approx_size_gb} GB{model.installed ? ' · installed' : ' · not installed'}
+                                                </option>
+                                            {/each}
+                                        </optgroup>
+                                    {/each}
+                                </select>
+                            </div>
+                            <div class="cc-field cc-field-full">
+                                <span>Copilot model</span>
+                                <select class="cc-select" bind:value={localLlmForm.copilot_model}>
+                                    {#each localLlmTierGroups as group}
+                                        <optgroup label={group.label}>
+                                            {#each group.models as model}
+                                                <option value={model.id} disabled={model.expert_only && !localLlmForm.expert_mode}>
+                                                    {model.label} · {model.approx_size_gb} GB{model.installed ? ' · installed' : ' · not installed'}
+                                                </option>
+                                            {/each}
+                                        </optgroup>
+                                    {/each}
+                                </select>
+                            </div>
+                            <div class="cc-field">
+                                <span>Batch size</span>
+                                <input class="cc-input" type="number" min="1" max="50" bind:value={localLlmForm.categorize_batch_size} />
+                            </div>
+                            <div class="cc-field">
+                                <span>Delay between batches (ms)</span>
+                                <input class="cc-input" type="number" min="0" max="5000" step="100" bind:value={localLlmForm.inter_batch_delay_ms} />
+                            </div>
+                        </div>
+
+                        <div class="cc-list-meta">
+                            Models marked as expert-only are hidden unless Expert models is enabled. Not installed models remain selectable so you can pre-configure before pulling them into Ollama. Install actions only appear when Ollama is reachable and are proxied through the backend container to your host Ollama daemon.
+                        </div>
+
+                        <div class="cc-local-llm-tier-list">
+                            {#each localLlmTierGroups as group}
+                                <div class="cc-local-llm-tier">
+                                    <div class="cc-local-llm-tier-header">
+                                        <div class="cc-local-llm-tier-title">{group.label}</div>
+                                        <div class="cc-local-llm-tier-subtitle">{group.models.length} curated models</div>
+                                    </div>
+                                    <div class="cc-local-llm-model-list">
+                                        {#each group.models as model}
+                                            <div class="cc-local-llm-model-row" class:cc-local-llm-model-row-installed={model.installed}>
+                                                <div class="cc-local-llm-model-main">
+                                                    <div class="cc-local-llm-model-topline">
+                                                        <strong>{model.label}</strong>
+                                                        <span class="cc-local-llm-model-size">{model.approx_size_gb} GB</span>
+                                                        {#if model.installed}<span class="cc-local-llm-chip-note">Installed</span>{/if}
+                                                        {#if model.expert_only}<span class="cc-local-llm-chip-note">Expert</span>{/if}
+                                                    </div>
+                                                    <div class="cc-local-llm-model-badges">
+                                                        {#each model.badges || [] as badge}
+                                                            <span class="cc-local-llm-chip-note">{badge}</span>
+                                                        {/each}
+                                                    </div>
+                                                    <div class="cc-local-llm-model-warning">{model.warning}</div>
+                                                </div>
+                                                <div class="cc-local-llm-model-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="cc-secondary-btn"
+                                                        on:click={() => applyLocalLlmModel('categorize_model', model.id)}
+                                                    >
+                                                        Use for Categorization
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="cc-secondary-btn"
+                                                        on:click={() => applyLocalLlmModel('copilot_model', model.id)}
+                                                    >
+                                                        Use for Copilot
+                                                    </button>
+                                                    {#if !model.installed && localLlmStatus.provider === 'ollama' && localLlmStatus.ollamaReachable}
+                                                        <button
+                                                            type="button"
+                                                            class="cc-local-llm-install-btn"
+                                                            on:click={() => installLocalLlmModel(model.id)}
+                                                            disabled={!!localLlmInstallingModel}
+                                                        >
+                                                            {localLlmInstallingModel === model.id ? 'Installing…' : 'Install'}
+                                                        </button>
+                                                    {:else}
+                                                        <span class="cc-local-llm-install-state">{model.installed ? 'Installed' : 'Unavailable'}</span>
+                                                    {/if}
+                                                </div>
+                                            </div>
+                                        {/each}
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+
+                        <div class="cc-actions">
+                            <button class="cc-primary-btn" type="button" on:click={saveLocalLlmSettings} disabled={localLlmSaving}>
+                                {localLlmSaving ? 'Saving…' : 'Save Local AI Settings'}
+                            </button>
+                        </div>
+                    </div>
                 {/if}
             </div>
         </section>
@@ -1279,6 +1628,10 @@
         background: color-mix(in srgb, #10b981 12%, transparent);
         color: #10b981;
     }
+    .cc-provider-local-ai {
+        background: color-mix(in srgb, #38bdf8 12%, transparent);
+        color: #38bdf8;
+    }
     .cc-conn-row {
         display: flex;
         align-items: center;
@@ -1330,5 +1683,224 @@
         font-size: 12px;
         color: var(--text-muted);
         padding: 8px 0;
+    }
+    .cc-local-llm-header {
+        gap: 12px;
+        align-items: flex-start;
+    }
+    .cc-local-llm-status-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .cc-local-llm-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 16px;
+    }
+    .cc-local-llm-stat {
+        padding: 12px;
+        border-radius: 10px;
+        background: var(--bg);
+        border: 1px solid var(--card-border);
+    }
+    .cc-local-llm-stat strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--text-primary);
+    }
+    .cc-local-llm-stat small {
+        display: block;
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--text-muted);
+    }
+    .cc-local-llm-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+    .cc-local-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text-secondary);
+    }
+    .cc-local-preset-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .cc-secondary-btn-active {
+        border-color: var(--card-border-hover);
+        color: var(--text-primary);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+    .cc-local-llm-tier-list {
+        display: grid;
+        gap: 10px;
+    }
+    .cc-local-llm-tier {
+        padding: 12px;
+        border-radius: 10px;
+        background: var(--bg);
+        border: 1px solid var(--card-border);
+    }
+    .cc-local-llm-tier-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+    .cc-local-llm-tier-title {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+    }
+    .cc-local-llm-tier-subtitle {
+        font-size: 11px;
+        color: var(--text-muted);
+    }
+    .cc-local-llm-model-list {
+        display: grid;
+        gap: 10px;
+    }
+    .cc-local-llm-model-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 14px;
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid var(--card-border);
+        background: color-mix(in srgb, var(--surface) 80%, transparent);
+    }
+    .cc-local-llm-model-row-installed {
+        border-color: color-mix(in srgb, var(--positive) 22%, var(--card-border));
+    }
+    .cc-local-llm-model-main {
+        min-width: 0;
+    }
+    .cc-local-llm-model-topline {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+    .cc-local-llm-model-topline strong {
+        font-size: 14px;
+        color: var(--text-primary);
+    }
+    .cc-local-llm-model-size {
+        font-size: 12px;
+        color: var(--text-secondary);
+    }
+    .cc-local-llm-model-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 6px;
+    }
+    .cc-local-llm-model-warning {
+        font-size: 12px;
+        line-height: 1.45;
+        color: var(--text-muted);
+    }
+    .cc-local-llm-model-actions {
+        display: grid;
+        grid-template-columns: max-content max-content 92px;
+        align-items: start;
+        justify-content: end;
+        gap: 8px;
+    }
+    .cc-local-llm-chip-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .cc-local-llm-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: var(--surface-100);
+        color: var(--text-secondary);
+        font-size: 11px;
+        border: 1px solid var(--card-border);
+    }
+    .cc-local-llm-chip-installed {
+        color: var(--text-primary);
+        border-color: color-mix(in srgb, var(--positive) 25%, var(--card-border));
+    }
+    .cc-local-llm-chip-note {
+        opacity: 0.72;
+        font-size: 10px;
+    }
+    .cc-local-llm-install-btn {
+        width: 92px;
+        justify-self: stretch;
+        border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--card-border));
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+        color: var(--accent);
+        border-radius: 999px;
+        padding: 3px 0;
+        font-size: 10px;
+        font-weight: 700;
+        text-align: center;
+        cursor: pointer;
+        transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+    .cc-local-llm-install-btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+        transform: none;
+    }
+    .cc-local-llm-install-state {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 92px;
+        height: 28px;
+        padding: 3px 0;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+        border: 1px solid color-mix(in srgb, var(--card-border) 75%, transparent);
+        background: color-mix(in srgb, var(--surface-100) 72%, transparent);
+        color: var(--text-secondary);
+    }
+    .cc-notice-local-error {
+        margin-bottom: 12px;
+        background: color-mix(in srgb, var(--negative) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--negative) 18%, var(--card-border));
+        color: var(--negative);
+    }
+    @media (max-width: 900px) {
+        .cc-local-llm-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .cc-local-llm-model-row {
+            grid-template-columns: 1fr;
+        }
+        .cc-local-llm-model-actions {
+            grid-template-columns: 1fr;
+            justify-content: stretch;
+        }
+        .cc-local-llm-install-state {
+            display: none;
+        }
+    }
+    @media (max-width: 640px) {
+        .cc-local-llm-grid {
+            grid-template-columns: 1fr;
+        }
     }
 </style>

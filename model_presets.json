@@ -1,26 +1,232 @@
 {
-  "light": {
-    "label": "Light",
-    "description": "Fastest startup, lowest disk/RAM footprint",
-    "categorize_model": "gemma4:e2b",
-    "copilot_model": "gemma4:e2b",
-    "disk_gb": 8,
-    "recommended_min_ram_gb": 8
+  "presets": {
+    "battery_saver": {
+      "label": "Battery Saver",
+      "description": "Coolest and quietest local setup for imports and everyday categorization.",
+      "categorize_model": "llama3.2:3b",
+      "copilot_model": "phi4-mini",
+      "disk_gb": 4,
+      "recommended_min_ram_gb": 8,
+      "default_batch_size": 12,
+      "inter_batch_delay_ms": 1200
+    },
+    "balanced": {
+      "label": "Balanced",
+      "description": "Best everyday default for local Ollama on laptops.",
+      "categorize_model": "gemma4:e4b",
+      "copilot_model": "qwen2.5:7b",
+      "disk_gb": 15,
+      "recommended_min_ram_gb": 16,
+      "default_batch_size": 25,
+      "inter_batch_delay_ms": 600
+    },
+    "quality": {
+      "label": "Quality",
+      "description": "Stronger Copilot answers while keeping categorization thermally sane.",
+      "categorize_model": "gemma4:e4b",
+      "copilot_model": "gemma4:26b",
+      "disk_gb": 28,
+      "recommended_min_ram_gb": 32,
+      "default_batch_size": 25,
+      "inter_batch_delay_ms": 900
+    }
   },
-  "balanced": {
-    "label": "Balanced",
-    "description": "Best default for enrichment + categorization on laptops",
-    "categorize_model": "gemma4:e4b",
-    "copilot_model": "gemma4:e4b",
-    "disk_gb": 10,
-    "recommended_min_ram_gb": 16
+  "recommendedDefaults": {
+    "8gb": {
+      "preset": "battery_saver",
+      "categorize_model": "llama3.2:3b",
+      "copilot_model": "phi4-mini"
+    },
+    "16gb": {
+      "preset": "balanced",
+      "categorize_model": "gemma4:e4b",
+      "copilot_model": "qwen2.5:7b"
+    },
+    "32gb": {
+      "preset": "balanced",
+      "categorize_model": "gemma4:e4b",
+      "copilot_model": "gemma4:26b"
+    }
   },
-  "quality": {
-    "label": "Best Quality",
-    "description": "Higher quality copilot answers, more disk/RAM required",
-    "categorize_model": "gemma4:e4b",
-    "copilot_model": "gemma4:26b",
-    "disk_gb": 28,
-    "recommended_min_ram_gb": 32
+  "models": {
+    "llama3.2:3b": {
+      "label": "Llama 3.2 3B",
+      "family": "Llama 3.2",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "8gb",
+      "approx_size_gb": 2.0,
+      "badges": ["Fast", "Balanced", "Great for categorization"],
+      "categorize_default": "recommended",
+      "copilot_default": "good",
+      "warning": "Smaller general-purpose model; best when you want speed and lower thermals."
+    },
+    "phi4-mini": {
+      "label": "Phi-4 Mini",
+      "family": "Phi-4",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "8gb",
+      "approx_size_gb": 2.5,
+      "badges": ["Fast", "Copilot", "Low RAM"],
+      "categorize_default": "good",
+      "copilot_default": "recommended",
+      "warning": "Strong small-model reasoning; good Copilot default on lower-memory machines."
+    },
+    "qwen2.5:3b": {
+      "label": "Qwen 2.5 3B",
+      "family": "Qwen 2.5",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "8gb",
+      "approx_size_gb": 1.9,
+      "badges": ["Fast", "Multilingual", "Balanced"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "Good small multilingual option with very manageable local footprint."
+    },
+    "qwen3:4b": {
+      "label": "Qwen 3 4B",
+      "family": "Qwen 3",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "8gb",
+      "approx_size_gb": 2.5,
+      "badges": ["Balanced", "Multilingual", "Modern"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "A strong modern small-model option when you want better headroom than 3B models."
+    },
+    "gemma4:e2b": {
+      "label": "Gemma 4 E2B",
+      "family": "Gemma 4",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "8gb",
+      "approx_size_gb": 7.2,
+      "badges": ["Gemma 4", "Edge", "8 GB ceiling"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "Viable on 8 GB laptops, but near the upper edge of comfortable local memory use."
+    },
+    "gemma4:e4b": {
+      "label": "Gemma 4 E4B",
+      "family": "Gemma 4",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 9.6,
+      "badges": ["Gemma 4", "Recommended", "Great for categorization"],
+      "categorize_default": "recommended",
+      "copilot_default": "good",
+      "warning": "Primary Folio recommendation for 16 GB laptops."
+    },
+    "gemma3:4b": {
+      "label": "Gemma 3 4B",
+      "family": "Gemma 3",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 3.3,
+      "badges": ["Balanced", "Lightweight", "Gemma"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "Reliable smaller Gemma-family option when you want cooler sustained runs."
+    },
+    "qwen2.5:7b": {
+      "label": "Qwen 2.5 7B",
+      "family": "Qwen 2.5",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 4.7,
+      "badges": ["Balanced", "Copilot", "Multilingual"],
+      "categorize_default": "good",
+      "copilot_default": "recommended",
+      "warning": "Excellent balanced choice for 16 GB and 32 GB laptops, especially for Copilot."
+    },
+    "qwen3:8b": {
+      "label": "Qwen 3 8B",
+      "family": "Qwen 3",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 5.2,
+      "badges": ["Copilot", "Modern", "Quality"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "Better suited to richer Copilot interactions than long categorization imports."
+    },
+    "deepseek-r1:8b": {
+      "label": "DeepSeek-R1 8B",
+      "family": "DeepSeek-R1",
+      "task_fit": ["copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 5.2,
+      "badges": ["Expert", "Reasoning-heavy", "Copilot"],
+      "expert_only": true,
+      "categorize_default": "avoid",
+      "copilot_default": "good",
+      "warning": "Reasoning-heavy model; not recommended for bulk categorization on laptops."
+    },
+    "gemma4:26b": {
+      "label": "Gemma 4 26B",
+      "family": "Gemma 4",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 18.0,
+      "badges": ["Gemma 4", "Recommended", "Copilot"],
+      "categorize_default": "avoid",
+      "copilot_default": "recommended",
+      "warning": "Excellent 32 GB Copilot choice, but intentionally not a default categorization model."
+    },
+    "gemma4:31b": {
+      "label": "Gemma 4 31B",
+      "family": "Gemma 4",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 20.0,
+      "badges": ["Expert", "High heat risk", "Copilot"],
+      "expert_only": true,
+      "categorize_default": "avoid",
+      "copilot_default": "good",
+      "warning": "Fits on some 32 GB machines, but it is intentionally expert-only and not chosen automatically."
+    },
+    "gemma3:12b": {
+      "label": "Gemma 3 12B",
+      "family": "Gemma 3",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 8.1,
+      "badges": ["Balanced", "Copilot", "Gemma"],
+      "categorize_default": "good",
+      "copilot_default": "good",
+      "warning": "Good upper-mid option when you want better quality without jumping to the hottest local models."
+    },
+    "qwen2.5:14b": {
+      "label": "Qwen 2.5 14B",
+      "family": "Qwen 2.5",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 9.0,
+      "badges": ["Recommended", "Copilot", "Multilingual"],
+      "categorize_default": "avoid",
+      "copilot_default": "recommended",
+      "warning": "Strong 32 GB Copilot option with good quality-to-size tradeoff."
+    },
+    "qwen3:14b": {
+      "label": "Qwen 3 14B",
+      "family": "Qwen 3",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 9.3,
+      "badges": ["Copilot", "Quality", "Modern"],
+      "categorize_default": "avoid",
+      "copilot_default": "good",
+      "warning": "Better for richer assistant tasks than repetitive batch labeling."
+    },
+    "mistral-small:24b": {
+      "label": "Mistral Small 24B",
+      "family": "Mistral Small",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 14.0,
+      "badges": ["Expert", "High heat risk", "Copilot"],
+      "expert_only": true,
+      "categorize_default": "avoid",
+      "copilot_default": "good",
+      "warning": "Powerful local Copilot model, but too heavy to recommend for sustained categorization on laptops."
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
 
 // Stores the full profile objects: [{ id: "karthik", name: "Karthik" }, ...]
@@ -67,6 +67,16 @@ export async function loadProfiles(fetchFn = fetch) {
         const individualProfiles = normalized.filter(p => p.id !== 'household');
 
         profiles.set(individualProfiles);
+
+        const currentActive = get(activeProfile);
+        const validIds = new Set(individualProfiles.map((profile) => profile.id));
+        if (currentActive === 'household') {
+            return;
+        }
+        if (currentActive && currentActive !== 'household' && validIds.has(currentActive)) {
+            return;
+        }
+
         activeProfile.set('household');
     } catch (err) {
         console.error('[profileStore] failed to load profiles:', err);

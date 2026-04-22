@@ -14,29 +14,39 @@
     let setupToken = '';
     let displayName = '';
     let selectedProfile = '';
+    let createProfile = false;
+    let newProfileName = '';
     let profiles = [];
     let connecting = false;
     let error = '';
     let success = '';
 
-    onMount(async () => {
+    async function refreshProfiles() {
         try {
             profiles = await api.getProfiles();
         } catch (e) {
             profiles = [];
         }
-    });
+    }
 
-    export function show() {
+    onMount(refreshProfiles);
+
+    $: existingProfiles = profiles.filter(p => p.id !== 'household');
+    $: profileOptions = existingProfiles.some((profile) => profile.id === 'primary')
+        ? existingProfiles
+        : [...existingProfiles, { id: 'primary', name: 'Primary' }];
+
+    export async function show() {
+        await refreshProfiles();
         open = true;
         setupToken = '';
         displayName = '';
         error = '';
         success = '';
         connecting = false;
-        // Default to first non-household profile
-        const nonHousehold = profiles.filter(p => p.id !== 'household');
-        selectedProfile = nonHousehold.length > 0 ? nonHousehold[0].id : 'primary';
+        createProfile = false;
+        newProfileName = '';
+        selectedProfile = existingProfiles.length > 0 ? existingProfiles[0].id : 'primary';
     }
 
     function close() {
@@ -57,6 +67,13 @@
             error = 'Please paste your SimpleFIN Setup Token.';
             return;
         }
+        const profileValue = createProfile
+            ? newProfileName.trim()
+            : (selectedProfile || 'primary');
+        if (!profileValue) {
+            error = 'Please choose a profile or enter a new profile name.';
+            return;
+        }
 
         error = '';
         success = '';
@@ -66,7 +83,7 @@
         try {
             const result = await api.claimSimpleFIN(
                 token,
-                selectedProfile || 'primary',
+                profileValue,
                 displayName.trim(),
             );
             success = `Connected! Syncing accounts in the background…`;
@@ -81,6 +98,16 @@
         } finally {
             connecting = false;
         }
+    }
+
+    function handleProfileSelection(value) {
+        if (value === '__create__') {
+            createProfile = true;
+            newProfileName = '';
+            return;
+        }
+        createProfile = false;
+        selectedProfile = value;
     }
 </script>
 
@@ -124,11 +151,17 @@
                 <div class="sf-row">
                     <div class="sf-field">
                         <label class="sf-label" for="sf-profile">Profile</label>
-                        <select id="sf-profile" class="sf-select" bind:value={selectedProfile} disabled={connecting}>
-                            {#each profiles.filter(p => p.id !== 'household') as p}
-                                <option value={p.id}>{p.display_name || p.id}</option>
+                        <select
+                            id="sf-profile"
+                            class="sf-select"
+                            value={createProfile ? '__create__' : selectedProfile}
+                            on:change={(e) => handleProfileSelection(e.target.value)}
+                            disabled={connecting}
+                        >
+                            {#each profileOptions as p}
+                                <option value={p.id}>{p.name || p.display_name || p.id}</option>
                             {/each}
-                            <option value="primary">primary</option>
+                            <option value="__create__">Create new profile…</option>
                         </select>
                     </div>
                     <div class="sf-field">
@@ -143,6 +176,20 @@
                         />
                     </div>
                 </div>
+
+                {#if createProfile}
+                    <div class="sf-field">
+                        <label class="sf-label" for="sf-profile-new">New Profile Name</label>
+                        <input
+                            id="sf-profile-new"
+                            class="sf-input"
+                            type="text"
+                            bind:value={newProfileName}
+                            placeholder="e.g. Karthik or Wife"
+                            disabled={connecting}
+                        />
+                    </div>
+                {/if}
 
                 {#if error}
                     <div class="sf-notice sf-error">
@@ -179,12 +226,14 @@
     .sf-backdrop {
         position: fixed;
         inset: 0;
-        z-index: 1000;
+        z-index: 6000;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
+        padding: clamp(72px, 11vh, 128px) 16px 24px;
         background: rgba(0, 0, 0, 0.45);
         backdrop-filter: blur(4px);
+        overflow-y: auto;
     }
     .sf-modal {
         background: var(--card-bg);

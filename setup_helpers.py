@@ -10,7 +10,37 @@ from pathlib import Path
 
 def load_model_presets(root_dir: Path) -> dict[str, dict]:
     with (root_dir / "model_presets.json").open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        payload = json.load(fh)
+    if "presets" not in payload:
+        return payload
+
+    presets = payload["presets"]
+    return {
+        "light": {
+            "label": presets["battery_saver"]["label"],
+            "description": presets["battery_saver"]["description"],
+            "categorize_model": presets["battery_saver"]["categorize_model"],
+            "copilot_model": presets["battery_saver"]["copilot_model"],
+            "disk_gb": presets["battery_saver"]["disk_gb"],
+            "recommended_min_ram_gb": presets["battery_saver"]["recommended_min_ram_gb"],
+        },
+        "balanced": {
+            "label": presets["balanced"]["label"],
+            "description": presets["balanced"]["description"],
+            "categorize_model": presets["balanced"]["categorize_model"],
+            "copilot_model": presets["balanced"]["copilot_model"],
+            "disk_gb": presets["balanced"]["disk_gb"],
+            "recommended_min_ram_gb": presets["balanced"]["recommended_min_ram_gb"],
+        },
+        "quality": {
+            "label": presets["quality"]["label"],
+            "description": presets["quality"]["description"],
+            "categorize_model": presets["quality"]["categorize_model"],
+            "copilot_model": presets["quality"]["copilot_model"],
+            "disk_gb": presets["quality"]["disk_gb"],
+            "recommended_min_ram_gb": presets["quality"]["recommended_min_ram_gb"],
+        },
+    }
 
 
 def _detect_total_ram_bytes(host_os: str) -> int | None:

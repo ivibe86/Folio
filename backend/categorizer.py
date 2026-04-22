@@ -425,7 +425,7 @@ def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple
 # ══════════════════════════════════════════════════════════════════════════════
 
 def categorize_transactions(
-    transactions: list[dict], batch_size: int = 50
+    transactions: list[dict], batch_size: int | None = None
 ) -> list[dict]:
     """
     Two-phase categorization:
@@ -435,6 +435,16 @@ def categorize_transactions(
        - rule-medium: send with suggestion for LLM to validate/override
        - no rule: send for full LLM categorization
     """
+    inter_batch_delay_s = 1.0
+    if batch_size is None:
+        try:
+            policy = llm_client.local_llm.get_categorization_policy()
+            batch_size = policy.get("batch_size") or 25
+            inter_batch_delay_s = max((policy.get("inter_batch_delay_ms") or 600) / 1000.0, 0.0)
+        except Exception:
+            batch_size = 25
+            inter_batch_delay_s = 1.0
+
     # Phase 1: Sanitize (normalize signs, light cleanup)
     sanitized = sanitize_transactions(transactions)
 
@@ -594,8 +604,8 @@ def categorize_transactions(
                         "confidence": "fallback",
                     })
 
-            if batch_num < total_batches:
-                time.sleep(1)
+            if batch_num < total_batches and inter_batch_delay_s > 0:
+                time.sleep(inter_batch_delay_s)
 
         # Apply LLM results back
         for cat_result in all_llm_results:

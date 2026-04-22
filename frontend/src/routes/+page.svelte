@@ -11,12 +11,14 @@
         computeTrailingSavingsRate
     } from '$lib/utils.js';
     import { darkMode, syncing, selectedPeriodStore, selectedCustomMonthStore, privacyMode } from '$lib/stores.js';
-    import { profiles, activeProfile } from '$lib/stores/profileStore.js';
+    import { profiles, activeProfile, loadProfiles } from '$lib/stores/profileStore.js';
     import SankeyChart from '$lib/components/SankeyChart.svelte';
     import SankeyLoadingStage from '$lib/components/SankeyLoadingStage.svelte';
     import IncomeVsSpendingChart from '$lib/components/IncomeVsSpendingChart.svelte';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
-    import TellerConnect from '$lib/components/TellerConnect.svelte';  
+    import ConnectionChooser from '$lib/components/ConnectionChooser.svelte';
+    import TellerConnect from '$lib/components/TellerConnect.svelte';
+    import SimpleFINConnect from '$lib/components/SimpleFINConnect.svelte';
 
     export let data;
     // Accept (and ignore) the 'params' prop that SvelteKit may pass to pages
@@ -41,6 +43,9 @@
         manualSyncEnabled: true,
         demoPersistence: 'persistent'
     };
+    let connectionChooserOpen = false;
+    let tellerConnectRef;
+    let simplefinConnectRef;
 
     // Period — synced with global store for cross-page persistence
     let selectedPeriod = 'this_month';
@@ -77,7 +82,7 @@
     let drillNewCategoryError = '';
     let drillRecentlyUpdatedTxId = null;
     let drillUpdateFeedback = '';
-    let drillPendingCategoryChange = null; // { txId, category } — awaiting one-off vs always choice
+    let drillCategoryApplyMode = 'always';
 
     // iOS-style period toggle
     const periodOptions = [
@@ -140,6 +145,7 @@
     $: forceSankeyLiveLoading = ['sankey', 'sankey-live', 'sankey-sync', 'all'].includes(debugLoadingMode) && hasRenderableSankeyData;
     $: forceSankeyEmptyLoading = debugLoadingMode === 'sankey-empty';
     $: enrollmentLoadingActive = $syncing.active && $syncing.context === 'enrollment';
+    $: sankeySyncActive = $syncing.active && ['enrollment', 'manual-sync', 'simplefin'].includes($syncing.context);
     $: hasRenderableSankeyData =
         sankeyCategoryList.some((cat) => !cat.isDirectFlow && (cat.total || 0) > 0) ||
         sankeySavingsTotal > 0 ||
@@ -147,7 +153,7 @@
         (periodSummary?.cc_repaid || 0) > 0;
     $: heroLoading = isRefreshing || enrollmentLoadingActive || forceHeroLoading;
     $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceMetricLoading;
-    $: sankeyLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceSankeyLiveLoading || forceSankeyEmptyLoading;
+    $: sankeyLoading = periodLoading || isRefreshing || sankeySyncActive || forceSankeyLiveLoading || forceSankeyEmptyLoading;
     $: showSankeyLoadingStage = forceSankeyEmptyLoading || (sankeyLoading && !hasRenderableSankeyData);
     $: showLiveSankeySyncState = sankeyLoading && hasRenderableSankeyData && !showSankeyLoadingStage;
     $: showSankeyChart = Boolean(periodSummary) && !showSankeyLoadingStage && !showLiveSankeySyncState;
@@ -418,6 +424,45 @@
         // Leave syncing active until the backend's sync-status endpoint reports completion.
         // The global layout poller will stop the spinner and broadcast folio:sync-complete.
         setTimeout(() => { _enrollmentInFlight = false; }, 2000);
+    }
+
+    function handleSimpleFINConnected() {
+        invalidateCacheByPrefix('profiles');
+        loadProfiles();
+    }
+
+    function openConnectionChooser() {
+        connectionChooserOpen = true;
+    }
+
+    function closeConnectionChooser() {
+        connectionChooserOpen = false;
+    }
+
+    function handleConnectionChooserBackdrop(event) {
+        if (event.target === event.currentTarget) {
+            closeConnectionChooser();
+        }
+    }
+
+    function handleConnectionChooserKeydown(event) {
+        if (event.key === 'Escape' && connectionChooserOpen) {
+            closeConnectionChooser();
+        }
+    }
+
+    function handleWindowKeydown(event) {
+        handleConnectionChooserKeydown(event);
+    }
+
+    function launchTellerFromChooser() {
+        closeConnectionChooser();
+        tellerConnectRef?.show();
+    }
+
+    function launchSimpleFINFromChooser() {
+        closeConnectionChooser();
+        simplefinConnectRef?.show();
     }
 
     /**
@@ -1213,6 +1258,7 @@
         ensureDrillCategories();
         drillCatDropdownOpenForTx = txId;
         drillCatDropdownSearch = '';
+        drillCategoryApplyMode = 'always';
         drillCreatingNewCategory = false;
         drillNewCategoryName = '';
         drillNewCategoryError = '';
@@ -1224,7 +1270,7 @@
         drillCreatingNewCategory = false;
         drillNewCategoryName = '';
         drillNewCategoryError = '';
-        drillPendingCategoryChange = null;
+        drillCategoryApplyMode = 'always';
     }
 
     async function drillUpdateCategory(txId, newCategory, oneOff = false) {
@@ -1319,20 +1365,22 @@
 
         if (drillAllCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
             const existing = drillAllCategories.find(c => c.toLowerCase() === name.toLowerCase());
-            drillPendingCategoryChange = { txId, category: existing };
             drillCreatingNewCategory = false;
             drillNewCategoryName = '';
             drillNewCategoryError = '';
+            if (existing) {
+                await drillUpdateCategory(txId, existing, drillCategoryApplyMode === 'once');
+            }
             return;
         }
 
         try {
             await api.createCategory(name);
             drillAllCategories = [...drillAllCategories, name].sort();
-            drillPendingCategoryChange = { txId, category: name };
             drillCreatingNewCategory = false;
             drillNewCategoryName = '';
             drillNewCategoryError = '';
+            await drillUpdateCategory(txId, name, drillCategoryApplyMode === 'once');
         } catch (e) {
             drillNewCategoryError = 'Failed to create category';
             console.error(e);
@@ -1674,7 +1722,7 @@
     $: activeProfileName = activeProfileObj?.name ?? ($activeProfile ? $activeProfile.charAt(0).toUpperCase() + $activeProfile.slice(1) : '');
 </script>
 
-<svelte:window on:click={handleDrillWindowClick} />
+<svelte:window on:click={handleDrillWindowClick} on:keydown={handleWindowKeydown} />
 
 {#if loading}
     <div class="space-y-6 fade-in">
@@ -1769,12 +1817,9 @@
                     Demo mode · bank linking disabled · recategorization resets after redeploy
                 </div>
             {/if}
-            {#if appConfig.bankLinkingEnabled && tellerAppId}
-                <TellerConnect
-                    applicationId={tellerAppId}
-                    environment={tellerEnvironment}
-                    on:enrolled={handleTellerEnrolled}
-                    on:error={(e) => console.warn('Teller Connect error:', e.detail)}
+            {#if appConfig.bankLinkingEnabled}
+                <ConnectionChooser
+                    on:open={openConnectionChooser}
                 />
             {/if}
         </div>
@@ -1807,6 +1852,12 @@
                                     <stop offset="70%"  stop-color={TEAL_AREA}   stop-opacity="0.16"/>
                                     <stop offset="85%"  stop-color={TEAL_AREA}   stop-opacity="0.08"/>
                                     <stop offset="100%" stop-color={TEAL_AREA}   stop-opacity="0.02"/>
+                                </linearGradient>
+                                <linearGradient id="nwBaseWash" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%"   stop-color={TEAL_AREA_GLOW} stop-opacity="0.14"/>
+                                    <stop offset="38%"  stop-color={TEAL_AREA}      stop-opacity="0.11"/>
+                                    <stop offset="72%"  stop-color={TEAL_AREA}      stop-opacity="0.06"/>
+                                    <stop offset="100%" stop-color={TEAL_AREA}      stop-opacity="0.015"/>
                                 </linearGradient>
                                 <linearGradient id="nwLineGradCyan" x1="0" y1="0" x2="1" y2="0">
                                     <stop offset="0%"   stop-color={CYAN_LINE} stop-opacity="0.72"/>
@@ -1842,6 +1893,7 @@
                             {#each nwChart.gridLines as gl}
                                 <line x1="0" y1={gl.y} x2="600" y2={gl.y} stroke="var(--text-muted)" stroke-width="1" opacity="0.06" />
                             {/each}
+                            <rect x="0" y="8" width="600" height="124" fill="url(#nwBaseWash)" opacity="0.34" />
                             <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" filter="url(#nwAreaGlow)" opacity="0.5" />
                             <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" opacity="0.8" />
                             <path d={nwChart.linePath} fill="none" stroke={CYAN_GLOW} stroke-width="10" stroke-linecap="round" stroke-linejoin="round" filter="url(#nwGlow)" opacity="0.14" />
@@ -1852,8 +1904,27 @@
                                 <circle cx={nwChart.endPoint.x} cy={nwChart.endPoint.y} r="4.25" fill="#E6FFFB" stroke={CYAN_DEEP} stroke-width="1.6" />
                             {/if}
                             {#each nwChart.monthLabels as ml}
-                                <line x1={ml.x} y1={ml.y - 14} x2={ml.x} y2={ml.y - 10} stroke="var(--text-secondary)" stroke-width="1" opacity="0.3" />
-                                <text x={ml.x} y={ml.y} text-anchor="middle" fill="var(--text-secondary)" font-size="8" font-family="Inter, system-ui, sans-serif" font-weight="600" letter-spacing="0.5" opacity="0.85" style="pointer-events: none">{ml.label}</text>
+                                <line
+                                    x1={ml.x}
+                                    y1={ml.y - 14}
+                                    x2={ml.x}
+                                    y2={ml.y - 10}
+                                    stroke={$darkMode ? 'var(--text-secondary)' : 'var(--island-text-secondary)'}
+                                    stroke-width="1"
+                                    opacity="0.3"
+                                />
+                                <text
+                                    x={ml.x}
+                                    y={ml.y}
+                                    text-anchor="middle"
+                                    fill={$darkMode ? 'var(--text-secondary)' : 'var(--island-text-secondary)'}
+                                    font-size="8"
+                                    font-family="Inter, system-ui, sans-serif"
+                                    font-weight="600"
+                                    letter-spacing="0.5"
+                                    opacity="0.85"
+                                    style="pointer-events: none"
+                                >{ml.label}</text>
                             {/each}
                             <rect x="0" y="0" width="600" height="160" fill="transparent" />
                             {#if hoverPoint}
@@ -2298,120 +2369,98 @@
 
                                     {#if drillCatDropdownOpenForTx === tx.original_id}
                                         <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" on:click|stopPropagation>
-                                            {#if drillPendingCategoryChange?.txId === tx.original_id}
-                                                <!-- Step 2: One-off vs Always confirmation -->
-                                                <div class="tx-cat-apply-panel">
-                                                    <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
-                                                    <p class="tx-cat-apply-target" style="color: var(--text-primary)">
-                                                        <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[drillPendingCategoryChange.category] || 'var(--text-muted)'};">
-                                                            {CATEGORY_ICONS[drillPendingCategoryChange.category] || 'label'}
-                                                        </span>
-                                                        <span>{drillPendingCategoryChange.category}</span>
-                                                    </p>
-                                                    <div class="tx-cat-apply-choice-list">
-                                                        <button
-                                                            class="tx-cat-apply-choice"
-                                                            on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, false)}>
-                                                            <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--accent)">all_inclusive</span>
-                                                            <span class="tx-cat-apply-choice-body">
-                                                                <span class="tx-cat-apply-choice-title">Always</span>
-                                                                <span class="tx-cat-apply-choice-note">Rule + similar</span>
-                                                            </span>
-                                                        </button>
-                                                        <button
-                                                            class="tx-cat-apply-choice"
-                                                            on:click={() => drillUpdateCategory(tx.original_id, drillPendingCategoryChange.category, true)}>
-                                                            <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--text-secondary)">looks_one</span>
-                                                            <span class="tx-cat-apply-choice-body">
-                                                                <span class="tx-cat-apply-choice-title">Just once</span>
-                                                                <span class="tx-cat-apply-choice-note">Only this tx</span>
-                                                            </span>
-                                                        </button>
-                                                    </div>
+                                            <div class="tx-cat-apply-toggle">
+                                                <div class="tx-cat-apply-toggle-copy">
+                                                    <span class="tx-cat-apply-toggle-label">Apply</span>
+                                                </div>
+                                                <div class="tx-cat-apply-toggle-actions">
                                                     <button
-                                                        class="text-[10px] mt-2.5"
-                                                        style="color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 0; display: flex; align-items: center; gap: 3px;"
-                                                        on:click={() => { drillPendingCategoryChange = null; }}>
-                                                        <span class="material-symbols-outlined text-[12px]">arrow_back</span>
-                                                        Back
+                                                        class="tx-cat-apply-mode-pill"
+                                                        class:tx-cat-apply-mode-pill--active={drillCategoryApplyMode === 'always'}
+                                                        on:click={() => { drillCategoryApplyMode = 'always'; }}>
+                                                        Always
+                                                    </button>
+                                                    <button
+                                                        class="tx-cat-apply-mode-pill"
+                                                        class:tx-cat-apply-mode-pill--active={drillCategoryApplyMode === 'once'}
+                                                        on:click={() => { drillCategoryApplyMode = 'once'; }}>
+                                                        Just once
                                                     </button>
                                                 </div>
-                                            {:else}
-                                                <!-- Step 1: Category list -->
-                                                <div class="tx-cat-dropdown-search-wrap">
-                                                    <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
-                                                    <input
-                                                        bind:value={drillCatDropdownSearch}
-                                                        placeholder="Search categories..."
-                                                        class="tx-cat-dropdown-search"
-                                                        on:keydown={(e) => {
-                                                            if (e.key === 'Escape') cancelDrillEditing();
-                                                        }}
-                                                    />
-                                                </div>
-                                                <div class="tx-cat-dropdown-list">
-                                                    {#each drillFilteredCategories as cat}
-                                                        <button
-                                                            class="txn-filter-option"
-                                                            class:active={cat === tx.category}
-                                                            on:click={() => {
-                                                                if (cat !== tx.category) {
-                                                                    drillPendingCategoryChange = { txId: tx.original_id, category: cat };
-                                                                } else {
-                                                                    cancelDrillEditing();
-                                                                }
-                                                            }}>
-                                                            <span class="txn-filter-option-label">
-                                                                <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
-                                                                    {CATEGORY_ICONS[cat] || 'label'}
-                                                                </span>
-                                                                <span>{cat}</span>
+                                            </div>
+                                            <div class="tx-cat-dropdown-search-wrap">
+                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                                <input
+                                                    bind:value={drillCatDropdownSearch}
+                                                    placeholder="Search categories..."
+                                                    class="tx-cat-dropdown-search"
+                                                    on:keydown={(e) => {
+                                                        if (e.key === 'Escape') cancelDrillEditing();
+                                                    }}
+                                                />
+                                            </div>
+                                            <div class="tx-cat-dropdown-list">
+                                                {#each drillFilteredCategories as cat}
+                                                    <button
+                                                        class="txn-filter-option"
+                                                        class:active={cat === tx.category}
+                                                        on:click={() => {
+                                                            if (cat !== tx.category) {
+                                                                drillUpdateCategory(tx.original_id, cat, drillCategoryApplyMode === 'once');
+                                                            } else {
+                                                                cancelDrillEditing();
+                                                            }
+                                                        }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                                {CATEGORY_ICONS[cat] || 'label'}
                                                             </span>
-                                                            {#if cat === tx.category}
-                                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
-                                                            {/if}
-                                                        </button>
-                                                    {/each}
-                                                    {#if drillFilteredCategories.length === 0 && drillCatDropdownSearch}
-                                                        <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
-                                                            No matching categories
-                                                        </div>
-                                                    {/if}
-                                                </div>
-                                                <div class="tx-cat-dropdown-footer">
-                                                    {#if drillCreatingNewCategory}
-                                                        <div class="flex items-center gap-1.5 px-2 py-1.5">
-                                                            <input
-                                                                bind:value={drillNewCategoryName}
-                                                                placeholder="New category name..."
-                                                                class="tx-cat-dropdown-new-input"
-                                                                on:keydown={(e) => {
-                                                                    if (e.key === 'Enter') drillCreateAndApplyCategory(tx.original_id);
-                                                                    if (e.key === 'Escape') { drillCreatingNewCategory = false; drillNewCategoryName = ''; drillNewCategoryError = ''; }
-                                                                }}
-                                                            />
-                                                            <button
-                                                                class="tx-edit-btn tx-edit-btn-confirm"
-                                                                on:click={() => drillCreateAndApplyCategory(tx.original_id)}
-                                                                disabled={!drillNewCategoryName.trim()}>
-                                                                <span class="material-symbols-outlined text-[13px]">check</span>
-                                                            </button>
-                                                        </div>
-                                                        {#if drillNewCategoryError}
-                                                            <span class="text-[9px] px-3" style="color: var(--negative)">{drillNewCategoryError}</span>
+                                                            <span>{cat}</span>
+                                                        </span>
+                                                        {#if cat === tx.category}
+                                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
                                                         {/if}
-                                                    {:else}
+                                                    </button>
+                                                {/each}
+                                                {#if drillFilteredCategories.length === 0 && drillCatDropdownSearch}
+                                                    <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                        No matching categories
+                                                    </div>
+                                                {/if}
+                                            </div>
+                                            <div class="tx-cat-dropdown-footer">
+                                                {#if drillCreatingNewCategory}
+                                                    <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                        <input
+                                                            bind:value={drillNewCategoryName}
+                                                            placeholder="New category name..."
+                                                            class="tx-cat-dropdown-new-input"
+                                                            on:keydown={(e) => {
+                                                                if (e.key === 'Enter') drillCreateAndApplyCategory(tx.original_id);
+                                                                if (e.key === 'Escape') { drillCreatingNewCategory = false; drillNewCategoryName = ''; drillNewCategoryError = ''; }
+                                                            }}
+                                                        />
                                                         <button
-                                                            class="txn-filter-option tx-cat-create-btn"
-                                                            on:click={() => { drillCreatingNewCategory = true; }}>
-                                                            <span class="txn-filter-option-label">
-                                                                <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
-                                                                <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
-                                                            </span>
+                                                            class="tx-edit-btn tx-edit-btn-confirm"
+                                                            on:click={() => drillCreateAndApplyCategory(tx.original_id)}
+                                                            disabled={!drillNewCategoryName.trim()}>
+                                                            <span class="material-symbols-outlined text-[13px]">check</span>
                                                         </button>
+                                                    </div>
+                                                    {#if drillNewCategoryError}
+                                                        <span class="text-[9px] px-3" style="color: var(--negative)">{drillNewCategoryError}</span>
                                                     {/if}
-                                                </div>
-                                            {/if}
+                                                {:else}
+                                                    <button
+                                                        class="txn-filter-option tx-cat-create-btn"
+                                                        on:click={() => { drillCreatingNewCategory = true; }}>
+                                                        <span class="txn-filter-option-label">
+                                                            <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                            <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                        </span>
+                                                    </button>
+                                                {/if}
+                                            </div>
                                         </div>
                                     {/if}
                                 </div>
@@ -2654,6 +2703,177 @@
             </div>
         {/if}
     </section>
+
+    {/if}
+
+    <TellerConnect
+        bind:this={tellerConnectRef}
+        applicationId={tellerAppId}
+        environment={tellerEnvironment}
+        renderButton={false}
+        on:enrolled={handleTellerEnrolled}
+        on:error={(e) => console.warn('Teller Connect error:', e.detail)}
+    />
+    <SimpleFINConnect
+        bind:this={simplefinConnectRef}
+        on:connected={handleSimpleFINConnected}
+    />
+
+    {#if connectionChooserOpen}
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+        <div class="bank-chooser-backdrop" on:click={handleConnectionChooserBackdrop}>
+            <div class="bank-chooser-modal" role="dialog" aria-modal="true" aria-label="Choose bank connection provider">
+                <div class="bank-chooser-header">
+                    <h3>Add Bank Connection</h3>
+                    <button class="bank-chooser-close" on:click={closeConnectionChooser} aria-label="Close">
+                        <span class="material-symbols-outlined">close</span>
+                    </button>
+                </div>
+
+                <div class="bank-chooser-body">
+                    <p class="bank-chooser-intro">Choose how you want to connect your bank account.</p>
+
+                    <button class="bank-chooser-option" on:click={launchTellerFromChooser} disabled={!tellerAppId}>
+                        <div class="bank-chooser-option-copy">
+                            <strong>Teller</strong>
+                            <span>{tellerAppId ? 'Launch the guided Teller Connect flow.' : 'Teller Connect is not configured in this environment.'}</span>
+                        </div>
+                        <span class="material-symbols-outlined bank-chooser-option-icon">chevron_right</span>
+                    </button>
+
+                    <button class="bank-chooser-option" on:click={launchSimpleFINFromChooser}>
+                        <div class="bank-chooser-option-copy">
+                            <strong>SimpleFIN</strong>
+                            <span>Paste a setup token and choose a Folio profile.</span>
+                        </div>
+                        <span class="material-symbols-outlined bank-chooser-option-icon">chevron_right</span>
+                    </button>
+                </div>
+            </div>
+        </div>
     {/if}
 </div>
 {/if}
+
+<style>
+    .bank-chooser-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 5000;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding: clamp(72px, 11vh, 128px) 16px 24px;
+        background: rgba(8, 12, 24, 0.56);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        overflow-y: auto;
+    }
+
+    .bank-chooser-modal {
+        width: min(420px, calc(100vw - 32px));
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 18px;
+        box-shadow: 0 28px 72px rgba(15, 23, 42, 0.3);
+        overflow: hidden;
+    }
+
+    .bank-chooser-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--card-border);
+    }
+
+    .bank-chooser-header h3 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .bank-chooser-close {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border: none;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+    }
+
+    .bank-chooser-close:hover {
+        background: var(--hover-bg);
+        color: var(--text-primary);
+    }
+
+    .bank-chooser-body {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 18px;
+    }
+
+    .bank-chooser-intro {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 13px;
+        line-height: 1.5;
+    }
+
+    .bank-chooser-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        padding: 14px 15px;
+        border-radius: 12px;
+        border: 1px solid var(--card-border);
+        background: var(--bg-level-1, var(--hover-bg));
+        color: var(--text-primary);
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.18s ease;
+    }
+
+    .bank-chooser-option:hover:not(:disabled) {
+        border-color: color-mix(in srgb, var(--accent) 28%, var(--card-border));
+        background: color-mix(in srgb, var(--accent) 8%, var(--bg-level-1, var(--hover-bg)));
+    }
+
+    .bank-chooser-option:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
+    .bank-chooser-option-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+        flex: 1;
+    }
+
+    .bank-chooser-option-copy strong {
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .bank-chooser-option-copy span {
+        color: var(--text-secondary);
+        font-size: 12px;
+        line-height: 1.45;
+    }
+
+    .bank-chooser-option-icon {
+        font-size: 18px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+    }
+</style>

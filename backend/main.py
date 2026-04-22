@@ -45,6 +45,13 @@ from data_manager import (
 )
 from categorizer import get_active_categories
 from database import init_db, get_db, get_db_session, close_thread_local_connection
+from local_llm import (
+    get_catalog_response,
+    get_status_response,
+    update_settings as update_local_llm_settings,
+    get_frontend_flags,
+    install_model as install_local_llm_model,
+)
 
 # CORS origins from env, with dev defaults
 _cors_origins = os.getenv(
@@ -146,12 +153,92 @@ TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Pay
 NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income"}
 
 # ── Profile helpers ──────────────────────────────────────────────
-def _get_profile_list() -> list[dict]:
-    names = sorted(bank.PROFILES.keys())  # ← always reads current
-    profiles = [{"id": n, "name": n.title()} for n in names]
-    if len(names) > 1:
+def _normalize_profile_whitespace(value: str | None) -> str:
+    return " ".join((value or "").strip().split())
+
+
+def _canonicalize_profile_id(value: str | None) -> str:
+    return _normalize_profile_whitespace(value).lower()
+
+
+def _titleize_profile_name(value: str | None) -> str:
+    normalized = _normalize_profile_whitespace(value)
+    return normalized.title() if normalized else ""
+
+
+def _display_name_from_profile_id(profile_id: str) -> str:
+    return _titleize_profile_name(profile_id) or "Primary"
+
+
+def _load_profile_rows(conn) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, display_name
+           FROM profiles
+           WHERE TRIM(COALESCE(id, '')) != ''
+             AND LOWER(TRIM(id)) != 'household'
+           ORDER BY LOWER(COALESCE(display_name, id)), LOWER(id)"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _get_profile_list(conn) -> list[dict]:
+    rows = _load_profile_rows(conn)
+    profiles = [
+        {
+            "id": row["id"],
+            "name": (row.get("display_name") or "").strip() or _display_name_from_profile_id(row["id"]),
+        }
+        for row in rows
+    ]
+    if len(profiles) > 1:
         profiles.append({"id": "household", "name": "Household"})
     return profiles
+
+
+def _load_valid_profiles(conn) -> set[str]:
+    return {row["id"] for row in _load_profile_rows(conn)}
+
+
+def _ensure_profile(profile_value: str, display_name: str | None = None, conn=None) -> dict:
+    canonical_id = _canonicalize_profile_id(profile_value)
+    if not canonical_id:
+        raise ValueError("Profile is required.")
+    if canonical_id == "household":
+        raise ValueError("'household' is reserved and cannot be used as a profile.")
+
+    desired_display = _titleize_profile_name(display_name) or _display_name_from_profile_id(canonical_id)
+
+    def _upsert(target_conn):
+        existing = target_conn.execute(
+            "SELECT id, display_name FROM profiles WHERE id = ?",
+            (canonical_id,),
+        ).fetchone()
+        if existing:
+            current_display = (existing["display_name"] or "").strip()
+            if not current_display or current_display.lower() == canonical_id:
+                target_conn.execute(
+                    "UPDATE profiles SET display_name = ? WHERE id = ?",
+                    (desired_display, canonical_id),
+                )
+                current_display = desired_display
+            return {
+                "id": canonical_id,
+                "display_name": current_display or desired_display,
+                "created": False,
+            }
+
+        target_conn.execute(
+            """INSERT INTO profiles (id, display_name, is_default)
+               VALUES (?, ?, ?)""",
+            (canonical_id, desired_display, 1 if canonical_id == "primary" else 0),
+        )
+        return {"id": canonical_id, "display_name": desired_display, "created": True}
+
+    if conn is not None:
+        return _upsert(conn)
+
+    with get_db() as target_conn:
+        return _upsert(target_conn)
 
 
 def _filter_by_profile(items: list[dict], profile: str | None) -> list[dict]:
@@ -171,20 +258,24 @@ _VALID_PROFILES: set[str] | None = None
 
 def validate_profile(profile: str | None = Query(None)) -> str | None:
     global _VALID_PROFILES
-    if not profile or profile == "household":
-        return profile
+    normalized = _canonicalize_profile_id(profile)
+    if not normalized:
+        return None
+    if normalized == "household":
+        return "household"
     if _VALID_PROFILES is None:
-        _VALID_PROFILES = set(bank.PROFILES.keys()) | {"household"}
-    if profile not in _VALID_PROFILES:
+        with get_db() as conn:
+            _VALID_PROFILES = _load_valid_profiles(conn) | {"household"}
+    if normalized not in _VALID_PROFILES:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown profile: '{profile}'. Valid profiles: {sorted(_VALID_PROFILES)}",
         )
-    return profile
+    return normalized
 
 
 def _invalidate_profile_cache():
-    """Reset the valid profiles cache after a new enrollment."""
+    """Reset cached profile validation results after profile-affecting changes."""
     global _VALID_PROFILES
     _VALID_PROFILES = None
 
@@ -194,13 +285,18 @@ def _require_live_mode(detail: str = "This action is disabled in demo mode.") ->
         raise HTTPException(status_code=403, detail=detail)
 
 
-def _app_config_payload() -> dict:
-    return {
+def _app_config_payload(db=None) -> dict:
+    payload = {
         "demoMode": DEMO_MODE,
         "bankLinkingEnabled": not DEMO_MODE,
         "manualSyncEnabled": not DEMO_MODE,
         "demoPersistence": "ephemeral" if DEMO_MODE else "persistent",
     }
+    try:
+        payload.update(get_frontend_flags(db))
+    except Exception as exc:
+        logger.debug("Failed to load local LLM frontend flags: %s", exc)
+    return payload
 
 
 # ── Models ──
@@ -217,6 +313,21 @@ class TransactionExcludeUpdate(BaseModel):
 
 class CopilotRequest(BaseModel):
     question: str
+
+
+class LocalLlmSettingsUpdate(BaseModel):
+    llm_provider: str | None = None
+    preset: str | None = None
+    categorize_model: str | None = None
+    copilot_model: str | None = None
+    categorize_batch_size: int | None = None
+    inter_batch_delay_ms: int | None = None
+    low_power_mode: bool | None = None
+    expert_mode: bool | None = None
+
+
+class LocalLlmInstallRequest(BaseModel):
+    model: str
 
 
 # ── Helper Functions ──
@@ -255,15 +366,68 @@ def _is_savings(tx: dict) -> bool:
 
 
 @app.get("/api/profiles")
-def profiles():
+def profiles(db=Depends(get_db_session)):
     """Return available profile names for the frontend toggle."""
-    return _get_profile_list()
+    return _get_profile_list(db)
 
 
 @app.get("/api/app-config")
-def app_config():
+def app_config(db=Depends(get_db_session)):
     """Frontend-safe runtime flags for demo/public deployments."""
-    return _app_config_payload()
+    return _app_config_payload(db)
+
+
+@app.get("/api/local-llm/catalog")
+def local_llm_catalog(db=Depends(get_db_session)):
+    return get_catalog_response(db)
+
+
+@app.get("/api/local-llm/status")
+def local_llm_status(db=Depends(get_db_session)):
+    return get_status_response(db)
+
+
+@app.patch("/api/local-llm/settings")
+def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_session)):
+    payload = {}
+    if body.llm_provider is not None:
+        payload["llm_provider"] = body.llm_provider
+    if body.preset is not None:
+        payload["local_ai_profile"] = body.preset
+    if body.categorize_model is not None:
+        payload["categorize_model"] = body.categorize_model
+    if body.copilot_model is not None:
+        payload["copilot_model"] = body.copilot_model
+    if body.categorize_batch_size is not None:
+        payload["categorize_batch_size"] = body.categorize_batch_size
+    if body.inter_batch_delay_ms is not None:
+        payload["inter_batch_delay_ms"] = body.inter_batch_delay_ms
+    if body.low_power_mode is not None:
+        payload["low_power_mode"] = body.low_power_mode
+    if body.expert_mode is not None:
+        payload["expert_mode"] = body.expert_mode
+
+    try:
+        update_local_llm_settings(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "status": get_status_response(db),
+        "config": _app_config_payload(db),
+    }
+
+
+@app.post("/api/local-llm/install")
+def post_local_llm_install(body: LocalLlmInstallRequest, db=Depends(get_db_session)):
+    try:
+        result = install_local_llm_model(body.model, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        **result,
+        "config": _app_config_payload(db),
+    }
 
 
 @app.get("/api/accounts")
@@ -1260,8 +1424,12 @@ def enroll_account(req: EnrollRequest):
         profile_name = "primary"
         
     # 3. Persist
+    profile_record = _ensure_profile(
+        profile_name,
+        display_name=identity["first_name"] or profile_name,
+    )
     was_new = save_token(
-        profile=profile_name,
+        profile=profile_record["id"],
         token=req.accessToken,
         institution=req.institutionName,
         owner_name=identity["full_name"],
@@ -1290,7 +1458,7 @@ def enroll_account(req: EnrollRequest):
 
     return {
         "status": "enrolled" if was_new else "already_exists",
-        "profile": profile_name,
+        "profile": profile_record["id"],
         "institution": institution,
         "owner": identity["full_name"],
         "accounts_found": len(accounts),
@@ -1425,7 +1593,12 @@ def simplefin_claim(req: SimpleFINClaimRequest, background_tasks: BackgroundTask
     """
     import simplefin
 
-    profile = req.profile.lower().strip() or "primary"
+    requested_profile = req.profile or "primary"
+    canonical_profile = _canonicalize_profile_id(requested_profile)
+    if not canonical_profile:
+        raise HTTPException(status_code=400, detail="Profile is required.")
+    if canonical_profile == "household":
+        raise HTTPException(status_code=400, detail="'household' is reserved and cannot be used as a profile.")
 
     # 1. Claim
     try:
@@ -1433,10 +1606,12 @@ def simplefin_claim(req: SimpleFINClaimRequest, background_tasks: BackgroundTask
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    profile_record = _ensure_profile(canonical_profile, display_name=requested_profile)
+
     # 2. Store
     try:
         conn_id = simplefin.save_connection(
-            profile=profile,
+            profile=profile_record["id"],
             access_url=access_url,
             display_name=req.displayName,
         )
@@ -1462,7 +1637,7 @@ def simplefin_claim(req: SimpleFINClaimRequest, background_tasks: BackgroundTask
     return {
         "status": "connected",
         "connection_id": conn_id,
-        "profile": profile,
+        "profile": profile_record["id"],
         "displayName": req.displayName,
         "syncing": True,
     }

@@ -110,7 +110,7 @@
     // ── Category re-tag dropdown state ──
     let catDropdownOpenForTx = null;   // original_id of tx whose dropdown is open
     let catDropdownSearch = '';         // search/filter within the dropdown
-    let pendingCategoryChange = null;  // { txId, category } — awaiting one-off vs always choice
+    let categoryApplyMode = 'always';
 
     // Recategorization feedback
     let recentlyUpdatedTxId = null;
@@ -399,7 +399,7 @@
             updateFeedback = 'Failed to update category';
             setTimeout(() => { updateFeedback = ''; }, 3000);
         }
-        pendingCategoryChange = null;
+        categoryApplyMode = 'always';
         editingTxId = null;
         creatingNewCategory = false;
         newCategoryName = '';
@@ -418,7 +418,9 @@
             creatingNewCategory = false;
             newCategoryName = '';
             newCategoryError = '';
-            pendingCategoryChange = { txId, category: existing };
+            if (existing) {
+                await updateCategory(txId, existing, categoryApplyMode === 'once');
+            }
             return;
         }
 
@@ -427,7 +429,7 @@
             allCategories = [...allCategories, name].sort();
             creatingNewCategory = false;
             newCategoryName = '';
-            pendingCategoryChange = { txId, category: name };
+            await updateCategory(txId, name, categoryApplyMode === 'once');
         } catch (e) {
             newCategoryError = 'Failed to create category';
             console.error(e);
@@ -438,6 +440,7 @@
         editingTxId = txId;
         catDropdownOpenForTx = txId;
         catDropdownSearch = '';
+        categoryApplyMode = 'always';
         creatingNewCategory = false;
         newCategoryName = '';
         newCategoryError = '';
@@ -450,7 +453,7 @@
         creatingNewCategory = false;
         newCategoryName = '';
         newCategoryError = '';
-        pendingCategoryChange = null;
+        categoryApplyMode = 'always';
     }
 
     // Filtered category list for the re-tag dropdown search
@@ -851,120 +854,98 @@
 
                                 {#if catDropdownOpenForTx === tx.original_id}
                                     <div class="txn-filter-dropdown tx-cat-dropdown" on:click|stopPropagation>
-                                        {#if pendingCategoryChange?.txId === tx.original_id}
-                                            <!-- Step 2: One-off vs Always confirmation -->
-                                            <div class="tx-cat-apply-panel">
-                                                <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-2" style="color: var(--text-muted)">Apply to</p>
-                                                <p class="tx-cat-apply-target" style="color: var(--text-primary)">
-                                                    <span class="material-symbols-outlined text-[13px]" style="color: {CATEGORY_COLORS[pendingCategoryChange.category] || 'var(--text-muted)'};">
-                                                        {CATEGORY_ICONS[pendingCategoryChange.category] || 'label'}
-                                                    </span>
-                                                    <span>{pendingCategoryChange.category}</span>
-                                                </p>
-                                                <div class="tx-cat-apply-choice-list">
-                                                    <button
-                                                        class="tx-cat-apply-choice"
-                                                        on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, false)}>
-                                                        <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--accent)">all_inclusive</span>
-                                                        <span class="tx-cat-apply-choice-body">
-                                                            <span class="tx-cat-apply-choice-title">Always</span>
-                                                            <span class="tx-cat-apply-choice-note">Rule + similar</span>
-                                                        </span>
-                                                    </button>
-                                                    <button
-                                                        class="tx-cat-apply-choice"
-                                                        on:click={() => updateCategory(tx.original_id, pendingCategoryChange.category, true)}>
-                                                        <span class="material-symbols-outlined tx-cat-apply-choice-icon" style="color: var(--text-secondary)">looks_one</span>
-                                                        <span class="tx-cat-apply-choice-body">
-                                                            <span class="tx-cat-apply-choice-title">Just once</span>
-                                                            <span class="tx-cat-apply-choice-note">Only this tx</span>
-                                                        </span>
-                                                    </button>
-                                                </div>
+                                        <div class="tx-cat-apply-toggle">
+                                            <div class="tx-cat-apply-toggle-copy">
+                                                <span class="tx-cat-apply-toggle-label">Apply</span>
+                                            </div>
+                                            <div class="tx-cat-apply-toggle-actions">
                                                 <button
-                                                    class="text-[10px] mt-2.5"
-                                                    style="color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 0; display: flex; align-items: center; gap: 3px;"
-                                                    on:click={() => { pendingCategoryChange = null; }}>
-                                                    <span class="material-symbols-outlined text-[12px]">arrow_back</span>
-                                                    Back
+                                                    class="tx-cat-apply-mode-pill"
+                                                    class:tx-cat-apply-mode-pill--active={categoryApplyMode === 'always'}
+                                                    on:click={() => { categoryApplyMode = 'always'; }}>
+                                                    Always
+                                                </button>
+                                                <button
+                                                    class="tx-cat-apply-mode-pill"
+                                                    class:tx-cat-apply-mode-pill--active={categoryApplyMode === 'once'}
+                                                    on:click={() => { categoryApplyMode = 'once'; }}>
+                                                    Just once
                                                 </button>
                                             </div>
-                                        {:else}
-                                            <!-- Step 1: Category list -->
-                                            <div class="tx-cat-dropdown-search-wrap">
-                                                <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
-                                                <input
-                                                    bind:value={catDropdownSearch}
-                                                    placeholder="Search categories..."
-                                                    class="tx-cat-dropdown-search"
-                                                    on:keydown={(e) => {
-                                                        if (e.key === 'Escape') cancelEditing();
-                                                    }}
-                                                />
-                                            </div>
-                                            <div class="tx-cat-dropdown-list">
-                                                {#each filteredEditCategories as cat}
-                                                    <button
-                                                        class="txn-filter-option"
-                                                        class:active={cat === tx.category}
-                                                        on:click={() => {
-                                                            if (cat !== tx.category) {
-                                                                pendingCategoryChange = { txId: tx.original_id, category: cat };
-                                                            } else {
-                                                                cancelEditing();
-                                                            }
-                                                        }}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
-                                                                {CATEGORY_ICONS[cat] || 'label'}
-                                                            </span>
-                                                            <span>{cat}</span>
+                                        </div>
+                                        <div class="tx-cat-dropdown-search-wrap">
+                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--text-muted)">search</span>
+                                            <input
+                                                bind:value={catDropdownSearch}
+                                                placeholder="Search categories..."
+                                                class="tx-cat-dropdown-search"
+                                                on:keydown={(e) => {
+                                                    if (e.key === 'Escape') cancelEditing();
+                                                }}
+                                            />
+                                        </div>
+                                        <div class="tx-cat-dropdown-list">
+                                            {#each filteredEditCategories as cat}
+                                                <button
+                                                    class="txn-filter-option"
+                                                    class:active={cat === tx.category}
+                                                    on:click={() => {
+                                                        if (cat !== tx.category) {
+                                                            updateCategory(tx.original_id, cat, categoryApplyMode === 'once');
+                                                        } else {
+                                                            cancelEditing();
+                                                        }
+                                                    }}>
+                                                    <span class="txn-filter-option-label">
+                                                        <span class="material-symbols-outlined" style="color: {CATEGORY_COLORS[cat] || 'var(--text-muted)'}">
+                                                            {CATEGORY_ICONS[cat] || 'label'}
                                                         </span>
-                                                        {#if cat === tx.category}
-                                                            <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
-                                                        {/if}
-                                                    </button>
-                                                {/each}
-                                                {#if filteredEditCategories.length === 0 && catDropdownSearch}
-                                                    <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
-                                                        No matching categories
-                                                    </div>
-                                                {/if}
-                                            </div>
-                                            <div class="tx-cat-dropdown-footer">
-                                                {#if creatingNewCategory}
-                                                    <div class="flex items-center gap-1.5 px-2 py-1.5">
-                                                        <input
-                                                            bind:value={newCategoryName}
-                                                            placeholder="New category name..."
-                                                            class="tx-cat-dropdown-new-input"
-                                                            on:keydown={(e) => {
-                                                                if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
-                                                                if (e.key === 'Escape') { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            class="tx-edit-btn tx-edit-btn-confirm"
-                                                            on:click={() => createAndApplyCategory(tx.original_id)}
-                                                            disabled={!newCategoryName.trim()}>
-                                                            <span class="material-symbols-outlined text-[13px]">check</span>
-                                                        </button>
-                                                    </div>
-                                                    {#if newCategoryError}
-                                                        <span class="text-[9px] px-3" style="color: var(--negative)">{newCategoryError}</span>
+                                                        <span>{cat}</span>
+                                                    </span>
+                                                    {#if cat === tx.category}
+                                                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">check</span>
                                                     {/if}
-                                                {:else}
+                                                </button>
+                                            {/each}
+                                            {#if filteredEditCategories.length === 0 && catDropdownSearch}
+                                                <div class="px-3 py-2 text-[11px]" style="color: var(--text-muted)">
+                                                    No matching categories
+                                                </div>
+                                            {/if}
+                                        </div>
+                                        <div class="tx-cat-dropdown-footer">
+                                            {#if creatingNewCategory}
+                                                <div class="flex items-center gap-1.5 px-2 py-1.5">
+                                                    <input
+                                                        bind:value={newCategoryName}
+                                                        placeholder="New category name..."
+                                                        class="tx-cat-dropdown-new-input"
+                                                        on:keydown={(e) => {
+                                                            if (e.key === 'Enter') createAndApplyCategory(tx.original_id);
+                                                            if (e.key === 'Escape') { creatingNewCategory = false; newCategoryName = ''; newCategoryError = ''; }
+                                                        }}
+                                                    />
                                                     <button
-                                                        class="txn-filter-option tx-cat-create-btn"
-                                                        on:click={() => { creatingNewCategory = true; }}>
-                                                        <span class="txn-filter-option-label">
-                                                            <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
-                                                            <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
-                                                        </span>
+                                                        class="tx-edit-btn tx-edit-btn-confirm"
+                                                        on:click={() => createAndApplyCategory(tx.original_id)}
+                                                        disabled={!newCategoryName.trim()}>
+                                                        <span class="material-symbols-outlined text-[13px]">check</span>
                                                     </button>
+                                                </div>
+                                                {#if newCategoryError}
+                                                    <span class="text-[9px] px-3" style="color: var(--negative)">{newCategoryError}</span>
                                                 {/if}
-                                            </div>
-                                        {/if}
+                                            {:else}
+                                                <button
+                                                    class="txn-filter-option tx-cat-create-btn"
+                                                    on:click={() => { creatingNewCategory = true; }}>
+                                                    <span class="txn-filter-option-label">
+                                                        <span class="material-symbols-outlined" style="color: #8b5cf6">add_circle</span>
+                                                        <span style="color: #8b5cf6; font-weight: 600;">Create new category</span>
+                                                    </span>
+                                                </button>
+                                            {/if}
+                                        </div>
                                     </div>
                                 {/if}
                             </div>

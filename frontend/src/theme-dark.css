@@ -5,11 +5,11 @@
 
 .dark {
     /* —— Dark Foundation —— */
-    --body-bg:      #24252A;
-    --bg-base:      #24252A;
-    --bg-level-1:   #2A2C32;
-    --bg-level-2:   #31343B;
-    --bg-level-3:   #383B43;
+    --body-bg:      #2A2C32;
+    --bg-base:      #2A2C32;
+    --bg-level-1:   #30333A;
+    --bg-level-2:   #373A43;
+    --bg-level-3:   #3F434C;
 
     /* —— Disable light-mode mesh canvas —— */
     --mesh-canvas:  none;
@@ -27,10 +27,10 @@
     --frost-inner-glow:    none;
     --frost-edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05),
                             inset 0 -1px 0 rgba(0, 0, 0, 0.10);
-    --bg-card:      #2B2D33;
-    --bg-recessed:  #26282E;
-    --bg-hero:      #18191D;
-    --border-subtle: rgba(116, 128, 148, 0.20);
+    --bg-card:      #31343B;
+    --bg-recessed:  #2C2F36;
+    --bg-hero:      #202329;
+    --border-subtle: rgba(136, 148, 170, 0.24);
 
     /* —— Accent —— */
     --accent:        #5a9fd4;
@@ -40,30 +40,30 @@
     --accent-border: rgba(90, 159, 212, 0.24);
 
     /* —— Surfaces —— */
-    --surface:      rgba(42, 44, 52, 0.86);
-    --surface-alt:  rgba(46, 48, 56, 0.86);
-    --surface-100:  rgba(47, 50, 58, 0.72);
-    --surface-200:  rgba(58, 61, 70, 0.54);
-    --surface-300:  rgba(66, 70, 80, 0.48);
-    --surface-elevated: rgba(48, 50, 58, 0.82);
+    --surface:      rgba(50, 53, 62, 0.88);
+    --surface-alt:  rgba(55, 58, 67, 0.88);
+    --surface-100:  rgba(58, 61, 71, 0.76);
+    --surface-200:  rgba(69, 73, 84, 0.60);
+    --surface-300:  rgba(78, 83, 95, 0.54);
+    --surface-elevated: rgba(57, 60, 70, 0.86);
 
     /* —— Glass tokens —— */
     --glass-blur:       20px;
     --glass-blur-heavy: 30px;
-    --glass-bg:         rgba(42, 44, 52, 0.72);
-    --glass-bg-strong:  rgba(42, 44, 52, 0.88);
-    --glass-bg-subtle:  rgba(42, 44, 52, 0.52);
-    --glass-border:     rgba(138, 153, 176, 0.14);
+    --glass-bg:         rgba(50, 53, 62, 0.76);
+    --glass-bg-strong:  rgba(50, 53, 62, 0.90);
+    --glass-bg-subtle:  rgba(50, 53, 62, 0.58);
+    --glass-border:     rgba(150, 166, 190, 0.18);
     --glass-shine:      linear-gradient(135deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.012) 46%, rgba(126, 211, 255, 0.028) 100%);
 
     /* —— Borders —— */
-    --card-border:       rgba(114, 124, 140, 0.30);
-    --card-border-hover: rgba(90, 159, 212, 0.36);
+    --card-border:       rgba(130, 142, 160, 0.34);
+    --card-border-hover: rgba(108, 180, 235, 0.42);
 
     /* —— Text —— */
     --text-primary:   #F1F5F9;
-    --text-secondary: #8B9BB5;
-    --text-muted:     #546378;
+    --text-secondary: #A4B2C6;
+    --text-muted:     #708097;
     --text-on-dark:   #F1F5F9;
 
     /* —— Semantic —— */
@@ -99,8 +99,8 @@
     --flow-rose:            #f87171;
 
     /* —— Card System —— */
-    --card-bg:      rgba(34, 36, 42, 0.82);
-    --card-bg-flat: rgba(34, 36, 42, 0.93);
+    --card-bg:      rgba(43, 46, 54, 0.86);
+    --card-bg-flat: rgba(43, 46, 54, 0.95);
     --card-shadow:
         0 1px 2px rgba(0, 0, 0, 0.22),
         0 10px 26px rgba(0, 0, 0, 0.18),
@@ -111,16 +111,16 @@
         0 28px 64px rgba(0, 0, 0, 0.18);
 
     /* ── Sidebar ── */
-    --sidebar-bg:          rgba(25, 25, 27, 0.97);
+    --sidebar-bg:          rgba(35, 38, 45, 0.97);
     --sidebar-border:      rgba(75, 75, 82, 0.15);
-    --sidebar-text:        #7B8DA4;
+    --sidebar-text:        #95A6BB;
     --sidebar-text-active: #e8ecf1;
     --sidebar-hover:       rgba(90, 159, 212, 0.08);
     --sidebar-active-bg:   rgba(90, 159, 212, 0.12);
     --sidebar-logo-shadow: 0 4px 16px rgba(90, 159, 212, 0.35);
 
 /* ── Glass Rail v2 ── */
-    --rail-bg: rgba(25, 25, 27, 0.90);
+    --rail-bg: rgba(35, 38, 45, 0.92);
     --rail-blur:                 30px;
     --rail-saturate:             1.0;
     --rail-border:               rgba(120, 120, 130, 0.10);
@@ -165,12 +165,12 @@
         0 0 32px rgba(90, 159, 212, 0.04);
 
     /* —— Topbar —— */
-    --topbar-bg:     rgba(36, 38, 44, 0.92);
-    --topbar-border: rgba(114, 124, 140, 0.16);
+    --topbar-bg:     rgba(46, 49, 57, 0.94);
+    --topbar-border: rgba(132, 144, 164, 0.20);
 
     /* —— Sankey Theater —— */
-    --sankey-theater-bg:       linear-gradient(135deg, rgba(20, 22, 28, 0.94) 0%, rgba(16, 18, 23, 0.96) 52%, rgba(13, 14, 18, 0.98) 100%);
-    --sankey-theater-border:   rgba(92, 126, 168, 0.28);
+    --sankey-theater-bg:       linear-gradient(135deg, rgba(30, 34, 42, 0.95) 0%, rgba(25, 29, 37, 0.97) 52%, rgba(21, 24, 31, 0.985) 100%);
+    --sankey-theater-border:   rgba(112, 152, 198, 0.34);
     --sankey-theater-shadow:
         0 2px 8px rgba(10, 22, 38, 0.18),
         0 8px 32px rgba(10, 22, 38, 0.14),
@@ -178,18 +178,18 @@
         inset 0 1px 0 rgba(100, 140, 180, 0.07);
     --sankey-zone:   linear-gradient(180deg, rgba(22, 24, 28, 0.95) 0%, rgba(18, 20, 24, 0.98) 100%);
     --sankey-ambient:
-        radial-gradient(ellipse at 12% 40%, rgba(52, 211, 153, 0.09), transparent 50%),
-        radial-gradient(ellipse at 50% 50%, rgba(90, 159, 212, 0.06), transparent 45%),
-        radial-gradient(ellipse at 88% 55%, rgba(248, 113, 113, 0.06), transparent 50%),
-        radial-gradient(ellipse at 50% 90%, rgba(167, 139, 250, 0.05), transparent 50%);
+        radial-gradient(ellipse at 12% 40%, rgba(52, 211, 153, 0.12), transparent 50%),
+        radial-gradient(ellipse at 50% 50%, rgba(90, 159, 212, 0.09), transparent 45%),
+        radial-gradient(ellipse at 88% 55%, rgba(248, 113, 113, 0.08), transparent 50%),
+        radial-gradient(ellipse at 50% 90%, rgba(167, 139, 250, 0.07), transparent 50%);
 
-    --sankey-label-primary:    #D0D6DE;
-    --sankey-label-secondary:  #D5DBE2;
-    --sankey-label-muted:      #6B7280;
+    --sankey-label-primary:    #E2E8F0;
+    --sankey-label-secondary:  #DEE7F1;
+    --sankey-label-muted:      #8692A4;
 
     /*  Category Pill Card  */
-    --pill-card-bg:          rgba(26, 28, 32, 0.60);
-    --pill-card-border:      rgba(70, 95, 128, 0.30);
+    --pill-card-bg:          rgba(37, 40, 47, 0.68);
+    --pill-card-border:      rgba(90, 122, 162, 0.34);
     --pill-card-shadow:
         0 1px 3px rgba(0, 0, 0, 0.18),
         0 4px 12px rgba(0, 0, 0, 0.14),

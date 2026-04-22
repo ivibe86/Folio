@@ -495,6 +495,8 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
         "ollama_base_url": "",
         "ollama_model_categorize": "",
         "ollama_model_copilot": "",
+        "local_llm_memory_tier": "",
+        "local_llm_ram_gb": "",
         "local_enrichment_batch_size": "20",
         "local_enrichment_min_confidence": "medium",
     }
@@ -540,6 +542,13 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
                 ),
                 "ollama_model_categorize": preset["categorize_model"],
                 "ollama_model_copilot": preset["copilot_model"],
+                "local_llm_memory_tier": (
+                    "32gb" if (system_profile.get("ram_gb") or 0) >= 24
+                    else "16gb" if (system_profile.get("ram_gb") or 0) >= 14
+                    else "8gb" if system_profile.get("ram_gb")
+                    else ""
+                ),
+                "local_llm_ram_gb": str(system_profile["ram_gb"]) if system_profile.get("ram_gb") else "",
             }
         )
         return config
@@ -633,6 +642,8 @@ def write_env_file(config: dict):
             f"OLLAMA_BASE_URL={config.get('ollama_base_url', '')}",
             f"OLLAMA_MODEL_CATEGORIZE={config.get('ollama_model_categorize', '')}",
             f"OLLAMA_MODEL_COPILOT={config.get('ollama_model_copilot', '')}",
+            f"LOCAL_LLM_MEMORY_TIER={config.get('local_llm_memory_tier', '')}",
+            f"LOCAL_LLM_RAM_GB={config.get('local_llm_ram_gb', '')}",
             f"LOCAL_ENRICHMENT_BATCH_SIZE={config.get('local_enrichment_batch_size', '20')}",
             f"LOCAL_ENRICHMENT_MIN_CONFIDENCE={config.get('local_enrichment_min_confidence', 'medium')}",
             "OLLAMA_TIMEOUT_CATEGORIZE=600",

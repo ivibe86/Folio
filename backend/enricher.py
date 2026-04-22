@@ -317,7 +317,7 @@ def _resolve_enrichment_mode() -> str:
     """
     if ENABLE_TROVE and TROVE_API_KEY:
         return "trove"
-    if ENABLE_LOCAL_ENRICHMENT and llm_client.LLM_PROVIDER == "ollama" and llm_client.is_available():
+    if ENABLE_LOCAL_ENRICHMENT and llm_client.get_provider() == "ollama" and llm_client.is_available():
         return "local_llm"
     return "none"
 

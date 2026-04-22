@@ -20,6 +20,11 @@
 
     let recurringData = null;
     let historyItems = [];
+    let localLlmStatus = null;
+    let localLlmCatalog = null;
+    let copilotModel = '';
+    let copilotModelSaving = false;
+    let copilotModelInstalling = false;
 
     let messages = [
         {
@@ -85,11 +90,15 @@
     $: scopedProfile = activeProfileId !== 'household' ? activeProfileId : null;
     $: unreadEvents = recurringData?.events?.filter((event) => !event.is_read) || [];
     $: recentHistory = historyItems.slice(0, 6);
+    $: copilotModelOptions = Array.isArray(localLlmCatalog?.tiers)
+        ? localLlmCatalog.tiers.flatMap((tier) => tier.models.filter((model) => model.task_fit?.includes('copilot')))
+        : [];
+    $: selectedCopilotModelMeta = copilotModelOptions.find((model) => model.id === copilotModel) || null;
 
     onMount(async () => {
         const prompt = $page.url.searchParams.get('prompt');
         if (prompt) input = prompt;
-        await refreshSidebar();
+        await Promise.all([refreshSidebar(), loadLocalLlm()]);
         lastLoadedProfile = activeProfileId;
         // Load categories for chip form dropdowns
         try {
@@ -180,6 +189,58 @@
             historyItems = historyResult?.items || [];
         } finally {
             sidebarLoading = false;
+        }
+    }
+
+    async function loadLocalLlm() {
+        try {
+            const [status, catalog] = await Promise.all([
+                api.getLocalLlmStatus(),
+                api.getLocalLlmCatalog(),
+            ]);
+            localLlmStatus = status;
+            localLlmCatalog = catalog;
+            copilotModel = status?.selectedCopilotModel || '';
+        } catch (error) {
+            localLlmStatus = null;
+            localLlmCatalog = null;
+        }
+    }
+
+    async function updateCopilotModelSelection(nextModel) {
+        if (!nextModel || nextModel === localLlmStatus?.selectedCopilotModel || copilotModelSaving) return;
+        copilotModelSaving = true;
+        try {
+            const result = await api.updateLocalLlmSettings({ copilot_model: nextModel });
+            if (result?.status) {
+                localLlmStatus = result.status;
+                copilotModel = result.status.selectedCopilotModel || nextModel;
+            } else {
+                copilotModel = nextModel;
+            }
+            setNotice(`Copilot model switched to ${nextModel}.`);
+        } catch (error) {
+            copilotModel = localLlmStatus?.selectedCopilotModel || '';
+            setNotice(error?.message || 'Failed to switch Copilot model.');
+        } finally {
+            copilotModelSaving = false;
+        }
+    }
+
+    async function installCopilotModel() {
+        if (!copilotModel || copilotModelInstalling || localLlmStatus?.provider !== 'ollama' || !localLlmStatus?.ollamaReachable) return;
+        copilotModelInstalling = true;
+        try {
+            const result = await api.installLocalLlmModel(copilotModel);
+            if (result?.status) {
+                localLlmStatus = result.status;
+            }
+            await loadLocalLlm();
+            setNotice(`${copilotModel} installed in Ollama.`);
+        } catch (error) {
+            setNotice(error?.message || `Failed to install ${copilotModel}.`);
+        } finally {
+            copilotModelInstalling = false;
         }
     }
 
@@ -721,8 +782,42 @@
                         <textarea bind:value={input} on:keydown={handleKeydown}
                             placeholder="Ask Copilot to explain or change something in your app data…"
                             rows="1"
-                            class="w-full px-4 py-3 rounded-2xl text-[13px] resize-none focus:ring-2 focus:ring-accent/50 transition-all"
+                            class="w-full px-4 py-3 rounded-2xl text-[13px] resize-none focus:ring-2 focus:ring-accent/50 transition-all copilot-composer-textarea"
                             style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border); min-height: 48px; max-height: 120px; box-shadow: var(--card-shadow)"></textarea>
+                        {#if localLlmStatus?.provider === 'ollama'}
+                            <div class="copilot-model-inline">
+                                <span class="copilot-mini-badge">Model</span>
+                                <select
+                                    class="copilot-model-select"
+                                    bind:value={copilotModel}
+                                    on:change={(event) => updateCopilotModelSelection(event.currentTarget.value)}
+                                    disabled={copilotModelSaving}
+                                >
+                                    {#each localLlmCatalog?.tiers || [] as tier}
+                                        <optgroup label={tier.label}>
+                                            {#each tier.models.filter((model) => model.task_fit?.includes('copilot')) as model}
+                                                <option value={model.id} disabled={model.expert_only && !localLlmStatus?.expertMode}>
+                                                    {model.label} · {model.approx_size_gb} GB{model.installed ? ' · installed' : ''}
+                                                </option>
+                                            {/each}
+                                        </optgroup>
+                                    {/each}
+                                </select>
+                                <span class="copilot-model-meta">
+                                    {selectedCopilotModelMeta?.installed ? 'Installed' : 'Not installed'}
+                                </span>
+                                {#if selectedCopilotModelMeta && !selectedCopilotModelMeta.installed && localLlmStatus?.ollamaReachable}
+                                    <button
+                                        type="button"
+                                        class="copilot-model-install"
+                                        on:click={installCopilotModel}
+                                        disabled={copilotModelInstalling}
+                                    >
+                                        {copilotModelInstalling ? 'Installing…' : 'Install'}
+                                    </button>
+                                {/if}
+                            </div>
+                        {/if}
                     </div>
                     <button on:click={send} disabled={!input.trim() || loading} class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed copilot-send-btn">
                         <span class="material-symbols-outlined text-white text-[18px]">

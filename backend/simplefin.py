@@ -97,6 +97,7 @@ def save_connection(profile: str, access_url: str, display_name: str = "") -> in
     Raises ValueError if a connection with the same access URL already exists
     for this profile.
     """
+    normalized_profile = " ".join((profile or "").strip().split()).lower() or "primary"
     encrypted = _encrypt(access_url)
     now = datetime.now(timezone.utc).isoformat()
 
@@ -104,7 +105,7 @@ def save_connection(profile: str, access_url: str, display_name: str = "") -> in
         # Check for duplicates (same encrypted URL for this profile)
         existing = conn.execute(
             "SELECT id FROM simplefin_connections WHERE profile = ? AND access_url_encrypted = ? AND is_active = 1",
-            (profile.lower(), encrypted),
+            (normalized_profile, encrypted),
         ).fetchone()
         if existing:
             raise ValueError("This SimpleFIN connection already exists for this profile.")
@@ -113,9 +114,9 @@ def save_connection(profile: str, access_url: str, display_name: str = "") -> in
             """INSERT INTO simplefin_connections
                (profile, display_name, access_url_encrypted, created_at)
                VALUES (?, ?, ?, ?)""",
-            (profile.lower(), display_name, encrypted, now),
+            (normalized_profile, display_name, encrypted, now),
         )
-        logger.info("Saved SimpleFIN connection for profile '%s' (id=%d).", profile, cur.lastrowid)
+        logger.info("Saved SimpleFIN connection for profile '%s' (id=%d).", normalized_profile, cur.lastrowid)
         return cur.lastrowid
 
 

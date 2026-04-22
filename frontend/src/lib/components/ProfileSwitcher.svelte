@@ -8,7 +8,6 @@
 
 {#if $profiles.length > 0}
     <div class="profile-switcher-pills">
-        <!-- "Household" (combined) button always first -->
         <button
             class="profile-pill"
             class:profile-pill--active={'household' === $activeProfile}

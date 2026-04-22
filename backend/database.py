@@ -617,6 +617,12 @@ CREATE TABLE IF NOT EXISTS simplefin_connections (
 
 CREATE INDEX IF NOT EXISTS idx_sf_connections_profile ON simplefin_connections(profile);
 CREATE INDEX IF NOT EXISTS idx_sf_connections_active  ON simplefin_connections(is_active);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # ══════════════════════════════════════════════════════════════════════════════

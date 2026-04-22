@@ -41,20 +41,20 @@
     --accent-border: rgba(37, 99, 235, 0.22);
 
     /* ── Surfaces — Warm Paper (CHANGED: cream tones) ── */
-    --body-bg:      #F5F0E8;
-    --surface:      rgba(250, 247, 242, 0.92);
-    --surface-alt:  rgba(245, 241, 235, 0.90);
-    --surface-100:  rgba(242, 238, 231, 0.92);
-    --surface-200:  rgba(235, 230, 222, 0.68);
-    --surface-300:  rgba(225, 219, 210, 0.58);
-    --surface-elevated: rgba(250, 247, 242, 0.97);
+    --body-bg:      #F8F4EE;
+    --surface:      rgba(252, 249, 245, 0.94);
+    --surface-alt:  rgba(248, 244, 239, 0.92);
+    --surface-100:  rgba(246, 242, 236, 0.94);
+    --surface-200:  rgba(240, 235, 228, 0.74);
+    --surface-300:  rgba(231, 225, 217, 0.62);
+    --surface-elevated: rgba(253, 250, 246, 0.98);
 
     /* ── Glass tokens (CHANGED: warm paper glass) ── */
     --glass-blur:       16px;
     --glass-blur-heavy: 40px;
-    --glass-bg:         rgba(250, 247, 242, 0.88);
-    --glass-bg-strong:  rgba(250, 247, 242, 0.95);
-    --glass-bg-subtle:  rgba(242, 238, 231, 0.58);
+    --glass-bg:         rgba(252, 249, 245, 0.90);
+    --glass-bg-strong:  rgba(252, 249, 245, 0.96);
+    --glass-bg-subtle:  rgba(246, 242, 236, 0.64);
     --glass-border:     rgba(0, 0, 0, 0.06);
     --glass-shine:      linear-gradient(135deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.05) 45%, rgba(255,255,255,0.18) 100%);
 
@@ -83,14 +83,14 @@
                             inset 0 -1px 0 rgba(0, 0, 0, 0.02);
 
     /* ── Borders (CHANGED: warm paper) ── */
-    --card-border:       rgba(0, 0, 0, 0.06);
+    --card-border:       rgba(15, 23, 42, 0.055);
     --card-border-hover: rgba(37, 99, 235, 0.25);
     --border-subtle:     rgba(0, 0, 0, 0.04);
 
     /* ── Text — Cool Slate ── */
     --text-primary:   #1A1F2B;
-    --text-secondary: #475569;
-    --text-muted:     #8C95A6;
+    --text-secondary: #526174;
+    --text-muted:     #8792A3;
     --text-on-dark:   #F1F5F9;
 
     /* ── Semantic ── */
@@ -184,25 +184,25 @@
        (UNCHANGED — these should stay dark)
        ═══════════════════════════════════════════ */
 
-    --island-bg: rgba(27, 31, 42, 0.94);
-    --island-bg-solid: #1B1F2A;
+    --island-bg: rgba(32, 37, 49, 0.95);
+    --island-bg-solid: #202531;
     --island-bg-gradient:
         linear-gradient(
             135deg,
-            rgba(27, 31, 42, 0.96) 0%,
-            rgba(22, 26, 36, 0.97) 50%,
-            rgba(18, 21, 30, 0.98) 100%
+            rgba(34, 40, 54, 0.97) 0%,
+            rgba(29, 35, 47, 0.975) 50%,
+            rgba(24, 29, 39, 0.985) 100%
         );
 
     /* Island text (light-on-dark) */
     --island-text-primary:   #F1F5F9;
-    --island-text-secondary: #94A3B8;
-    --island-text-muted:     #64748B;
+    --island-text-secondary: #B2C0D0;
+    --island-text-muted:     #8394A8;
 
     /* Island borders — subtle luminous edge */
-    --island-border:       rgba(56, 189, 248, 0.12);
+    --island-border:       rgba(56, 189, 248, 0.16);
         
-    --island-border-hover: rgba(56, 189, 248, 0.20);
+    --island-border-hover: rgba(56, 189, 248, 0.24);
 
     /* Island glow ring (outer box-shadow) */
     --island-glow: none;
@@ -239,14 +239,14 @@
 
     /* Sankey ambient wash – luminous washes on dark island */
     --sankey-ambient:
-        radial-gradient(ellipse at 12% 40%, rgba(46, 232, 160, 0.10), transparent 45%),
-        radial-gradient(ellipse at 50% 50%, rgba(56, 189, 248, 0.08), transparent 40%),
-        radial-gradient(ellipse at 88% 55%, rgba(251, 113, 133, 0.07), transparent 45%),
-        radial-gradient(ellipse at 50% 90%, rgba(167, 139, 250, 0.07), transparent 45%);
+        radial-gradient(ellipse at 12% 40%, rgba(46, 232, 160, 0.13), transparent 46%),
+        radial-gradient(ellipse at 50% 50%, rgba(56, 189, 248, 0.11), transparent 41%),
+        radial-gradient(ellipse at 88% 55%, rgba(251, 113, 133, 0.09), transparent 46%),
+        radial-gradient(ellipse at 50% 90%, rgba(167, 139, 250, 0.09), transparent 46%);
 
     /* Sankey label colors — light text on dark island */
-    --sankey-label-primary:    #F1F5F9;
-    --sankey-label-secondary:  #CBD5E1;
+    --sankey-label-primary:    #F8FAFC;
+    --sankey-label-secondary:  #D8E1EB;
     --sankey-label-muted:      #94A3B8;
 
     /* ── Net Worth chart container (now on dark island) ── */

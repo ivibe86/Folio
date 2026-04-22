@@ -12,6 +12,7 @@ import httpx
 import certifi
 from dotenv import load_dotenv
 from log_config import get_logger
+import local_llm
 
 load_dotenv()
 
@@ -37,9 +38,28 @@ _OLLAMA_TIMEOUT_COPILOT = float(os.getenv("OLLAMA_TIMEOUT_COPILOT", "240"))     
 
 def is_available() -> bool:
     """Return True if the configured LLM provider has the required credentials/config."""
-    if LLM_PROVIDER == "ollama":
-        return bool(OLLAMA_BASE_URL)
+    provider = get_provider()
+    if provider == "ollama":
+        return bool(get_ollama_config()["base_url"])
     return bool(ANTHROPIC_API_KEY)
+
+
+def get_provider() -> str:
+    try:
+        return local_llm.get_provider()
+    except Exception:
+        return LLM_PROVIDER
+
+
+def get_ollama_config() -> dict:
+    try:
+        return local_llm.get_ollama_config()
+    except Exception:
+        return {
+            "base_url": OLLAMA_BASE_URL,
+            "categorize_model": OLLAMA_MODEL_CATEGORIZE,
+            "copilot_model": OLLAMA_MODEL_COPILOT,
+        }
 
 
 def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> str:
@@ -58,7 +78,7 @@ def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> s
     Raises:
         Exception on API or network errors.
     """
-    if LLM_PROVIDER == "ollama":
+    if get_provider() == "ollama":
         return _complete_ollama(prompt, max_tokens, purpose)
     return _complete_anthropic(prompt, max_tokens)
 
@@ -86,9 +106,10 @@ def _complete_anthropic(prompt: str, max_tokens: int) -> str:
 
 
 def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
-    model = OLLAMA_MODEL_CATEGORIZE if purpose == "categorize" else OLLAMA_MODEL_COPILOT
+    ollama_config = get_ollama_config()
+    model = ollama_config["categorize_model"] if purpose == "categorize" else ollama_config["copilot_model"]
     timeout = _OLLAMA_TIMEOUT_CATEGORIZE if purpose == "categorize" else _OLLAMA_TIMEOUT_COPILOT
-    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

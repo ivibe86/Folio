@@ -588,6 +588,57 @@
     color: var(--text-primary);
 }
 
+.copilot-model-inline {
+    position: absolute;
+    right: 0.85rem;
+    bottom: 0.72rem;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+    max-width: calc(100% - 1.5rem);
+    padding: 0.35rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 92%, white 8%);
+    border: 1px solid color-mix(in srgb, var(--card-border) 85%, transparent);
+}
+
+.copilot-model-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.copilot-model-select {
+    min-width: 170px;
+    max-width: 240px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0.2rem 1.3rem 0.2rem 0.15rem;
+}
+
+.copilot-model-install {
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--card-border));
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 0.32rem 0.7rem;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.copilot-model-install:disabled {
+    opacity: 0.55;
+}
+
+.copilot-composer-textarea {
+    padding-right: 290px;
+    padding-bottom: 2.2rem;
+}
+
 .copilot-send-btn {
     background: linear-gradient(135deg, var(--accent), var(--accent-hover));
     box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25);
@@ -742,6 +793,23 @@
 
     .copilot-action-card {
         justify-content: flex-start;
+    }
+
+    .copilot-model-inline {
+        position: static;
+        margin-top: 0.6rem;
+        max-width: 100%;
+    }
+
+    .copilot-composer-textarea {
+        padding-right: 1rem;
+        padding-bottom: 3.2rem;
+    }
+
+    .copilot-model-select {
+        min-width: 0;
+        max-width: 100%;
+        width: 100%;
     }
 
     .copilot-header-actions {

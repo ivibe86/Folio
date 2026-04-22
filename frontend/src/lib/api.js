@@ -253,6 +253,18 @@ export function createApi(fetchFn = fetch) {
         getProfiles: () => request('/profiles'),
 
         getAppConfig: () => request('/app-config'),
+        getLocalLlmCatalog: () => request('/local-llm/catalog'),
+        getLocalLlmStatus: () => request('/local-llm/status'),
+        updateLocalLlmSettings: (payload) =>
+            request('/local-llm/settings', {
+                method: 'PATCH',
+                body: JSON.stringify(payload),
+            }),
+        installLocalLlmModel: (model) =>
+            request('/local-llm/install', {
+                method: 'POST',
+                body: JSON.stringify({ model }),
+            }),
 
         sync: () => request('/sync', { method: 'POST' }),
 

@@ -10,6 +10,7 @@
 
     export let applicationId = '';
     export let environment = 'sandbox';
+    export let renderButton = true;
 
     const dispatch = createEventDispatcher();
 
@@ -31,6 +32,10 @@
             sdkReady = true;
         }
     });
+
+    export function show() {
+        openTellerConnect();
+    }
 
     async function openTellerConnect() {
         if (!sdkReady || !window.TellerConnect) {
@@ -83,25 +88,27 @@
     }
 </script>
 
-<button
-    class="teller-connect-btn"
-    on:click={openTellerConnect}
-    disabled={enrolling || !sdkReady}
-    title={enrolling ? 'Connecting...' : 'Add bank account'}
-    aria-label="Add bank account"
->
-    {#if enrolling}
-        <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
-    {:else}
-        <span class="material-symbols-outlined text-[16px]">add</span>
-    {/if}
-</button>
+{#if renderButton}
+    <button
+        class="teller-connect-btn"
+        on:click={openTellerConnect}
+        disabled={enrolling || !sdkReady}
+        title={enrolling ? 'Connecting...' : 'Add bank account'}
+        aria-label="Add bank account"
+    >
+        {#if enrolling}
+            <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+        {:else}
+            <span class="material-symbols-outlined text-[16px]">add</span>
+        {/if}
+    </button>
 
-{#if error}
-    <div class="teller-connect-error">
-        <span class="material-symbols-outlined text-[12px]">error</span>
-        {error}
-    </div>
+    {#if error}
+        <div class="teller-connect-error">
+            <span class="material-symbols-outlined text-[12px]">error</span>
+            {error}
+        </div>
+    {/if}
 {/if}
 
 <style>
