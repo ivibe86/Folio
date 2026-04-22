@@ -1812,12 +1812,7 @@
                 </span>
             </button>
             <ProfileSwitcher />
-            {#if appConfig.demoMode}
-                <div class="pill-toggle-group" style="padding: 0 10px; font-size: 11px; color: var(--text-secondary);">
-                    Demo mode · bank linking disabled · recategorization resets after redeploy
-                </div>
-            {/if}
-            {#if appConfig.bankLinkingEnabled}
+            {#if appConfig.bankLinkingEnabled || appConfig.demoMode}
                 <ConnectionChooser
                     on:open={openConnectionChooser}
                 />
@@ -2731,20 +2726,24 @@
                 </div>
 
                 <div class="bank-chooser-body">
-                    <p class="bank-chooser-intro">Choose how you want to connect your bank account.</p>
+                    <p class="bank-chooser-intro">
+                        {appConfig.demoMode
+                            ? 'Preview the available connection methods. Bank linking is disabled in the public demo.'
+                            : 'Choose how you want to connect your bank account.'}
+                    </p>
 
-                    <button class="bank-chooser-option" on:click={launchTellerFromChooser} disabled={!tellerAppId}>
+                    <button class="bank-chooser-option" on:click={launchTellerFromChooser} disabled={appConfig.demoMode || !tellerAppId}>
                         <div class="bank-chooser-option-copy">
                             <strong>Teller</strong>
-                            <span>{tellerAppId ? 'Launch the guided Teller Connect flow.' : 'Teller Connect is not configured in this environment.'}</span>
+                            <span>{appConfig.demoMode ? 'Available in the full app, but disabled in demo mode.' : tellerAppId ? 'Launch the guided Teller Connect flow.' : 'Teller Connect is not configured in this environment.'}</span>
                         </div>
                         <span class="material-symbols-outlined bank-chooser-option-icon">chevron_right</span>
                     </button>
 
-                    <button class="bank-chooser-option" on:click={launchSimpleFINFromChooser}>
+                    <button class="bank-chooser-option" on:click={launchSimpleFINFromChooser} disabled={appConfig.demoMode}>
                         <div class="bank-chooser-option-copy">
                             <strong>SimpleFIN</strong>
-                            <span>Paste a setup token and choose a Folio profile.</span>
+                            <span>{appConfig.demoMode ? 'Available in the full app, but disabled in demo mode.' : 'Paste a setup token and choose a Folio profile.'}</span>
                         </div>
                         <span class="material-symbols-outlined bank-chooser-option-icon">chevron_right</span>
                     </button>

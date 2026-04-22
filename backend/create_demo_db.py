@@ -47,15 +47,15 @@ TODAY = date.today()
 NOW = datetime.now().replace(microsecond=0).isoformat(sep=" ")
 
 PROFILES = [
-    ("primary", "Primary", 1),
-    ("shared", "Shared", 0),
+    ("joe", "Joe", 1),
+    ("jessica", "Jessica", 0),
 ]
 
 ACCOUNTS = [
-    AccountSeed("demo_chk_primary", "primary", "Northstar Bank", "Everyday Checking", "depository", "checking", 5482.31),
-    AccountSeed("demo_cc_primary", "primary", "Northstar Bank", "Travel Card", "credit", "credit_card", -842.77),
-    AccountSeed("demo_sav_primary", "primary", "Northstar Bank", "Rainy Day Savings", "depository", "savings", 16840.12),
-    AccountSeed("demo_chk_shared", "shared", "Summit Credit Union", "House Checking", "depository", "checking", 7124.54),
+    AccountSeed("demo_chk_joe", "joe", "Northstar Bank", "Everyday Checking", "depository", "checking", 5482.31),
+    AccountSeed("demo_cc_joe", "joe", "Northstar Bank", "Travel Card", "credit", "credit_card", -842.77),
+    AccountSeed("demo_sav_joe", "joe", "Northstar Bank", "Rainy Day Savings", "depository", "savings", 16840.12),
+    AccountSeed("demo_chk_jessica", "jessica", "Summit Credit Union", "House Checking", "depository", "checking", 7124.54),
 ]
 
 FIXED_SPEND = [
