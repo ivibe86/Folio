@@ -16,14 +16,12 @@
     let currentSyncKey = null;
     let backendSyncSeen = false;
     let noBackendSyncSeenCount = 0;
-let appConfig = {
+    let appConfig = {
         demoMode: false,
         manualSyncEnabled: true,
         bankLinkingEnabled: true,
         demoPersistence: 'persistent'
     };
-
-    $: isDashboardRoute = $page.url.pathname === '/';
 
     /* —— Navigation —— */
     const navPrimary = [
@@ -249,6 +247,8 @@ let appConfig = {
         });
     });
 
+    let mobileMenuOpen = false;
+
     /* —— Keyboard shortcut —— */
     function handleKeyboard(e) {
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
@@ -257,12 +257,6 @@ let appConfig = {
 
     /* —— Route matching —— */
     $: currentPath = $page.url.pathname;
-    $: mobileNavItems = [
-        ...navPrimary,
-        ...navSecondary,
-        copilotItem,
-        { ...controlCenterItem, label: 'Control' }
-    ];
 
     function isActive(path, current) {
         if (path === '/') return current === '/';
@@ -435,53 +429,160 @@ let appConfig = {
 </aside>
 
 
-<!-- Main content -->
-<main class="md:ml-[var(--rail-width)] min-h-screen transition-all duration-300 relative z-[1] pt-0">
-    <div class="max-w-[1800px] mx-auto px-4 md:px-8 py-8">
-        <nav class="mobile-top-nav md:hidden" aria-label="Primary">
-            <div class="mobile-top-nav-scroll">
-                <a href="/" class="mobile-top-nav-brand" aria-label="Dashboard">
+<!-- ———————————————————————————————————————————
+     MOBILE NAV
+     ——————————————————————————————————————————— -->
+{#if mobileMenuOpen}
+    <div class="md:hidden fixed inset-0 z-[60]" on:click={() => mobileMenuOpen = false}>
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+        <nav class="glass-rail absolute left-0 top-0 bottom-0 w-[260px] flex flex-col"
+             on:click|stopPropagation>
+
+            <div class="rail-effects-layer" aria-hidden="true">
+                <span class="rail-shine"></span>
+                <span class="rail-inner-glow"></span>
+            </div>
+
+            <div class="rail-brand">
+                <div class="rail-brand-mark">
                     {#if $darkMode}
-                        <img src="/folio-mark-dark-mode.png" alt="Folio" class="mobile-top-nav-mark" draggable="false" />
+                        <img src="/folio-mark-dark-mode.png" alt="Folio" class="folio-mark" draggable="false" />
                     {:else}
-                        <img src="/folio-mark-light-mode.png" alt="Folio" class="mobile-top-nav-mark" draggable="false" />
+                        <img src="/folio-mark-light-mode.png" alt="Folio" class="folio-mark" draggable="false" />
                     {/if}
-                </a>
-                {#each mobileNavItems as item}
-                    {@const active = isActive(item.path, currentPath)}
-                    <a href={item.path}
-                       class="mobile-top-nav-pill"
-                       class:mobile-top-nav-pill--active={active}
-                       aria-current={active ? 'page' : undefined}>
-                        <span class="material-symbols-outlined mobile-top-nav-icon"
-                              style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
-                            {item.icon}
+                </div>
+                <div class="rail-brand-text">
+                    <span class="rail-brand-name">Folio</span>
+                </div>
+            </div>
+
+            <!-- ✅ CHANGED: Mobile — glowing separators -->
+            <div class="rail-glow-separator" aria-hidden="true"></div>
+
+            <div class="rail-nav">
+                <div class="rail-nav-group">
+                    {#each navPrimary as item}
+                        {@const active = isActive(item.path, currentPath)}
+                        <a href={item.path} on:click={() => mobileMenuOpen = false}
+                           class="rail-link"
+                           class:rail-link--active={active}
+                           aria-current={active ? 'page' : undefined}>
+                            {#if active}<span class="rail-active-bar"></span>{/if}
+                            <span class="rail-link-icon material-symbols-outlined"
+                                  style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                                {item.icon}
+                            </span>
+                            <span class="rail-link-label">{item.label}</span>
+                        </a>
+                    {/each}
+                </div>
+
+                <!-- ✅ CHANGED: Mobile glowing separator -->
+                <div class="rail-glow-separator" aria-hidden="true"></div>
+
+                <div class="rail-nav-group rail-nav-group--secondary">
+                    {#each navSecondary as item}
+                        {@const active = isActive(item.path, currentPath)}
+                        <a href={item.path} on:click={() => mobileMenuOpen = false}
+                           class="rail-link rail-link--sm"
+                           class:rail-link--active={active}
+                           aria-current={active ? 'page' : undefined}>
+                            {#if active}<span class="rail-active-bar"></span>{/if}
+                            <span class="rail-link-icon material-symbols-outlined"
+                                  style={active ? "font-variation-settings: 'FILL' 1;" : ''}>
+                                {item.icon}
+                            </span>
+                            <span class="rail-link-label">{item.label}</span>
+                        </a>
+                    {/each}
+                </div>
+
+                <!-- ✅ CHANGED: Mobile glowing separator before Copilot -->
+                <div class="rail-glow-separator" aria-hidden="true"></div>
+
+                <!-- Mobile Copilot group -->
+                <div class="rail-nav-group rail-nav-group--copilot">
+                    <a href={copilotItem.path} on:click={() => mobileMenuOpen = false}
+                       class="rail-link rail-link--copilot"
+                       class:rail-link--active={isActive(copilotItem.path, currentPath)}
+                       class:rail-link--copilot-active={isActive(copilotItem.path, currentPath)}
+                       aria-current={isActive(copilotItem.path, currentPath) ? 'page' : undefined}>
+                        {#if isActive(copilotItem.path, currentPath)}<span class="rail-active-bar rail-active-bar--copilot"></span>{/if}
+                        <span class="rail-link-icon rail-copilot-icon-inline material-symbols-outlined"
+                              style={isActive(copilotItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                            {copilotItem.icon}
                         </span>
-                        <span class="mobile-top-nav-label">{item.label}</span>
+                        <span class="rail-link-label">{copilotItem.label}</span>
+                        {#if !isActive(copilotItem.path, currentPath)}
+                            <span class="rail-copilot-badge-inline">AI</span>
+                        {/if}
                     </a>
-                {/each}
+                    <a href={controlCenterItem.path} on:click={() => mobileMenuOpen = false}
+                       class="rail-link rail-link--sm"
+                       class:rail-link--active={isActive(controlCenterItem.path, currentPath)}
+                       aria-current={isActive(controlCenterItem.path, currentPath) ? 'page' : undefined}>
+                        {#if isActive(controlCenterItem.path, currentPath)}<span class="rail-active-bar"></span>{/if}
+                        <span class="rail-link-icon material-symbols-outlined"
+                              style={isActive(controlCenterItem.path, currentPath) ? "font-variation-settings: 'FILL' 1;" : ''}>
+                            {controlCenterItem.icon}
+                        </span>
+                        <span class="rail-link-label">{controlCenterItem.label}</span>
+                    </a>
+                </div>
+
+                <div class="flex-1"></div>
+            </div>
+
+            <div class="rail-divider"></div>
+
+            <div class="rail-footer">
                 {#if appConfig.manualSyncEnabled}
-                    <button on:click={handleSync}
-                            disabled={$syncing.active}
-                            class="mobile-top-nav-action"
-                            aria-label={$syncing.active ? 'Syncing' : 'Sync now'}
-                            title={$syncing.active ? 'Syncing' : 'Sync now'}>
-                        <span class="material-symbols-outlined mobile-top-nav-icon"
-                              class:animate-spin={$syncing.active}>
-                            {$syncing.active ? 'progress_activity' : 'sync'}
+                    <button on:click={handleSync} disabled={$syncing.active}
+                            class="rail-footer-row rail-footer-row--interactive">
+                        <span class="rail-sync-dot" class:rail-sync-dot--spinning={$syncing.active}></span>
+                        <span class="rail-footer-label">
+                            {$syncing.active ? 'Syncingâ¦' : 'Sync'}
                         </span>
                     </button>
                 {/if}
                 <button on:click={() => darkMode.toggle()}
-                        class="mobile-top-nav-action"
-                        aria-label={$darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                        title={$darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
-                    <span class="material-symbols-outlined mobile-top-nav-icon">
-                        {$darkMode ? 'light_mode' : 'dark_mode'}
+                        class="rail-footer-row rail-footer-row--interactive">
+                    <span class="material-symbols-outlined rail-footer-icon">
+                        {$darkMode ? 'dark_mode' : 'light_mode'}
+                    </span>
+                    <span class="rail-footer-label">{$darkMode ? 'Dark' : 'Light'}</span>
+                    <span class="rail-toggle-track" class:rail-toggle-track--on={$darkMode}>
+                        <span class="rail-toggle-thumb"></span>
                     </span>
                 </button>
             </div>
         </nav>
+    </div>
+{/if}
+
+<!-- Mobile top bar -->
+<div class="md:hidden fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14"
+     style="background: var(--sidebar-bg); backdrop-filter: blur(20px); border-bottom: 1px solid var(--sidebar-border);">
+    <button on:click={() => mobileMenuOpen = !mobileMenuOpen} class="p-1.5 rounded-lg"
+            style="color: var(--sidebar-text-active)">
+        <span class="material-symbols-outlined">{mobileMenuOpen ? 'close' : 'menu'}</span>
+    </button>
+    <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
+        Folio
+    </span>
+    {#if appConfig.manualSyncEnabled}
+        <button on:click={handleSync} disabled={$syncing.active} class="p-1.5 rounded-lg"
+                style="color: var(--sidebar-text-active)">
+            <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
+        </button>
+    {:else}
+        <span class="mobile-topbar-spacer" aria-hidden="true"></span>
+    {/if}
+</div>
+
+<!-- Main content -->
+<main class="md:ml-[var(--rail-width)] pt-14 md:pt-0 min-h-screen transition-all duration-300 relative z-[1]">
+    <div class="max-w-[1800px] mx-auto px-4 md:px-8 py-8">
         <slot />
     </div>
 </main>
@@ -697,96 +798,11 @@ let appConfig = {
                 drop-shadow(0 0 14px rgba(90, 159, 212, 0.12));
     }
 
-    .mobile-top-nav {
-        display: flex;
-        align-items: center;
-        margin: -0.15rem 0 1rem;
-        overflow: hidden;
-    }
-
-    .mobile-top-nav-scroll {
-        display: flex;
-        align-items: center;
-        gap: 0.55rem;
-        width: 100%;
-        overflow-x: auto;
-        overflow-y: hidden;
-        padding: 0.15rem 0 0.35rem;
-        scrollbar-width: none;
-        -webkit-overflow-scrolling: touch;
-    }
-
-    .mobile-top-nav-scroll::-webkit-scrollbar {
-        display: none;
-    }
-
-    .mobile-top-nav-brand,
-    .mobile-top-nav-pill,
-    .mobile-top-nav-action {
-        flex: 0 0 auto;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 2.6rem;
-        border-radius: 999px;
-        border: 1px solid var(--card-border);
-        background: color-mix(in srgb, var(--surface-elevated) 78%, transparent);
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-        backdrop-filter: blur(18px);
-        -webkit-backdrop-filter: blur(18px);
-        text-decoration: none;
-        color: var(--text-secondary);
-    }
-
-    .mobile-top-nav-brand {
-        width: 2.6rem;
-        padding: 0;
-    }
-
-    .mobile-top-nav-mark {
-        width: 1.2rem;
-        height: 1.2rem;
-        display: block;
-        object-fit: contain;
-    }
-
-    .mobile-top-nav-pill {
-        gap: 0.38rem;
-        padding: 0 0.92rem;
-        font-size: 0.95rem;
-        font-weight: 600;
-        white-space: nowrap;
-    }
-
-    .mobile-top-nav-pill--active {
-        color: var(--accent);
-        border-color: color-mix(in srgb, var(--accent) 32%, var(--card-border));
-        background:
-            linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent 58%),
-            color-mix(in srgb, var(--surface-elevated) 88%, transparent);
-        box-shadow:
-            0 10px 24px rgba(15, 23, 42, 0.1),
-            inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
-    }
-
-    .mobile-top-nav-action {
-        width: 2.6rem;
-        padding: 0;
-        color: var(--text-secondary);
-    }
-
-    .mobile-top-nav-icon {
-        font-size: 1.05rem;
-    }
-
-    .mobile-top-nav-label {
-        letter-spacing: -0.01em;
-    }
-
-    @media (min-width: 768px) {
-        .mobile-top-nav {
-            display: none !important;
-        }
+    .mobile-topbar-spacer {
+        display: inline-block;
+        width: 32px;
+        height: 32px;
+        flex-shrink: 0;
     }
 
     .rail-brand-text {
