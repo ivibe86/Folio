@@ -1816,7 +1816,7 @@
         {:else}
             <h2 class="dashboard-hero-title dashboard-hero-title-personal text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
                 <span class="dashboard-hero-title-desktop">{greeting}, {activeProfileName}.</span>
-                <span class="dashboard-hero-title-mobile">{greeting}</span>
+                <span class="dashboard-hero-title-mobile">{activeProfileName}</span>
             </h2>
         {/if}
     </div>
