@@ -218,10 +218,10 @@ def build_transactions(rng: random.Random, months: int) -> list[tuple]:
     rows: list[tuple] = []
     tx_counter = 1
     account_by_id = {item.id: item for item in ACCOUNTS}
-    primary_checking = account_by_id["demo_chk_primary"]
-    primary_credit = account_by_id["demo_cc_primary"]
-    primary_savings = account_by_id["demo_sav_primary"]
-    shared_checking = account_by_id["demo_chk_shared"]
+    primary_checking = account_by_id["demo_chk_joe"]
+    primary_credit = account_by_id["demo_cc_joe"]
+    primary_savings = account_by_id["demo_sav_joe"]
+    shared_checking = account_by_id["demo_chk_jessica"]
 
     for months_ago in range(months - 1, -1, -1):
         anchor = month_anchor(months_ago)
@@ -424,8 +424,8 @@ def add_net_worth_history(conn: sqlite3.Connection, rng: random.Random, months: 
         shared_owed = 600 + rng.uniform(-30, 45)
         rows.extend(
             [
-                (anchor.isoformat(), "primary", round(primary_assets, 2), round(primary_owed, 2), round(primary_assets - primary_owed, 2)),
-                (anchor.isoformat(), "shared", round(shared_assets, 2), round(shared_owed, 2), round(shared_assets - shared_owed, 2)),
+                (anchor.isoformat(), "joe", round(primary_assets, 2), round(primary_owed, 2), round(primary_assets - primary_owed, 2)),
+                (anchor.isoformat(), "jessica", round(shared_assets, 2), round(shared_owed, 2), round(shared_assets - shared_owed, 2)),
             ]
         )
     conn.executemany(
