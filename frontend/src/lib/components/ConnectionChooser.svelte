@@ -40,9 +40,9 @@
 
     @media (max-width: 768px) {
         .teller-connect-btn {
-            width: 30px;
-            height: 30px;
-            border-radius: 9px;
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
         }
     }
 </style>

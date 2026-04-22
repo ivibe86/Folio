@@ -88,17 +88,17 @@
 
     @media (max-width: 768px) {
         .profile-switcher-pills {
-            gap: 5px;
+            gap: 4px;
         }
 
         .profile-pill {
-            gap: 4px;
-            padding: 6px 12px;
-            font-size: 11px;
+            gap: 3px;
+            padding: 5px 10px;
+            font-size: 10px;
         }
 
         .profile-pill-icon {
-            font-size: 13px;
+            font-size: 12px;
         }
 
         .profile-pill-label-desktop {

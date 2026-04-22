@@ -1787,58 +1787,37 @@
 
     <!-- ═══ HEADER ═══ -->
     <div class="dashboard-hero-header mb-8 fade-in">
-        {#if isHousehold}
-            <div class="dashboard-hero-meta-row">
-                <p class="dashboard-hero-greeting text-[10px] font-bold tracking-[0.2em] uppercase" style="color: var(--accent)">{greeting}</p>
-                <div class="dashboard-hero-controls">
-                    <button
-                        on:click={() => privacyMode.toggle()}
-                        class="privacy-toggle-btn"
-                        class:privacy-active={$privacyMode}
-                        aria-label={$privacyMode ? 'Show values' : 'Hide values'}
-                        title={$privacyMode ? 'Show values' : 'Hide values'}
-                    >
-                        <span class="material-symbols-outlined text-[12px]">
-                            {$privacyMode ? 'visibility_off' : 'visibility'}
-                        </span>
-                    </button>
-                    <ProfileSwitcher />
-                    {#if appConfig.bankLinkingEnabled || appConfig.demoMode}
-                        <ConnectionChooser
-                            on:open={openConnectionChooser}
-                        />
-                    {/if}
-                </div>
+        <div class="dashboard-hero-meta-row">
+            <p class="dashboard-hero-greeting text-[10px] font-bold tracking-[0.2em] uppercase" style="color: var(--accent)">{greeting}</p>
+            <div class="dashboard-hero-controls">
+                <button
+                    on:click={() => privacyMode.toggle()}
+                    class="privacy-toggle-btn"
+                    class:privacy-active={$privacyMode}
+                    aria-label={$privacyMode ? 'Show values' : 'Hide values'}
+                    title={$privacyMode ? 'Show values' : 'Hide values'}
+                >
+                    <span class="material-symbols-outlined text-[12px]">
+                        {$privacyMode ? 'visibility_off' : 'visibility'}
+                    </span>
+                </button>
+                <ProfileSwitcher />
+                {#if appConfig.bankLinkingEnabled || appConfig.demoMode}
+                    <ConnectionChooser
+                        on:open={openConnectionChooser}
+                    />
+                {/if}
             </div>
+        </div>
+        {#if isHousehold}
             <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
                 Your finances at a glance
             </h2>
         {:else}
-            <div class="dashboard-hero-title-row">
-                <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
-                    <span class="dashboard-hero-title-desktop">{greeting}, {activeProfileName}.</span>
-                    <span class="dashboard-hero-title-mobile">{greeting}</span>
-                </h2>
-                <div class="dashboard-hero-controls">
-                    <button
-                        on:click={() => privacyMode.toggle()}
-                        class="privacy-toggle-btn"
-                        class:privacy-active={$privacyMode}
-                        aria-label={$privacyMode ? 'Show values' : 'Hide values'}
-                        title={$privacyMode ? 'Show values' : 'Hide values'}
-                    >
-                        <span class="material-symbols-outlined text-[12px]">
-                            {$privacyMode ? 'visibility_off' : 'visibility'}
-                        </span>
-                    </button>
-                    <ProfileSwitcher />
-                    {#if appConfig.bankLinkingEnabled || appConfig.demoMode}
-                        <ConnectionChooser
-                            on:open={openConnectionChooser}
-                        />
-                    {/if}
-                </div>
-            </div>
+            <h2 class="dashboard-hero-title dashboard-hero-title-personal text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+                <span class="dashboard-hero-title-desktop">{greeting}, {activeProfileName}.</span>
+                <span class="dashboard-hero-title-mobile">{greeting}</span>
+            </h2>
         {/if}
     </div>
 
@@ -2904,12 +2883,11 @@
         gap: 10px;
     }
 
-    .dashboard-hero-meta-row,
-    .dashboard-hero-title-row {
+    .dashboard-hero-meta-row {
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         justify-content: space-between;
-        gap: 16px;
+        gap: 12px;
         min-width: 0;
     }
 
@@ -2930,26 +2908,15 @@
     .dashboard-hero-controls {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 8px;
         flex-shrink: 0;
         min-width: 0;
     }
 
     @media (max-width: 768px) {
-        .dashboard-hero-meta-row {
-            align-items: center;
-            gap: 10px;
-        }
-
         .dashboard-hero-title {
             font-size: clamp(1.7rem, 5.9vw, 2rem);
             line-height: 1.04;
-        }
-
-        .dashboard-hero-title-row {
-            flex-direction: column;
-            align-items: stretch;
-            gap: 10px;
         }
 
         .dashboard-hero-title-desktop {
@@ -2961,20 +2928,10 @@
         }
 
         .dashboard-hero-controls {
-            width: 100%;
-            margin-left: 0;
-            max-width: none;
-            gap: 6px;
+            margin-left: auto;
+            max-width: calc(100% - 118px);
+            gap: 4px;
             justify-content: flex-end;
-            overflow-x: auto;
-            overflow-y: hidden;
-            padding-bottom: 2px;
-            scrollbar-width: none;
-            -ms-overflow-style: none;
-        }
-
-        .dashboard-hero-controls::-webkit-scrollbar {
-            display: none;
         }
 
         .dashboard-hero-greeting {
