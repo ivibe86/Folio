@@ -14,7 +14,8 @@
             on:click={() => select('household')}
         >
             <span class="material-symbols-outlined profile-pill-icon">groups</span>
-            Household
+            <span class="profile-pill-label profile-pill-label-desktop">Household</span>
+            <span class="profile-pill-label profile-pill-label-mobile">Home</span>
         </button>
 
         {#each $profiles as p (p.id)}
@@ -81,6 +82,10 @@
         line-height: 1;
     }
 
+    .profile-pill-label-mobile {
+        display: none;
+    }
+
     @media (max-width: 768px) {
         .profile-switcher-pills {
             gap: 5px;
@@ -94,6 +99,14 @@
 
         .profile-pill-icon {
             font-size: 13px;
+        }
+
+        .profile-pill-label-desktop {
+            display: none;
+        }
+
+        .profile-pill-label-mobile {
+            display: inline;
         }
     }
 </style>

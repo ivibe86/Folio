@@ -1816,7 +1816,8 @@
         {:else}
             <div class="dashboard-hero-title-row">
                 <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
-                    {greeting}, {activeProfileName}.
+                    <span class="dashboard-hero-title-desktop">{greeting}, {activeProfileName}.</span>
+                    <span class="dashboard-hero-title-mobile">{greeting}</span>
                 </h2>
                 <div class="dashboard-hero-controls">
                     <button
@@ -2922,6 +2923,10 @@
         margin: 0;
     }
 
+    .dashboard-hero-title-mobile {
+        display: none;
+    }
+
     .dashboard-hero-controls {
         display: flex;
         align-items: center;
@@ -2941,9 +2946,24 @@
             line-height: 1.04;
         }
 
+        .dashboard-hero-title-row {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 10px;
+        }
+
+        .dashboard-hero-title-desktop {
+            display: none;
+        }
+
+        .dashboard-hero-title-mobile {
+            display: inline;
+        }
+
         .dashboard-hero-controls {
-            margin-left: auto;
-            max-width: calc(100% - 138px);
+            width: 100%;
+            margin-left: 0;
+            max-width: none;
             gap: 6px;
             justify-content: flex-end;
             overflow-x: auto;
