@@ -445,9 +445,11 @@
 
             <div class="rail-brand">
                 <div class="rail-brand-mark">
-                    <svg class="rail-brand-svg" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <use href="#folio-mark" />
-                    </svg>
+                    {#if $darkMode}
+                        <img src="/folio-mark-dark-mode.png" alt="Folio" class="folio-mark" draggable="false" />
+                    {:else}
+                        <img src="/folio-mark-light-mode.png" alt="Folio" class="folio-mark" draggable="false" />
+                    {/if}
                 </div>
                 <div class="rail-brand-text">
                     <span class="rail-brand-name">Folio</span>
@@ -574,7 +576,7 @@
             <span class="material-symbols-outlined text-[20px]" class:animate-spin={$syncing.active}>sync</span>
         </button>
     {:else}
-        <span class="material-symbols-outlined text-[20px]" style="color: var(--sidebar-text-active)">visibility</span>
+        <span class="mobile-topbar-spacer" aria-hidden="true"></span>
     {/if}
 </div>
 
@@ -794,6 +796,13 @@
         /* Subtle ambient glow that matches the neon edges in f1.png */
         filter: drop-shadow(0 0 6px rgba(90, 159, 212, 0.35))
                 drop-shadow(0 0 14px rgba(90, 159, 212, 0.12));
+    }
+
+    .mobile-topbar-spacer {
+        display: inline-block;
+        width: 32px;
+        height: 32px;
+        flex-shrink: 0;
     }
 
     .rail-brand-text {
