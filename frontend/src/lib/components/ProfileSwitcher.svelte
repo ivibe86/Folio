@@ -80,4 +80,20 @@
         font-size: 14px;
         line-height: 1;
     }
+
+    @media (max-width: 768px) {
+        .profile-switcher-pills {
+            gap: 5px;
+        }
+
+        .profile-pill {
+            gap: 4px;
+            padding: 6px 12px;
+            font-size: 11px;
+        }
+
+        .profile-pill-icon {
+            font-size: 13px;
+        }
+    }
 </style>

@@ -1786,20 +1786,20 @@
     {/if}
 
     <!-- ═══ HEADER ═══ -->
-    <div class="flex items-start justify-between mb-8 fade-in">
-        <div>
+    <div class="dashboard-hero-header mb-8 fade-in">
+        <div class="dashboard-hero-title-block">
             {#if isHousehold}
                 <p class="text-[10px] font-bold tracking-[0.2em] uppercase mb-1.5" style="color: var(--accent)">{greeting}</p>
-                <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+                <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
                     Your finances at a glance
                 </h2>
             {:else}
-                <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+                <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
                     {greeting}, {activeProfileName}.
                 </h2>
             {/if}
         </div>
-        <div class="flex items-center gap-3">
+        <div class="dashboard-hero-controls">
             <button
                 on:click={() => privacyMode.toggle()}
                 class="privacy-toggle-btn"
@@ -2874,5 +2874,54 @@
         font-size: 18px;
         color: var(--text-muted);
         flex-shrink: 0;
+    }
+
+    .dashboard-hero-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+    }
+
+    .dashboard-hero-title-block {
+        min-width: 0;
+    }
+
+    .dashboard-hero-title {
+        white-space: nowrap;
+    }
+
+    .dashboard-hero-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-shrink: 0;
+    }
+
+    @media (max-width: 768px) {
+        .dashboard-hero-header {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 14px;
+        }
+
+        .dashboard-hero-title {
+            font-size: clamp(1.95rem, 6.1vw, 2.35rem);
+            line-height: 1.02;
+        }
+
+        .dashboard-hero-controls {
+            width: 100%;
+            gap: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-bottom: 2px;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .dashboard-hero-controls::-webkit-scrollbar {
+            display: none;
+        }
     }
 </style>

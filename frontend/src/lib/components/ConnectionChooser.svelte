@@ -37,4 +37,12 @@
         border-color: var(--accent);
         transform: scale(1.05);
     }
+
+    @media (max-width: 768px) {
+        .teller-connect-btn {
+            width: 30px;
+            height: 30px;
+            border-radius: 9px;
+        }
+    }
 </style>
