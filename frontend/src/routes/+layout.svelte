@@ -472,6 +472,14 @@ let appConfig = {
                         </span>
                     </button>
                 {/if}
+                <button on:click={() => darkMode.toggle()}
+                        class="mobile-top-nav-action"
+                        aria-label={$darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                        title={$darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+                    <span class="material-symbols-outlined mobile-top-nav-icon">
+                        {$darkMode ? 'light_mode' : 'dark_mode'}
+                    </span>
+                </button>
             </div>
         </nav>
         <slot />
@@ -773,6 +781,12 @@ let appConfig = {
 
     .mobile-top-nav-label {
         letter-spacing: -0.01em;
+    }
+
+    @media (min-width: 768px) {
+        .mobile-top-nav {
+            display: none !important;
+        }
     }
 
     .rail-brand-text {
