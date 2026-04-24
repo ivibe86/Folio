@@ -270,15 +270,76 @@ export function createApi(fetchFn = fetch) {
 
         getSyncStatus: () => request('/sync-status'),
 
-        askCopilot: (question, profile) => {
+        askCopilot: (question, profile, history = null) => {
             // Build endpoint with profile param for copilot context
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
             return request(`/copilot/ask${qs ? '?' + qs : ''}`, {
                 method: 'POST',
-                body: JSON.stringify({ question })
+                body: JSON.stringify({ question, history })
             });
+        },
+
+        /**
+         * Streaming variant — returns a cancel() function and invokes `onEvent`
+         * for each SSE event from the agent. Caller should handle:
+         *   { type: 'reset_text' }
+         *   { type: 'token', text }
+         *   { type: 'tool_call', name, args }
+         *   { type: 'tool_result', name, duration_ms }
+         *   { type: 'done', answer, data, data_source, tool_trace, iterations }
+         *   { type: 'error', message }
+         */
+        askCopilotStream: (question, profile, history, onEvent) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            const controller = new AbortController();
+
+            (async () => {
+                try {
+                    const resp = await fetchFn(`${BASE}/copilot/ask/stream${qs ? '?' + qs : ''}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': getApiKey(),
+                        },
+                        body: JSON.stringify({ question, history }),
+                        signal: controller.signal,
+                    });
+                    if (!resp.ok || !resp.body) {
+                        onEvent({ type: 'error', message: `HTTP ${resp.status}` });
+                        return;
+                    }
+                    const reader = resp.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        let boundary;
+                        while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+                            const chunk = buffer.slice(0, boundary);
+                            buffer = buffer.slice(boundary + 2);
+                            const line = chunk.split('\n').find(l => l.startsWith('data:'));
+                            if (!line) continue;
+                            const json = line.slice(5).trim();
+                            if (!json) continue;
+                            try {
+                                onEvent(JSON.parse(json));
+                            } catch {}
+                        }
+                    }
+                } catch (err) {
+                    if (err?.name !== 'AbortError') {
+                        onEvent({ type: 'error', message: err?.message || 'stream failed' });
+                    }
+                }
+            })();
+
+            return () => controller.abort();
         },
 
         /**
@@ -293,6 +354,21 @@ export function createApi(fetchFn = fetch) {
             return request(`/copilot/confirm${qs ? '?' + qs : ''}`, {
                 method: 'POST',
                 body: JSON.stringify({ question, confirmation_id: confirmationId })
+            });
+        },
+
+        saveInsight: (question, answer, kind = 'insight', sourceConversationId = null, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/insights${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    question,
+                    answer,
+                    kind,
+                    source_conversation_id: sourceConversationId
+                })
             });
         },
 

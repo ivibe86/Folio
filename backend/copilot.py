@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from database import get_db, dicts_from_rows, _extract_merchant_pattern
 from log_config import get_logger
 from privacy import sanitize_rows_for_llm
+from copilot_context import build_copilot_context
 import llm_client
 import secrets as _secrets
 import time as _time
@@ -386,6 +387,14 @@ def _sanitize_profile_filter(sql: str) -> str:
     return result
 
 
+def _should_mask_copilot_results_for_llm() -> bool:
+    """Mask exact financial values only when results leave the local machine."""
+    try:
+        return llm_client.get_provider() != "ollama"
+    except Exception:
+        return True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA CONTEXT FOR CLAUDE (anonymized)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -483,9 +492,18 @@ DESCRIPTION MATCHING:
 - When the user mentions a merchant name partially (e.g. "beverages"), use a broad LIKE pattern: UPPER(description) LIKE UPPER('%beverages%')
 - Do NOT guess full merchant descriptions. Use only the keywords the user provides.
 
+MERCHANT REPORTING:
+- merchant_name can be NULL or blank for transactions that have not been enriched yet.
+- For merchant rankings, "biggest merchant", top merchants, or merchant grouping, never GROUP BY merchant_name alone.
+- Use COALESCE(NULLIF(TRIM(merchant_name), ''), description) AS merchant_name in SELECT and GROUP BY the full COALESCE expression, not the alias.
+- Do NOT use COALESCE(merchant_name, description); it does not handle blank merchant_name values.
+- This prevents all unenriched transactions from being combined into a fake blank merchant.
+- For spending reports, exclude non-spending categories: 'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', and 'Income'.
+
 SQLITE COMPATIBILITY:
 - Use SQLite-compatible SQL only.
 - Prefer LIKE, CASE WHEN, COALESCE, ABS, and strftime for date/time work.
+- SQLite does NOT support date('now', 'end of month'). For current month ranges, use either date LIKE 'YYYY-MM-%' or date >= date('now', 'start of month') AND date < date('now', 'start of month', '+1 month').
 - Do NOT use database-specific functions that SQLite doesn't support.
 - This app supports the infix REGEXP operator, but prefer LIKE unless regex matching is truly required.
 """
@@ -504,8 +522,10 @@ SQLITE COMPATIBILITY:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _INTENT_KEYWORDS = re.compile(
-    r"\b(why\s+is|how\s+is|categorized|missing\s+categor|uncategorized\s+merchant|"
-    r"move\s+all|recategorize|reclassify|rename|create\s+(a\s+)?rule)\b",
+    r"\b(why\s+is|how\s+is|why\s+was|how\s+was"
+    r"|incorrectly\s+categorized|wrongly\s+categorized|miscategorized"
+    r"|missing\s+categor|uncategorized\s+merchant"
+    r"|move\s+all|recategorize|reclassify|rename|create\s+(a\s+)?rule)\b",
     re.IGNORECASE,
 )
 
@@ -727,11 +747,110 @@ def _dispatch_intent(intent_result: dict, profile: str | None, question: str) ->
     return None
 
 
+def _validate_read_semantics(question: str, sql: str) -> tuple[bool, str]:
+    """
+    Validate app-level finance semantics that raw SQL syntax cannot capture.
+    These checks catch plausible-looking queries that would answer the wrong
+    business question.
+    """
+    lower_question = question.lower()
+    upper_sql = sql.upper()
+    compact_sql = re.sub(r"\s+", " ", upper_sql)
+
+    invalid_sqlite_date_modifiers = (
+        "END OF MONTH",
+        "START OF WEEK",
+        "END OF WEEK",
+        "START OF QUARTER",
+        "END OF QUARTER",
+        "START OF YEAR",
+        "END OF YEAR",
+    )
+    for modifier in invalid_sqlite_date_modifiers:
+        if f"'{modifier}'" in upper_sql or f'"{modifier}"' in upper_sql:
+            return (
+                False,
+                f"SQLite does not support the date modifier '{modifier.lower()}'. "
+                "Use supported SQLite date modifiers, for example date('now', 'start of month', '+1 month') "
+                "as an exclusive upper bound for this month.",
+            )
+
+    asks_for_spending = any(
+        token in lower_question
+        for token in ("spending", "spent", "expense", "expenses", "merchant", "merchants")
+    )
+    asks_for_transfer = any(
+        token in lower_question
+        for token in ("transfer", "transfers", "credit card payment", "cc payment", "savings transfer")
+    )
+
+    if asks_for_spending and not asks_for_transfer and "TRANSACTIONS_VISIBLE" in upper_sql:
+        excluded_categories = (
+            "SAVINGS TRANSFER",
+            "PERSONAL TRANSFER",
+            "CREDIT CARD PAYMENT",
+            "INCOME",
+        )
+        missing = [
+            category
+            for category in excluded_categories
+            if category not in upper_sql
+        ]
+        if "AMOUNT < 0" in compact_sql and missing:
+            return (
+                False,
+                "Spending queries must exclude non-spending categories: "
+                "'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', and 'Income'.",
+            )
+
+    merchant_report = (
+        "merchant" in lower_question
+        and "MERCHANT_NAME" in upper_sql
+        and "GROUP BY" in upper_sql
+    )
+    if merchant_report:
+        qualified_merchant = r"(?:[A-Z_][A-Z0-9_]*\.)?MERCHANT_NAME"
+        qualified_description = r"(?:[A-Z_][A-Z0-9_]*\.)?DESCRIPTION"
+        merchant_fallback_pattern = (
+            rf"COALESCE\(\s*NULLIF\(\s*TRIM\(\s*{qualified_merchant}\s*\)\s*,\s*''\s*\)\s*,\s*{qualified_description}\s*\)"
+        )
+        weak_merchant_fallback_pattern = (
+            rf"COALESCE\(\s*{qualified_merchant}\s*,\s*{qualified_description}\s*\)"
+        )
+        if re.search(weak_merchant_fallback_pattern, compact_sql):
+            return (
+                False,
+                "Merchant fallback must treat blank merchant names as missing. Use "
+                "COALESCE(NULLIF(TRIM(merchant_name), ''), description), not COALESCE(merchant_name, description).",
+            )
+        if re.search(merchant_fallback_pattern, compact_sql) and re.search(r"\bGROUP BY\s+MERCHANT_NAME\b", compact_sql):
+            return (
+                False,
+                "Merchant grouping must GROUP BY the full COALESCE(NULLIF(TRIM(merchant_name), ''), description) "
+                "expression, not GROUP BY merchant_name, because SQLite may bind that to the raw nullable column.",
+            )
+        if re.search(r"\bGROUP BY\s+MERCHANT_NAME\b", compact_sql):
+            return (
+                False,
+                "Merchant grouping must handle blank merchant_name values with "
+                "COALESCE(NULLIF(TRIM(merchant_name), ''), description).",
+            )
+        if not re.search(merchant_fallback_pattern, compact_sql):
+            return (
+                False,
+                "Merchant reports must show the transaction description when merchant_name is missing or blank. "
+                "Use COALESCE(NULLIF(TRIM(merchant_name), ''), description).",
+            )
+
+    return True, ""
+
+
 def ask_copilot(
     question: str,
     profile: str | None = None,
     confirm_write: bool = False,
     pending_sql: str | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
     if not llm_client.is_available():
         return {
@@ -757,6 +876,36 @@ def ask_copilot(
         if dispatched is not None:
             return dispatched
 
+    # ── Route free-form questions through the tool-using agent ──
+    # Writes are handled above by the deterministic intent dispatch; anything
+    # that reaches here is read-oriented.
+    try:
+        from copilot_agent import run_agent
+        agent_result = run_agent(question=question, profile=profile, history=history)
+        _log_conversation(
+            profile,
+            question,
+            "",
+            json.dumps({"tool_trace": agent_result.get("tool_trace", [])}, default=str),
+            agent_result.get("answer") or "",
+            "read",
+            0,
+        )
+        agent_data = agent_result.get("data")
+        return {
+            "answer": agent_result.get("answer") or "",
+            "sql": "",
+            "data": agent_data,
+            "operation": "error" if agent_result.get("error") else "read",
+            "rows_affected": len(agent_data) if isinstance(agent_data, list) else 0,
+            "needs_confirmation": False,
+            "tool_trace": agent_result.get("tool_trace", []),
+            "data_source": agent_result.get("data_source"),
+            "iterations": agent_result.get("iterations", 0),
+        }
+    except Exception as e:
+        logger.exception("Agent loop failed; falling back to single-shot SQL path")
+
     # ── Build anonymized context ──
     real_to_alias, alias_to_real = _build_profile_map()
 
@@ -766,8 +915,17 @@ def ask_copilot(
 
     schema_context = _build_schema_context(real_to_alias)
 
-    prompt = f"""{schema_context}
+    try:
+        with get_db() as _ctx_conn:
+            live_context = build_copilot_context(profile, _ctx_conn)
+    except Exception:
+        logger.exception("Failed to build copilot live context")
+        live_context = ""
 
+    context_block = f"\n{live_context}\n" if live_context else ""
+
+    prompt = f"""{schema_context}
+{context_block}
 The user's currently active profile is: '{profile_alias}'
 If the question doesn't specify a profile, filter by the active profile.
 If the active profile is 'all_profiles', do NOT add any profile_id WHERE clause at all — return results across all profiles.
@@ -847,6 +1005,43 @@ Generate a single SQLite query to answer this question.
         logger.warning("Copilot read validation failed | SQL: %s | Error: %s", real_sql, validation_error)
         return _error_response(f"SQL validation failed: {validation_error}", sql=real_sql)
 
+    is_valid, validation_error = _validate_read_semantics(question, real_sql)
+    if not is_valid:
+        logger.warning("Copilot read semantic validation failed | SQL: %s | Error: %s", real_sql, validation_error)
+        anonymized_failed_sql = _anonymize_sql_text(real_sql, real_to_alias)
+        repaired_alias_sql = _repair_read_sql(
+            question=question,
+            failed_sql=anonymized_failed_sql,
+            error_message=f"Semantic validation error: {validation_error}",
+            schema_context=schema_context,
+            profile_alias=profile_alias,
+        )
+        if not repaired_alias_sql:
+            return _error_response(f"SQL semantic validation failed: {validation_error}", sql=real_sql)
+
+        candidate_sql = _deanoymize_sql(repaired_alias_sql, alias_to_real)
+        if not profile or profile == "household":
+            candidate_sql = _sanitize_profile_filter(candidate_sql)
+        candidate_sql = _rewrite_transaction_read_sources(candidate_sql)
+
+        is_valid, validation_error = _validate_read_sql(candidate_sql)
+        if is_valid:
+            is_valid, validation_error = _validate_read_semantics(question, candidate_sql)
+        if not is_valid:
+            logger.warning(
+                "Copilot semantic repair produced invalid SQL | SQL: %s | Error: %s",
+                candidate_sql,
+                validation_error,
+            )
+            return _error_response(f"SQL semantic validation failed: {validation_error}", sql=real_sql)
+
+        logger.info(
+            "Copilot repaired semantically invalid read SQL | Original: %s | Repaired: %s",
+            real_sql,
+            candidate_sql,
+        )
+        real_sql = candidate_sql
+
     try:
         rows = _run_read_query(real_sql)
     except Exception as e:
@@ -897,13 +1092,18 @@ Generate a single SQLite query to answer this question.
 
         real_sql = repaired_sql
 
-    # ── Send results back to Claude for natural language answer ──
+    # ── Send results back to the configured LLM for natural language answer ──
     anon_rows = _anonymize_sql_result(rows, real_to_alias)
     display_rows = anon_rows[:50]
-    # Mask amounts, counterparty names, and other PII before sending to LLM
-    privacy_safe_rows = sanitize_rows_for_llm(display_rows)
+    mask_for_llm = _should_mask_copilot_results_for_llm()
+    rows_for_answer = sanitize_rows_for_llm(display_rows) if mask_for_llm else display_rows
 
-    answer = _generate_natural_answer(question, privacy_safe_rows)
+    answer = _generate_natural_answer(
+        question,
+        rows_for_answer,
+        live_context=live_context,
+        amounts_masked=mask_for_llm,
+    )
 
     _log_conversation(profile, question, real_sql, json.dumps(display_rows), answer, "read")
 
@@ -954,23 +1154,41 @@ def _ensure_categories_exist(conn, statements: list[str]):
                     )
 
 
-def _generate_natural_answer(question: str, rows: list[dict]) -> str:
+def _generate_natural_answer(
+    question: str,
+    rows: list[dict],
+    live_context: str = "",
+    amounts_masked: bool = True,
+) -> str:
     if not rows:
         return "No results found for your query."
 
     result_str = json.dumps(rows[:25], indent=2, default=str)
+    context_block = f"\n{live_context}\n" if live_context else ""
+    result_count_note = (
+        f"\n\n(Showing first 25 of {len(rows)} total results)"
+        if len(rows) > 25
+        else ""
+    )
 
-    prompt = f"""The user asked: "{question}"
-
-The database returned these results (dollar amounts and personal names have been anonymized for privacy):
-{result_str}
-
-{"(Showing first 25 of " + str(len(rows)) + " total results)" if len(rows) > 25 else ""}
-
+    amount_guidance = (
+        f"""The database returned these results (dollar amounts and personal names have been anonymized for privacy):
+{result_str}{result_count_note}
 Provide a clear, concise natural language answer.
 IMPORTANT: The dollar amounts in the results are masked as "$XXX" for privacy. Do NOT invent specific dollar figures.
 When discussing amounts, use general terms like "your spending" or "the total" — do not fabricate numbers.
-If the user asked for a specific number, say that the exact figures are available in the data view.
+If the user asked for a specific number, say that the exact figures are available in the data view."""
+        if amounts_masked
+        else f"""The database returned these local-only results:
+{result_str}{result_count_note}
+Provide a clear, concise natural language answer.
+You are running locally, so exact dollar amounts in the results may be used in the answer.
+If the user asked for a specific number, include the exact number from the results."""
+    )
+
+    prompt = f"""The user asked: "{question}"
+{context_block}
+{amount_guidance}
 If there are multiple rows, summarize the key findings (counts, categories, patterns).
 Do not mention SQL, databases, or queries in your answer.
 Do not reveal any personal names — use generic terms like "your account" instead."""
@@ -996,12 +1214,12 @@ def _clean_sql_response(raw_sql: str) -> str:
     return sql.strip()
 
 
-def _run_read_query(sql: str) -> list[dict]:
+def _run_read_query(sql: str, params: list | tuple = ()) -> list[dict]:
     sql = _rewrite_transaction_read_sources(sql)
     with get_db() as conn:
         conn.execute("PRAGMA query_only = ON")
         try:
-            return dicts_from_rows(conn.execute(sql).fetchall())
+            return dicts_from_rows(conn.execute(sql, params).fetchall())
         finally:
             conn.execute("PRAGMA query_only = OFF")
 

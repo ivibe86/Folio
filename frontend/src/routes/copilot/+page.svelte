@@ -7,6 +7,7 @@
     import { activeProfile } from '$lib/stores/profileStore.js';
     import { formatCurrency, formatDate } from '$lib/utils.js';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
+    import CopilotChart from '$lib/components/CopilotChart.svelte';
 
     let loading = false;
     let sidebarLoading = true;
@@ -17,6 +18,7 @@
     let showSqlForMsg = {};
     let showSqlForHistory = {};
     let historyOpen = false;
+    let cancelStream = null;  // holds the in-flight stream's cancel fn
 
     let recurringData = null;
     let historyItems = [];
@@ -300,9 +302,20 @@
         return null;
     }
 
+    function stopStream() {
+        if (cancelStream) {
+            try { cancelStream(); } catch {}
+            cancelStream = null;
+        }
+        loading = false;
+    }
+
     async function send() {
         const question = input.trim();
-        if (!question || loading) return;
+        if (!question) return;
+
+        // Cancel any in-flight request (cancel-on-resubmit)
+        if (loading) stopStream();
 
         messages = [...messages, {
             role: 'user',
@@ -325,25 +338,129 @@
             if (shortcut) {
                 pushAssistantMessage(shortcut, 'success');
                 await refreshSidebar();
+                loading = false;
                 return;
             }
+        } catch {}
 
-            const res = await api.askCopilot(question, activeProfileId);
-            pushAssistantMessage(res.answer || 'No response received.', res.operation || null, {
-                data: res.data || null,
-                sql: res.sql || null,
-                preview_changes: res.preview_changes || [],
-                confirmation_id: res.confirmation_id || null,
-                needs_confirmation: res.needs_confirmation || false,
-                rows_affected: res.rows_affected || 0,
-                original_question: question
-            });
+        // Build chat history from prior turns
+        const history = messages
+            .slice(0, -1)
+            .filter(m => m && m.content && (m.role === 'user' || (m.role === 'assistant' && m.operation && m.operation !== 'error')))
+            .slice(-12)
+            .map(m => ({ role: m.role, content: m.content }));
+
+        // Add a live assistant placeholder that we'll mutate as events arrive
+        messages = [...messages, {
+            role: 'assistant',
+            content: '',
+            operation: 'streaming',
+            data: null,
+            sql: null,
+            preview_changes: [],
+            needs_confirmation: false,
+            rows_affected: 0,
+            original_question: question,
+            tool_trace: [],
+            active_tool: null,
+        }];
+        const streamIdx = messages.length - 1;
+        await tick();
+        scrollToBottom();
+
+        let currentContent = '';
+        cancelStream = api.askCopilotStream(question, activeProfileId, history, (ev) => {
+            const msg = { ...messages[streamIdx] };
+            switch (ev.type) {
+                case 'reset_text':
+                    currentContent = '';
+                    msg.content = '';
+                    break;
+                case 'token':
+                    currentContent += ev.text || '';
+                    msg.content = currentContent;
+                    break;
+                case 'tool_call':
+                    msg.active_tool = ev.name;
+                    msg.tool_trace = [...(msg.tool_trace || []), { name: ev.name, args: ev.args, duration_ms: null }];
+                    break;
+                case 'chart':
+                    msg.chart = ev.chart;
+                    break;
+                case 'tool_result': {
+                    msg.active_tool = null;
+                    const trace = [...(msg.tool_trace || [])];
+                    for (let i = trace.length - 1; i >= 0; i--) {
+                        if (trace[i].name === ev.name && trace[i].duration_ms == null) {
+                            trace[i] = { ...trace[i], duration_ms: ev.duration_ms };
+                            break;
+                        }
+                    }
+                    msg.tool_trace = trace;
+                    break;
+                }
+                case 'done':
+                    msg.content = (ev.answer || currentContent || '').trim();
+                    msg.data = ev.data || null;
+                    msg.data_source = ev.data_source || null;
+                    msg.tool_trace = ev.tool_trace || msg.tool_trace || [];
+                    msg.active_tool = null;
+                    if (ev.chart) msg.chart = ev.chart;
+                    if (ev.pending_write) {
+                        msg.operation = 'write_preview';
+                        msg.confirmation_id = ev.pending_write.confirmation_id;
+                        msg.sql = ev.pending_write.sql;
+                        msg.preview_changes = ev.pending_write.preview_changes || [];
+                        msg.needs_confirmation = true;
+                        msg.rows_affected = ev.pending_write.rows_affected || 0;
+                    } else {
+                        msg.operation = 'read';
+                        msg.rows_affected = Array.isArray(ev.data) ? ev.data.length : 0;
+                    }
+                    loading = false;
+                    cancelStream = null;
+                    break;
+                case 'error':
+                    msg.content = ev.message || 'Something went wrong.';
+                    msg.operation = 'error';
+                    msg.active_tool = null;
+                    loading = false;
+                    cancelStream = null;
+                    break;
+            }
+            messages[streamIdx] = msg;
+            messages = messages;
+            tick().then(scrollToBottom);
+        });
+    }
+
+    async function saveInsight(msgIndex) {
+        const msg = messages[msgIndex];
+        if (!msg || msg.saved || msg.saving) return;
+
+        let question = msg.original_question;
+        if (!question) {
+            for (let j = msgIndex - 1; j >= 0; j--) {
+                if (messages[j].role === 'user') {
+                    question = messages[j].content;
+                    break;
+                }
+            }
+        }
+        if (!question || !msg.content) return;
+
+        messages[msgIndex] = { ...msg, saving: true };
+        messages = [...messages];
+
+        try {
+            await api.saveInsight(question, msg.content, 'insight', null, activeProfileId);
+            messages[msgIndex] = { ...messages[msgIndex], saving: false, saved: true };
+            messages = [...messages];
+            setNotice('Saved to memory.');
         } catch (error) {
-            pushAssistantMessage("Sorry, I couldn't process that. Please try again.", 'error');
-        } finally {
-            loading = false;
-            await tick();
-            scrollToBottom();
+            messages[msgIndex] = { ...messages[msgIndex], saving: false };
+            messages = [...messages];
+            setNotice(error?.message || 'Failed to save insight.');
         }
     }
 
@@ -521,6 +638,9 @@
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             send();
+        } else if (e.key === 'Escape' && loading) {
+            e.preventDefault();
+            stopStream();
         }
     }
 
@@ -626,9 +746,22 @@
                                             </div>
                                         {/if}
 
-                                        <div class="card" style="padding: 0.75rem 1rem">
-                                            <p class="text-[13px] leading-relaxed whitespace-pre-wrap" style="color: var(--text-primary)">{msg.content}</p>
-                                        </div>
+                                        {#if msg.active_tool}
+                                            <div class="copilot-op-badge copilot-op-read" style="margin-bottom: 6px; opacity: 0.9;">
+                                                <span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
+                                                Calling {msg.active_tool.replaceAll('_', ' ')}…
+                                            </div>
+                                        {/if}
+
+                                        {#if msg.content?.trim() || msg.operation === 'streaming'}
+                                            <div class="card" style="padding: 0.75rem 1rem">
+                                                <p class="text-[13px] leading-relaxed whitespace-pre-wrap" style="color: var(--text-primary)">{msg.content}{#if msg.operation === 'streaming' && loading}<span class="copilot-cursor">▌</span>{/if}</p>
+                                            </div>
+                                        {/if}
+
+                                        {#if msg.chart && msg.chart.labels && msg.chart.labels.length > 0}
+                                            <CopilotChart spec={msg.chart} />
+                                        {/if}
 
                                         {#if msg.preview_changes && msg.preview_changes.length > 0}
                                             <div class="copilot-change-list">
@@ -695,6 +828,34 @@
                                             {#if showSqlForMsg[i]}
                                                 <pre class="copilot-sql-block">{msg.sql}</pre>
                                             {/if}
+                                        {/if}
+
+                                        {#if msg.tool_trace && msg.tool_trace.length > 0 && msg.operation !== 'streaming'}
+                                            <button class="copilot-sql-toggle" on:click={() => showSqlForMsg[i] = !showSqlForMsg[i]}>
+                                                <span class="material-symbols-outlined text-[12px]">manage_search</span>
+                                                {showSqlForMsg['trace_' + i] ? 'Hide' : 'How I answered'} ({msg.tool_trace.length} tool{msg.tool_trace.length !== 1 ? 's' : ''})
+                                            </button>
+                                            {#if showSqlForMsg[i]}
+                                                <div class="copilot-sql-block" style="font-size: 11px; line-height: 1.6;">
+                                                    {#each msg.tool_trace as t}
+                                                        <div>→ <strong>{t.name}</strong>({Object.entries(t.args || {}).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ')}){t.duration_ms != null ? ` · ${t.duration_ms}ms` : ''}</div>
+                                                    {/each}
+                                                </div>
+                                            {/if}
+                                        {/if}
+
+                                        {#if msg.content && msg.operation && msg.operation !== 'error' && msg.operation !== 'streaming' && !msg.needs_confirmation}
+                                            <button
+                                                class="copilot-sql-toggle"
+                                                on:click={() => saveInsight(i)}
+                                                disabled={msg.saving || msg.saved}
+                                                title="Save this answer so Copilot remembers it in future questions"
+                                            >
+                                                <span class="material-symbols-outlined text-[12px]">
+                                                    {msg.saved ? 'check' : 'bookmark_add'}
+                                                </span>
+                                                {msg.saved ? 'Saved' : msg.saving ? 'Saving…' : 'Save to memory'}
+                                            </button>
                                         {/if}
                                     </div>
                                 </div>
@@ -819,11 +980,15 @@
                             </div>
                         {/if}
                     </div>
-                    <button on:click={send} disabled={!input.trim() || loading} class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed copilot-send-btn">
-                        <span class="material-symbols-outlined text-white text-[18px]">
-                            {loading ? 'progress_activity' : 'arrow_upward'}
-                        </span>
-                    </button>
+                    {#if loading}
+                        <button on:click={stopStream} class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all hover:scale-105 active:scale-95 copilot-send-btn" title="Stop (Esc)">
+                            <span class="material-symbols-outlined text-white text-[18px]">stop</span>
+                        </button>
+                    {:else}
+                        <button on:click={send} disabled={!input.trim()} class="w-11 h-11 rounded-2xl flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed copilot-send-btn">
+                            <span class="material-symbols-outlined text-white text-[18px]">arrow_upward</span>
+                        </button>
+                    {/if}
                 </div>
                 <p class="text-[9px] text-center mt-2" style="color: var(--text-muted)">
                     Copilot can explain decisions, prepare edits, and ask for confirmation before changes are executed.

@@ -839,3 +839,16 @@
         animation: none;
     }
 }
+
+/* Streaming cursor */
+.copilot-cursor {
+    display: inline-block;
+    margin-left: 1px;
+    color: var(--accent);
+    animation: copilot-cursor-blink 1s step-end infinite;
+}
+
+@keyframes copilot-cursor-blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}

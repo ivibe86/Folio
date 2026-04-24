@@ -218,6 +218,8 @@ def get_transactions_paginated(
     limit: int = 100,
     offset: int = 0,
     conn=None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """
     Fetch transactions with all filters pushed into SQL WHERE clauses.
@@ -238,6 +240,13 @@ def get_transactions_paginated(
         if month:
             where_clauses.append("t.date LIKE ?")
             params.append(month + "%")
+        else:
+            if start_date:
+                where_clauses.append("t.date >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("t.date <= ?")
+                params.append(end_date)
         if category:
             where_clauses.append("t.category = ?")
             params.append(category)
@@ -660,11 +669,21 @@ def get_net_worth_delta_metrics(profile: str | None = None, conn=None) -> dict:
         return _query(c)
 
 
-def get_category_analytics_data(month: str | None = None, profile: str | None = None, conn=None) -> list[dict]:
+def get_category_analytics_data(
+    month: str | None = None,
+    profile: str | None = None,
+    conn=None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[dict]:
     """
     Compute per-category spending breakdown using SQL GROUP BY.
     Transfer sub-classification aware: excludes internal (and household in
     household view) transfers from the breakdown.
+
+    Time window: pass `month` (YYYY-MM) for a single month, or `start_date` /
+    `end_date` (YYYY-MM-DD) for arbitrary ranges. If both are given, `month`
+    takes precedence.
     """
     def _query(c):
         tx_source = _transactions_source()
@@ -678,6 +697,13 @@ def get_category_analytics_data(month: str | None = None, profile: str | None = 
         if month:
             where_clauses.append("date LIKE ?")
             params.append(month + "%")
+        else:
+            if start_date:
+                where_clauses.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("date <= ?")
+                params.append(end_date)
 
         # Transfer exclusion
         if is_household:
@@ -865,12 +891,32 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
         return _query(c)
 
 
-def get_merchant_insights_data(month: str | None = None, profile: str | None = None, conn=None) -> list[dict]:
-    """Merchant-level spending breakdown using SQL aggregation."""
+def get_merchant_insights_data(
+    month: str | None = None,
+    profile: str | None = None,
+    conn=None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_unenriched: bool = False,
+) -> list[dict]:
+    """
+    Merchant-level spending breakdown using SQL aggregation.
+
+    Time window: `month` (YYYY-MM) or `start_date`/`end_date`.
+    `include_unenriched=True` falls back to description when merchant_name is
+    empty — used by Copilot so partially-enriched merchants (e.g. BILT) are
+    still visible. UI keeps the enriched-only default for cleaner display.
+    """
     def _query(c):
         tx_source = _transactions_source()
-        where_clauses = ["enriched = 1", "merchant_name != ''"]
+        where_clauses = []
         params = []
+
+        if include_unenriched:
+            where_clauses.append("COALESCE(NULLIF(merchant_name, ''), description) != ''")
+        else:
+            where_clauses.append("enriched = 1")
+            where_clauses.append("merchant_name != ''")
 
         non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
         where_clauses.append(f"amount < 0 AND category NOT IN ({non_spending_ph})")
@@ -882,17 +928,27 @@ def get_merchant_insights_data(month: str | None = None, profile: str | None = N
         if month:
             where_clauses.append("date LIKE ?")
             params.append(month + "%")
+        else:
+            if start_date:
+                where_clauses.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("date <= ?")
+                params.append(end_date)
+
+        # Use description fallback when include_unenriched, otherwise merchant_name directly
+        name_expr = "COALESCE(NULLIF(merchant_name, ''), description)" if include_unenriched else "merchant_name"
 
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
         sql = f"""
-            SELECT merchant_name, merchant_domain, merchant_industry,
+            SELECT {name_expr} AS name, merchant_domain, merchant_industry,
                    merchant_city, merchant_state,
                    SUM(ABS(amount)) as total_spent,
                    COUNT(*) as transaction_count
             FROM {tx_source}
             {where_sql}
-            GROUP BY merchant_name
+            GROUP BY name
             ORDER BY total_spent DESC
         """
         rows = c.execute(sql, params).fetchall()

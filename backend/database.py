@@ -481,6 +481,20 @@ CREATE TABLE IF NOT EXISTS copilot_conversations (
     created_at          TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS saved_insights (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id              TEXT REFERENCES profiles(id),
+    question                TEXT NOT NULL,
+    answer                  TEXT NOT NULL,
+    kind                    TEXT NOT NULL DEFAULT 'insight' CHECK(kind IN ('insight', 'decision', 'policy_note')),
+    pinned                  INTEGER NOT NULL DEFAULT 0,
+    source_conversation_id  INTEGER REFERENCES copilot_conversations(id),
+    created_at              TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_insights_profile ON saved_insights(profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_insights_pinned ON saved_insights(profile_id, pinned) WHERE pinned = 1;
+
 CREATE TABLE IF NOT EXISTS subscription_seeds (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,

@@ -11,6 +11,7 @@
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
 
     let transactions = [];
+    let summaryTransactions = [];
     let totalCount = 0;
     let pageLimit = 50;
     let pageOffset = 0;
@@ -169,6 +170,7 @@
             try {
                 invalidateCache();
                 await fetchTransactions();
+                await fetchSummaryTransactions();
 
                 const allResult = await api.getTransactions({ limit: 1000 });
                 const allTxns = allResult.data || [];
@@ -190,6 +192,7 @@
             totalCount = result.total_count;
             pageOffset = 0;
             allCategories = cats;
+            summaryTransactions = result.data || [];
 
             // Fetch all months and accounts for filter dropdowns (lightweight metadata query)
             const allResult = await api.getTransactions({ limit: 1000 });
@@ -201,6 +204,7 @@
             }
             const accSet = new Set(allTxns.map(t => t.account_name).filter(Boolean));
             accountNames = [...accSet].sort();
+            await fetchSummaryTransactions();
         } catch (e) {
             console.error('Failed to load transactions:', e);
         } finally {
@@ -243,6 +247,43 @@
         }
     }
 
+    function buildSummaryParams(offset = 0) {
+        const params = { limit: 1000, offset };
+        if (filterMonth && filterMonth !== '__ytd__') params.month = filterMonth;
+        if (filterCategory) params.category = filterCategory;
+        if (filterAccount) params.account = filterAccount;
+        if (search) params.search = search;
+        return params;
+    }
+
+    async function fetchSummaryTransactions() {
+        try {
+            let offset = 0;
+            let all = [];
+            let expectedTotal = null;
+
+            do {
+                const result = await api.getTransactions(buildSummaryParams(offset));
+                const page = result.data || [];
+                all = all.concat(page);
+                expectedTotal = result.total_count ?? all.length;
+                offset += page.length;
+
+                if (page.length === 0) break;
+            } while (offset < expectedTotal);
+
+            if (filterMonth === '__ytd__') {
+                const year = new Date().getFullYear().toString();
+                all = all.filter(t => t.date?.startsWith(year));
+            }
+
+            summaryTransactions = all;
+        } catch (e) {
+            console.error('Failed to fetch transaction summary data:', e);
+            summaryTransactions = filteredTxns;
+        }
+    }
+
     function goToPage(page) {
         pageOffset = page * pageLimit;
         fetchTransactions();
@@ -281,6 +322,7 @@
             _prevFilterKey = filterKey;
             pageOffset = 0;
             fetchTransactions();
+            fetchSummaryTransactions();
         }
     }
 
@@ -290,18 +332,20 @@
         _searchDebounce = setTimeout(() => {
             pageOffset = 0;
             fetchTransactions();
+            fetchSummaryTransactions();
         }, 300);
     }
 
     // Transactions are already server-filtered
     $: filteredTxns = transactions;
+    $: summaryTxns = summaryTransactions.length > 0 ? summaryTransactions : filteredTxns;
 
     // Transfer types excluded from accrual-basis totals (same model as dashboard)
     const EXCLUDED_EXPENSE_TYPES = new Set(['transfer_internal', 'transfer_cc_payment', 'transfer_household']);
     const NON_SPENDING_CATEGORIES = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
 
     $: groupedTxns = groupTransactionsByDate(filteredTxns);
-    $: totalSpending = filteredTxns
+    $: totalSpending = summaryTxns
         .filter(t => {
             const amount = parseFloat(t.amount);
             if (amount >= 0) return false;
@@ -312,7 +356,7 @@
             return true;
         })
         .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
-    $: totalIncome = filteredTxns
+    $: totalIncome = summaryTxns
         .filter(t => {
             const amount = parseFloat(t.amount);
             if (amount <= 0) return false;
@@ -323,16 +367,41 @@
             return true;
         })
         .reduce((s, t) => s + parseFloat(t.amount), 0);
-    $: txCcRepaid = filteredTxns
+    $: txCcRepaid = summaryTxns
         .filter(t => t.category === 'Credit Card Payment' && parseFloat(t.amount) < 0)
         .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
-    $: txExternalTransfers = filteredTxns
+    $: txExternalTransfers = summaryTxns
         .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0)
         .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
     $: txNetFlow = totalIncome - totalSpending - txExternalTransfers;
+    $: largestSpendTx = summaryTxns
+        .filter(t => parseFloat(t.amount) < 0)
+        .filter(t => !NON_SPENDING_CATEGORIES.has(t.category))
+        .filter(t => !(t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)))
+        .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)))[0] || null;
+    $: largestSpendAmount = largestSpendTx ? Math.abs(parseFloat(largestSpendTx.amount)) : 0;
+    $: periodLabel = selectedPeriod === 'all'
+        ? 'All time'
+        : selectedPeriod === 'ytd'
+            ? `YTD ${new Date().getFullYear()}`
+            : selectedPeriod === 'custom'
+                ? formatMonth(selectedCustomMonth)
+                : formatMonth(getMonthForPeriod(selectedPeriod));
+    $: storyKicker = selectedPeriod === 'this_month' || selectedPeriod === 'custom'
+        ? `${periodLabel} · so far`
+        : periodLabel;
+    $: dailySpendBars = groupTransactionsByDate(summaryTxns).map(([date, txns]) => {
+        const spent = txns
+            .filter(t => parseFloat(t.amount) < 0)
+            .filter(t => !NON_SPENDING_CATEGORIES.has(t.category))
+            .filter(t => !(t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)))
+            .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+        return { date, spent };
+    }).reverse().slice(-24);
+    $: maxDailySpend = Math.max(...dailySpendBars.map(d => d.spent), 1);
     $: topCategory = (() => {
         const cats = {};
-        filteredTxns.filter(t => {
+        summaryTxns.filter(t => {
             const amount = parseFloat(t.amount);
             if (amount >= 0) return false;
             if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
@@ -482,6 +551,29 @@
         return base;
     }
 
+    function formatLedgerDay(dateStr) {
+        if (!dateStr) return { day: '', meta: '', relative: '' };
+        const d = new Date(dateStr + 'T00:00:00');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const target = new Date(d);
+        target.setHours(0, 0, 0, 0);
+        const diffDays = Math.round((today - target) / 86400000);
+        const relative = diffDays === 0
+            ? 'Today'
+            : diffDays === 1
+                ? 'Yesterday'
+                : diffDays > 1
+                    ? `${diffDays}d ago`
+                    : '';
+
+        return {
+            day: d.toLocaleDateString('en-US', { day: '2-digit' }),
+            meta: d.toLocaleDateString('en-US', { month: 'short', weekday: 'long' }),
+            relative
+        };
+    }
+
     function getMerchantMetaLine(tx) {
         const description = (tx.description || '').trim();
         const merchantDisplay = (tx.merchant_display_name || '').trim();
@@ -549,6 +641,7 @@
             filterCategory = '';
             filterAccount = '';
             search = '';
+            await fetchSummaryTransactions();
         } catch (e) {
             console.error('Failed to reload transactions for profile:', e);
         } finally {
@@ -577,42 +670,68 @@
     </div>
 {/if}
 
-<!-- SUMMARY STRIP -->
-<div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5 fade-in-up" style="animation-delay: 60ms">
-    <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Income</p>
-        <p class="text-base font-bold font-mono mt-0.5 text-positive">{formatCurrency(totalIncome)}</p>
+<!-- MONTH STORY CARD -->
+<section class="tx-story-card fade-in-up" style="animation-delay: 60ms">
+    <div class="tx-story-kicker">{storyKicker}</div>
+    <h3 class="tx-story-title">The month, <span>in full.</span></h3>
+
+    <div class="tx-story-metrics">
+        <div class="tx-story-metric tx-story-metric-main">
+            <span class="tx-story-label">Spending</span>
+            <strong>{formatCurrency(totalSpending, 2)}</strong>
+            <small>{totalCount} transactions reviewed</small>
+        </div>
+        <div class="tx-story-metric">
+            <span class="tx-story-label">Income</span>
+            <strong class="tx-story-positive">{formatCurrency(totalIncome, 0)}</strong>
+            <small>Actual income only</small>
+        </div>
+        <div class="tx-story-metric">
+            <span class="tx-story-label">Ext. transfers</span>
+            <strong class="tx-story-warning">{formatCurrency(txExternalTransfers, 0)}</strong>
+            <small>External transfers counted in flow</small>
+        </div>
+        <div class="tx-story-metric">
+            <span class="tx-story-label">CC repaid</span>
+            <strong class="tx-story-muted">{formatCurrency(txCcRepaid, 0)}</strong>
+            <small>Card payments excluded from spending</small>
+        </div>
+        <div class="tx-story-metric">
+            <span class="tx-story-label">Net flow</span>
+            <strong class:tx-story-positive={txNetFlow >= 0} class:tx-story-negative={txNetFlow < 0}>
+                {txNetFlow >= 0 ? '+' : ''}{formatCurrency(txNetFlow, 0)}
+            </strong>
+            <small>Income minus spending and external transfers</small>
+        </div>
+        <div class="tx-story-metric">
+            <span class="tx-story-label">Largest spend</span>
+            <strong>-{formatCurrency(largestSpendAmount, 0)}</strong>
+            <small>{largestSpendTx ? `${largestSpendTx.category || 'Uncategorized'} · ${largestSpendTx.description || 'Transaction'}` : 'No spending yet'}</small>
+        </div>
     </div>
-    <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Spending</p>
-        <p class="text-base font-bold font-mono mt-0.5 text-negative">{formatCurrency(totalSpending)}</p>
+
+    <div class="tx-story-spark">
+        <span>Daily spend</span>
+        <div class="tx-story-bars" aria-hidden="true">
+            {#each dailySpendBars as bar}
+                <i class:tx-story-bar-hot={bar.spent === maxDailySpend && bar.spent > 0}
+                   style="height: {bar.spent > 0 ? Math.max(8, (bar.spent / maxDailySpend) * 30) : 3}px"></i>
+            {/each}
+        </div>
+        <span>large day</span>
     </div>
-    <div class="card" style="padding: 0.75rem 1rem; opacity: 0.7">
-        <p class="stat-label" style="display: flex; align-items: center; gap: 4px;">
-            Ext. Transfers
-            <span class="material-symbols-outlined text-[12px]" style="color: var(--text-muted); opacity: 0.6" title="Transfers to people outside your accounts (Zelle, Venmo, etc). Counted in Net Flow.">info</span>
-        </p>
-        <p class="text-base font-bold font-mono mt-0.5" style="color: var(--warning)">{formatCurrency(txExternalTransfers)}</p>
-    </div>
-    <div class="card" style="padding: 0.75rem 1rem; opacity: 0.7">
-        <p class="stat-label" style="display: flex; align-items: center; gap: 4px;">
-            CC Repaid
-            <span class="material-symbols-outlined text-[12px]" style="color: var(--text-muted); opacity: 0.6" title="Payments toward prior credit card charges. Not counted as new spending.">info</span>
-        </p>
-        <p class="text-base font-bold font-mono mt-0.5" style="color: var(--text-muted)">{formatCurrency(txCcRepaid)}</p>
-    </div>
-    <div class="card" style="padding: 0.75rem 1rem">
-        <p class="stat-label">Net Flow</p>
-        <p class="text-base font-bold font-mono mt-0.5" style="color: {txNetFlow >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-            {txNetFlow >= 0 ? '+' : ''}{formatCurrency(txNetFlow)}
-        </p>
-    </div>
-</div>
+</section>
 
 <!-- PERIOD SELECTOR + FILTERS -->
-<div class="flex flex-col gap-3 mb-5 fade-in-up" style="animation-delay: 100ms; position: relative; z-index: 10;">
+<div class="tx-command-card fade-in-up" style="animation-delay: 100ms; position: relative; z-index: 10;">
+    <div class="tx-command-search">
+        <span class="material-symbols-outlined">search</span>
+        <input bind:value={search} type="text" placeholder="Search merchants, categories, accounts..." />
+        <kbd>/</kbd>
+    </div>
+
     <!-- Row 1: Period toggle + Month dropdown + Category + Account filters -->
-    <div class="flex flex-wrap items-center gap-3 txn-period-row">
+    <div class="tx-command-controls txn-period-row">
         <div class="period-toggle-track" style="--seg-count: {periodOptions.length}; --active-idx: {activePeriodIdx};">
             <div class="period-toggle-thumb"></div>
             {#each periodOptions as p}
@@ -745,22 +864,39 @@
 
         {#if hasActiveFilters}
             <button on:click={() => { clearFilters(); closeAllFilters(); monthDropdownOpen = false; }}
-                class="flex items-center gap-1 px-3 py-2.5 rounded-xl text-[11px] font-medium transition-all hover:opacity-80"
-                style="background: var(--surface-100); color: var(--text-secondary)">
+                class="tx-command-reset">
                 <span class="material-symbols-outlined text-[14px]">close</span>
                 Reset
             </button>
         {/if}
     </div>
 
-    <!-- Row 2: Search bar only (standalone) -->
-    <div class="flex items-center">
-        <div class="relative w-full" style="max-width: 600px">
-            <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[18px]" style="color: var(--text-muted)">search</span>
-            <input bind:value={search} type="text" placeholder="Search transactions..."
-                class="w-full pl-10 pr-4 py-2.5 rounded-xl text-sm focus:ring-2 focus:ring-accent/50 transition-all"
-                style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border)" />
-        </div>
+    <div class="tx-active-filters">
+        <span class="tx-filter-chip">
+            <span class="material-symbols-outlined">calendar_month</span>
+            {periodLabel}
+        </span>
+        {#if filterCategory}
+            <button class="tx-filter-chip tx-filter-chip-removable" on:click={() => filterCategory = ''}>
+                <span class="material-symbols-outlined">category</span>
+                {filterCategory}
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        {/if}
+        {#if filterAccount}
+            <button class="tx-filter-chip tx-filter-chip-removable" on:click={() => filterAccount = ''}>
+                <span class="material-symbols-outlined">account_balance</span>
+                {filterAccount}
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        {/if}
+        {#if search}
+            <button class="tx-filter-chip tx-filter-chip-removable" on:click={() => search = ''}>
+                <span class="material-symbols-outlined">search</span>
+                {search}
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        {/if}
     </div>
 </div>
 
@@ -772,14 +908,7 @@
         {/each}
     </div>
 {:else}
-    <div class="card tx-ledger-card fade-in-up" style="padding: 0; animation-delay: 140ms; overflow: visible;">
-        {#if groupedTxns.length > 0}
-            <div class="tx-column-headers">
-                <span>Description</span>
-                <span class="tx-col-header-category">Category</span>
-                <span class="tx-col-header-amount">Amount</span>
-            </div>
-        {/if}
+    <div class="tx-ledger-card fade-in-up" style="animation-delay: 140ms;">
         {#if groupedTxns.length === 0}
             <div class="text-center py-16" style="color: var(--text-muted)">
                 <span class="material-symbols-outlined text-5xl mb-3" style="opacity: 0.4">search_off</span>
@@ -790,18 +919,26 @@
             {#each groupedTxns as [date, txns], gi}
                 {@const daySpent = txns.filter(t => parseFloat(t.amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0)}
                 {@const dayIncome = txns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0)}
+                {@const dayInfo = formatLedgerDay(date)}
 
-                <div class="day-header tx-ledger-day-header" style="{gi > 0 ? 'border-top: 1px solid rgba(78, 88, 108, 0.16);' : ''}">
-                    <span class="text-[11px] font-semibold" style="color: var(--text-primary)">{formatDayHeaderFull(date)}</span>
-                    <div class="flex items-center gap-3">
-                        {#if dayIncome > 0}
-                            <span class="text-[10px] font-mono font-medium text-positive">+{formatCurrency(dayIncome, 2)}</span>
-                        {/if}
-                        {#if daySpent > 0}
-                            <span class="text-[10px] font-mono font-medium text-negative">-{formatCurrency(daySpent, 2)}</span>
-                        {/if}
+                <div class="tx-day-group" class:tx-day-group-separated={gi > 0}>
+                    <div class="tx-day-stamp">
+                        <strong>{dayInfo.day}</strong>
+                        <span>{dayInfo.meta}</span>
+                        {#if dayInfo.relative}<small>{dayInfo.relative}</small>{/if}
                     </div>
-                </div>
+                    <div class="tx-day-body">
+                        <div class="tx-day-summary">
+                            <div>
+                                <em>{txns.length} tx</em>
+                                {#if dayIncome > 0}
+                                    <strong class="tx-day-income">+{formatCurrency(dayIncome, 0)}</strong>
+                                {/if}
+                                {#if daySpent > 0}
+                                    <strong class="tx-day-spend">-{formatCurrency(daySpent, 0)}</strong>
+                                {/if}
+                            </div>
+                        </div>
 
                 {#each txns as tx (tx.original_id)}
                     {@const amount = parseFloat(tx.amount)}
@@ -1008,6 +1145,8 @@
                         </div>
                     {/if}
                 {/each}
+                    </div>
+                </div>
             {/each}
         {/if}
     </div>

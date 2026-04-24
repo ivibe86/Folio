@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from auth import verify_api_key, rate_limit_middleware
@@ -315,6 +316,14 @@ class TransactionExcludeUpdate(BaseModel):
 
 class CopilotRequest(BaseModel):
     question: str
+    history: list[dict] | None = None
+
+
+class SaveInsightRequest(BaseModel):
+    question: str
+    answer: str
+    kind: str = "insight"
+    source_conversation_id: int | None = None
 
 
 class LocalLlmSettingsUpdate(BaseModel):
@@ -929,8 +938,39 @@ class CopilotConfirm(BaseModel):
 async def copilot_ask(body: CopilotRequest, profile: str | None = Query(None)):
     """NLP copilot — translates questions to SQL and returns answers."""
     from copilot import ask_copilot
-    result = ask_copilot(question=body.question, profile=profile)
+    result = ask_copilot(question=body.question, profile=profile, history=body.history)
     return result
+
+
+@app.post("/api/copilot/ask/stream")
+async def copilot_ask_stream(body: CopilotRequest, profile: str | None = Query(None)):
+    """Streaming variant of /api/copilot/ask — emits Server-Sent Events so the
+    UI can render tool progress and the agent's final answer incrementally."""
+    import json as _json
+    from copilot_agent import run_agent_stream
+
+    validated_profile = validate_profile(profile)
+
+    def event_stream():
+        try:
+            for event in run_agent_stream(
+                question=body.question,
+                profile=validated_profile,
+                history=body.history,
+            ):
+                yield f"data: {_json.dumps(event, default=str)}\n\n"
+        except Exception as e:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/copilot/confirm")
@@ -965,6 +1005,52 @@ def copilot_history(
     db=Depends(get_db_session),
 ):
     return {"items": get_copilot_conversations(limit=limit, profile=profile, conn=db)}
+
+
+_ALLOWED_INSIGHT_KINDS = {"insight", "decision", "policy_note"}
+
+
+@app.post("/api/copilot/insights")
+def save_insight(
+    body: SaveInsightRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    if body.kind not in _ALLOWED_INSIGHT_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(_ALLOWED_INSIGHT_KINDS)}")
+    question = body.question.strip()
+    answer = body.answer.strip()
+    if not question or not answer:
+        raise HTTPException(status_code=400, detail="question and answer are required")
+    cursor = db.execute(
+        "INSERT INTO saved_insights (profile_id, question, answer, kind, source_conversation_id) VALUES (?, ?, ?, ?, ?)",
+        (profile, question, answer, body.kind, body.source_conversation_id),
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT id, profile_id, question, answer, kind, pinned, source_conversation_id, created_at FROM saved_insights WHERE id = ?",
+        (cursor.lastrowid,),
+    ).fetchone()
+    return dict(row)
+
+
+@app.get("/api/copilot/insights")
+def list_insights(
+    profile: str | None = Depends(validate_profile),
+    limit: int = Query(50, ge=1, le=200),
+    db=Depends(get_db_session),
+):
+    rows = db.execute(
+        """
+        SELECT id, profile_id, question, answer, kind, pinned, source_conversation_id, created_at
+        FROM saved_insights
+        WHERE (? IS NULL OR profile_id = ?)
+        ORDER BY pinned DESC, created_at DESC
+        LIMIT ?
+        """,
+        (profile, profile, limit),
+    ).fetchall()
+    return {"items": [dict(r) for r in rows]}
 
 
 @app.get("/api/copilot/explain-category")
