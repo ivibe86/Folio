@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,11 @@ SETTINGS_DEFAULTS = {
 
 _OLLAMA_CACHE = {"ts": 0.0, "payload": None}
 _OLLAMA_CACHE_TTL = 8.0
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_IN_FLIGHT: set[tuple[str, str]] = set()
+_PREWARM_LAST_RUN: dict[tuple[str, str], float] = {}
+_PREWARM_TTL_SECONDS = max(30, int(os.getenv("OLLAMA_PREWARM_TTL_SECONDS", "240")))
+_PREWARM_KEEP_ALIVE = os.getenv("OLLAMA_PREWARM_KEEP_ALIVE", "15m").strip() or "15m"
 
 
 def _load_catalog() -> dict:
@@ -193,6 +199,81 @@ def _fetch_ollama_state(base_url: str) -> dict:
 def _invalidate_ollama_cache() -> None:
     _OLLAMA_CACHE["ts"] = 0.0
     _OLLAMA_CACHE["payload"] = None
+
+
+def _prewarm_model(base_url: str, model: str) -> None:
+    key = (base_url.rstrip("/"), model)
+    try:
+        resp = httpx.post(
+            f"{base_url.rstrip('/')}/api/generate",
+            json={
+                "model": model,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": _PREWARM_KEEP_ALIVE,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        load_ns = result.get("load_duration")
+        total_ns = result.get("total_duration")
+        if isinstance(load_ns, int) and isinstance(total_ns, int):
+            logger.info(
+                "Prewarmed Ollama model %s at %s (load %.2fs, total %.2fs)",
+                model,
+                base_url,
+                load_ns / 1_000_000_000,
+                total_ns / 1_000_000_000,
+            )
+        else:
+            logger.info("Prewarmed Ollama model %s at %s", model, base_url)
+    except Exception as exc:
+        logger.debug("Ollama prewarm skipped for %s at %s: %s", model, base_url, exc)
+    finally:
+        with _PREWARM_LOCK:
+            _PREWARM_LAST_RUN[key] = time.time()
+            _PREWARM_IN_FLIGHT.discard(key)
+
+
+def schedule_prewarm_selected_model(purpose: str = "copilot", conn=None, force: bool = False) -> bool:
+    resolved = resolve_runtime_settings(conn)
+    if resolved.get("provider") != "ollama":
+        return False
+
+    model = (
+        resolved.get("selectedCategorizeModel")
+        if purpose == "categorize"
+        else resolved.get("selectedCopilotModel")
+    )
+    if not model:
+        return False
+
+    ollama_state = _fetch_ollama_state(resolved["ollamaBaseUrl"])
+    if not ollama_state.get("reachable"):
+        return False
+    if model not in set(ollama_state.get("installedModels", [])):
+        return False
+
+    base_url = ollama_state["baseUrl"].rstrip("/")
+    key = (base_url, model)
+    now = time.time()
+    with _PREWARM_LOCK:
+        if key in _PREWARM_IN_FLIGHT:
+            return False
+        last_run = _PREWARM_LAST_RUN.get(key, 0.0)
+        if not force and now - last_run < _PREWARM_TTL_SECONDS:
+            return False
+        _PREWARM_IN_FLIGHT.add(key)
+
+    worker = threading.Thread(
+        target=_prewarm_model,
+        args=(base_url, model),
+        name=f"ollama-prewarm-{purpose}",
+        daemon=True,
+    )
+    worker.start()
+    return True
 
 
 def _read_settings(conn) -> dict:

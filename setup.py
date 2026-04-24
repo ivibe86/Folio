@@ -14,6 +14,7 @@ backend/frontend outside Docker.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -58,7 +59,17 @@ MODEL_PRESETS = load_model_presets(ROOT_DIR)
 def ask(prompt: str, default: str | None = None, required: bool = False) -> str:
     display = f"{prompt} [{default}]: " if default else f"{prompt}: "
     while True:
-        value = input(display).strip()
+        if ui.enabled and ui.palette["key"]:
+            sys.stdout.write(ui.palette["key"])
+            if ui.BOLD:
+                sys.stdout.write(ui.BOLD)
+            sys.stdout.write(display)
+            sys.stdout.flush()
+            value = input().strip()
+            sys.stdout.write(ui.RESET)
+            sys.stdout.flush()
+        else:
+            value = input(display).strip()
         if not value and default is not None:
             return default
         if not value and required:
@@ -69,8 +80,19 @@ def ask(prompt: str, default: str | None = None, required: bool = False) -> str:
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     default_label = "Y/n" if default else "y/N"
+    display = f"{prompt} [{default_label}]: "
     while True:
-        value = input(f"{prompt} [{default_label}]: ").strip().lower()
+        if ui.enabled and ui.palette["key"]:
+            sys.stdout.write(ui.palette["key"])
+            if ui.BOLD:
+                sys.stdout.write(ui.BOLD)
+            sys.stdout.write(display)
+            sys.stdout.flush()
+            value = input().strip().lower()
+            sys.stdout.write(ui.RESET)
+            sys.stdout.flush()
+        else:
+            value = input(display).strip().lower()
         if not value:
             return default
         if value in {"y", "yes"}:
@@ -183,11 +205,33 @@ def setup_runtime_choice(has_docker: bool, has_local: bool) -> str:
     return "local"
 
 
+def gather_bank_provider_choice() -> str:
+    ui.panel(
+        "Bank Connection",
+        [
+            "Choose how you want to set up bank connectivity right now.",
+            "1. Teller",
+            "2. SimpleFIN",
+            "3. Both",
+        ],
+        ui.BLUE,
+    )
+    choice = ask("  Provider", default="1").lower()
+    return {
+        "1": "teller",
+        "2": "simplefin",
+        "3": "both",
+        "teller": "teller",
+        "simplefin": "simplefin",
+        "both": "both",
+    }.get(choice, "teller")
+
+
 def gather_teller_config():
     ui.panel(
         "Teller Setup",
         [
-            "Folio uses Teller for all bank connectivity.",
+            "You're setting up Teller for bank connectivity.",
             "Have these ready before continuing:",
             "• your Teller mTLS certificate",
             "• your Teller private key",
@@ -250,6 +294,7 @@ def gather_teller_config():
     )
     teller_mode_choice = ask("  Teller setup mode", default="1").lower()
     teller_mode = "connect" if teller_mode_choice in ("1", "connect", "ui", "") else "manual"
+    tokens: dict[str, str] = {}
 
     if teller_mode == "connect":
         print()
@@ -271,25 +316,6 @@ def gather_teller_config():
         ui.muted("You can skip Teller App ID now if you plan to stay on manual tokens.")
         ui.muted("If you want the UI-based Teller Connect flow later, add the App ID and rebuild the frontend.")
         teller_app_id = ask("  Teller App ID (optional for manual mode)")
-
-    teller_env = "development"
-
-    print()
-    ui.info("Tokens enrolled through the UI are encrypted before storage.")
-    try:
-        from cryptography.fernet import Fernet
-
-        encryption_key = Fernet.generate_key().decode()
-    except ImportError:
-        import base64
-        import secrets
-
-        encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
-
-    ui.success("Generated token encryption key and will store it in .env")
-
-    tokens: dict[str, str] = {}
-    if teller_mode == "manual":
         print()
         ui.info("Add Teller access tokens manually now if you want.")
         while True:
@@ -301,7 +327,52 @@ def gather_teller_config():
             token_value = ask(f"  Value for {token_name}", required=True)
             tokens[token_name] = token_value
 
-    return cert_path, key_path, tokens, teller_app_id, teller_env, encryption_key
+    teller_env = "development"
+
+    return cert_path, key_path, tokens, teller_app_id, teller_env
+
+
+def gather_simplefin_config():
+    print()
+    ui.panel(
+        "SimpleFIN Setup",
+        [
+            "SimpleFIN does not require any certificates.",
+            "You will finish the connection in the Folio UI after setup.",
+            "What you need later:",
+            "• register with SimpleFIN Bridge via https://beta-bridge.simplefin.org/",
+            "• get your base64 setup token",
+            "• open Folio and paste it into the SimpleFIN connect modal",
+        ],
+        ui.BLUE,
+    )
+    ui.panel(
+        "What Happens Next",
+        [
+            "Start Folio normally after setup",
+            "Use the dashboard + button or Control Center to choose SimpleFIN",
+            "Paste the base64 setup token in the UI",
+            "Folio will claim the connection and start the initial sync in the background",
+        ],
+        ui.CYAN,
+    )
+
+
+def generate_token_encryption_key() -> str:
+    print()
+    ui.info("Connected bank credentials enrolled through the UI are encrypted before storage.")
+    try:
+        from cryptography.fernet import Fernet
+
+        encryption_key = Fernet.generate_key().decode()
+    except ImportError:
+        import base64
+        import secrets
+
+        encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+
+    ui.success("Generated token encryption key and will store it in .env")
+    return encryption_key
 
 
 def choose_ai_mode(system_profile: dict) -> str:
@@ -503,25 +574,29 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
 
     if ai_mode == "local":
         if host_os not in {"macos", "windows"}:
-            print("  Local AI installer flow currently targets macOS and Windows.")
-            print("  Falling back to No AI mode on this platform.")
+            ui.warning("Local AI installer flow currently targets macOS and Windows.")
+            ui.info("Falling back to No AI mode on this platform.")
             return config
 
         if not maybe_install_ollama(host_os):
-            print("  Local AI setup could not continue without Ollama.")
+            ui.error("Local AI setup could not continue without Ollama.")
             sys.exit(1)
 
         if not ensure_ollama_running(host_os):
-            print("  Ollama is required for Local AI mode.")
+            ui.error("Ollama is required for Local AI mode.")
             sys.exit(1)
 
         system_profile = detect_system_profile(host_os)
         preset = choose_model_preset(system_profile)
-        print(
-            f"\n  Local AI preset: {preset['label']}"
-            f"\n    Categorization/enrichment: {preset['categorize_model']}"
-            f"\n    Copilot: {preset['copilot_model']}"
-            f"\n    Approx disk for models: {preset['disk_gb']} GB"
+        ui.panel(
+            "Local AI Preset",
+            [
+                f"Preset: {preset['label']}",
+                f"Categorization/enrichment: {preset['categorize_model']}",
+                f"Copilot: {preset['copilot_model']}",
+                f"Approx disk for models: {preset['disk_gb']} GB",
+            ],
+            ui.CYAN,
         )
 
         available_models = get_ollama_models()
@@ -596,15 +671,15 @@ def write_env_file(config: dict):
         "",
         f"# AI mode selected during setup: {ai_mode}",
         "",
-        "# -- Teller Certificates --",
+        "# -- Teller Certificates (optional unless using Teller) --",
         f"TELLER_CERT_PATH={config['cert_path']}",
         f"TELLER_KEY_PATH={config['key_path']}",
         "",
-        "# -- Teller Connect --",
+        "# -- Teller Connect (optional unless using Teller) --",
         f"TELLER_APPLICATION_ID={config.get('teller_app_id', '')}",
         f"TELLER_ENVIRONMENT={config.get('teller_env', 'sandbox')}",
         "",
-        "# -- Token Encryption --",
+        "# -- Token Encryption (used for Teller UI enrollments and SimpleFIN connections) --",
         f"TOKEN_ENCRYPTION_KEY={config.get('encryption_key', '')}",
         "",
         "# -- Teller Access Tokens (legacy / manual) --",
@@ -620,6 +695,10 @@ def write_env_file(config: dict):
 
     lines.extend(
         [
+            "",
+            "# -- SimpleFIN --",
+            "# SimpleFIN does not require .env credentials during setup.",
+            "# Connect it later in the UI by pasting your base64 setup token.",
             "",
             "# -- Security --",
             f"Folio_API_KEY={config.get('api_key', '')}",
@@ -814,8 +893,20 @@ def main():
 
     runtime_mode = setup_runtime_choice(has_docker, has_local)
 
-    ui.step(2, "Teller Bank Connection")
-    cert_path, key_path, tokens, teller_app_id, teller_env, encryption_key = gather_teller_config()
+    ui.step(2, "Bank Connection")
+    bank_provider = gather_bank_provider_choice()
+    cert_path = ""
+    key_path = ""
+    tokens: dict[str, str] = {}
+    teller_app_id = ""
+    teller_env = "development"
+
+    if bank_provider in {"teller", "both"}:
+        cert_path, key_path, tokens, teller_app_id, teller_env = gather_teller_config()
+    if bank_provider in {"simplefin", "both"}:
+        gather_simplefin_config()
+
+    encryption_key = generate_token_encryption_key()
 
     ui.step(3, "AI Mode")
     ai_mode = choose_ai_mode(system_profile)

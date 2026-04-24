@@ -51,6 +51,7 @@ from local_llm import (
     update_settings as update_local_llm_settings,
     get_frontend_flags,
     install_model as install_local_llm_model,
+    schedule_prewarm_selected_model,
 )
 
 # CORS origins from env, with dev defaults
@@ -118,6 +119,7 @@ def startup():
     repair_polluted_merchant_categories()
     repair_cc_income_misclassifications()
     reclassify_transfers()
+    schedule_prewarm_selected_model("copilot")
 
 
 @app.on_event("shutdown")
@@ -384,6 +386,7 @@ def local_llm_catalog(db=Depends(get_db_session)):
 
 @app.get("/api/local-llm/status")
 def local_llm_status(db=Depends(get_db_session)):
+    schedule_prewarm_selected_model("copilot", db)
     return get_status_response(db)
 
 
@@ -411,6 +414,9 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
         update_local_llm_settings(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if body.copilot_model is not None or body.llm_provider is not None:
+        schedule_prewarm_selected_model("copilot", db, force=True)
 
     return {
         "status": get_status_response(db),

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import textwrap
 
 
 class UI:
@@ -55,9 +57,9 @@ class UI:
                 "warning": self.RED,
                 "error": self.RED,
                 "panel": self.BLUE,
-                "muted": "",
-                "key": "",
-                "value": "",
+                "muted": self.BLUE,
+                "key": self.BLUE,
+                "value": self.MAGENTA,
             },
             "light": {
                 "brand": self.BLUE,
@@ -68,9 +70,9 @@ class UI:
                 "warning": self.RED,
                 "error": self.RED,
                 "panel": self.BLUE,
-                "muted": "",
-                "key": "",
-                "value": "",
+                "muted": self.BLUE,
+                "key": self.BLUE,
+                "value": self.MAGENTA,
             },
             "dark": {
                 "brand": self.BRIGHT_CYAN,
@@ -137,7 +139,7 @@ class UI:
         for line in mark:
             print(self.color(f"  {line}", self.palette["brand"], self.BOLD))
         print()
-        print(self.color("  Folio Setup", self.BOLD))
+        print(self.color("  Folio Setup", self.palette["brand"], self.BOLD))
         print(self.color("  Personal Finance Studio", self.palette["brand_sub"]))
         print()
 
@@ -173,11 +175,30 @@ class UI:
 
     def panel(self, title: str, lines: list[str], color: str | None = None) -> None:
         panel_color = color or self.palette["panel"]
-        width = max([len(title), *(len(line) for line in lines)] + [0])
-        print(self.color(f"  ╭─ {title} " + "─" * max(0, width - len(title) + 2) + "╮", panel_color))
+        terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+        max_inner_width = max(24, min(terminal_width - 6, 92))
+
+        wrapped_lines: list[str] = []
         for line in lines:
-            print(self.color(f"  │ {line.ljust(width + 2)}│", panel_color))
-        print(self.color(f"  ╰" + "─" * (width + 4) + "╯", panel_color))
+            line = line.rstrip()
+            if not line:
+                wrapped_lines.append("")
+                continue
+            wrapped_lines.extend(
+                textwrap.wrap(
+                    line,
+                    width=max_inner_width,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+
+        width = max([len(title) + 3, *(len(line) for line in wrapped_lines)] + [24])
+        print(self.color(f"  ╭─ {title} " + "─" * max(0, width - len(title) - 1) + "╮", panel_color))
+        for line in wrapped_lines:
+            print(self.color(f"  │ {line.ljust(width)} │", panel_color))
+        print(self.color(f"  ╰" + "─" * (width + 2) + "╯", panel_color))
 
 
 ui = UI()
