@@ -132,7 +132,7 @@
 :root:not(.dark) .analytics-waterfall-theater {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
-    background: var(--island-bg-gradient);
+    background: var(--theater-waterfall-bg, var(--island-bg-gradient));
     border: 1px solid var(--island-border);
     border-bottom: 1px solid rgba(56, 189, 248, 0.06);
     box-shadow:
@@ -142,7 +142,7 @@
 
 /* Dark mode: deep recessed theater with luminous edge */
 .dark .analytics-waterfall-theater {
-    background: var(--sankey-theater-bg);
+    background: var(--theater-waterfall-bg, var(--sankey-theater-bg));
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     border-color: var(--sankey-theater-border);

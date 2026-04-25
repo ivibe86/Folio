@@ -142,37 +142,40 @@
     --sidebar-border:      rgba(0, 0, 0, 0.06);
     --sidebar-text:        #5A6478;
     --sidebar-text-active: #1A1F2B;
-    --sidebar-hover:       rgba(37, 99, 235, 0.06);
-    --sidebar-active-bg:   rgba(37, 99, 235, 0.08);
-    --sidebar-logo-shadow: 0 4px 16px rgba(37, 99, 235, 0.25);
+    --sidebar-hover:       rgba(26, 31, 43, 0.045);
+    --sidebar-active-bg:   rgba(255, 255, 255, 0.56);
+    --sidebar-logo-shadow: 0 4px 16px rgba(15, 23, 42, 0.12);
 
     /* ── Glass Rail (CHANGED: warm paper) ── */
-    --rail-bg:                   rgba(237, 232, 223, 0.82);
-    --rail-blur:                 40px;
-    --rail-saturate:             1.2;
+    --rail-bg:                   #EDE8DF;
+    --rail-blur:                 0px;
+    --rail-saturate:             1;
     --rail-border:               rgba(0, 0, 0, 0.04);
     --rail-shadow:
         1px 0 0 rgba(0, 0, 0, 0.04),
         0 0 0 0 transparent;
-    --rail-link-hover:           rgba(37, 99, 235, 0.07);
-    --rail-link-active-bg:       rgba(37, 99, 235, 0.12);
-    --rail-link-active-shadow:   0 1px 4px rgba(37, 99, 235, 0.10), 0 0 0 1px rgba(37, 99, 235, 0.06);
-    --rail-sync-bg:              rgba(59, 130, 246, 0.06);
-    --rail-sync-bg-hover:        rgba(59, 130, 246, 0.12);
+    --rail-link-hover:           rgba(26, 31, 43, 0.045);
+    --rail-link-active-bg:       rgba(255, 255, 255, 0.58);
+    --rail-link-active-shadow:
+        0 1px 2px rgba(15, 23, 42, 0.05),
+        0 8px 18px rgba(15, 23, 42, 0.045),
+        inset 0 1px 0 rgba(255, 255, 255, 0.70);
+    --rail-sync-bg:              rgba(26, 31, 43, 0.045);
+    --rail-sync-bg-hover:        rgba(26, 31, 43, 0.075);
 
     /* ── Glass Rail — Separator Glow (CHANGED: neutral) ── */
     --rail-separator-glow:       rgba(0, 0, 0, 0.12);
     --rail-separator-glow-center: rgba(0, 0, 0, 0.25);
 
     /* ── Glass Rail — Copilot ── */
-    --rail-copilot-bg:             rgba(37, 99, 235, 0.03);
-    --rail-copilot-bg-hover:       rgba(37, 99, 235, 0.06);
-    --rail-copilot-bg-active:      rgba(37, 99, 235, 0.10);
-    --rail-copilot-border:         rgba(37, 99, 235, 0.10);
-    --rail-copilot-border-hover:   rgba(37, 99, 235, 0.22);
-    --rail-copilot-border-active:  rgba(37, 99, 235, 0.25);
-    --rail-copilot-glow-hover:     0 0 20px rgba(37, 99, 235, 0.06);
-    --rail-copilot-glow-active:    0 0 16px rgba(37, 99, 235, 0.10);
+    --rail-copilot-bg:             rgba(255, 255, 255, 0.34);
+    --rail-copilot-bg-hover:       rgba(255, 255, 255, 0.48);
+    --rail-copilot-bg-active:      rgba(255, 255, 255, 0.58);
+    --rail-copilot-border:         rgba(15, 23, 42, 0.06);
+    --rail-copilot-border-hover:   rgba(15, 23, 42, 0.10);
+    --rail-copilot-border-active:  rgba(15, 23, 42, 0.12);
+    --rail-copilot-glow-hover:     0 8px 18px rgba(15, 23, 42, 0.035);
+    --rail-copilot-glow-active:    0 8px 18px rgba(15, 23, 42, 0.045);
 
     /* ── Topbar (CHANGED: warm paper) ── */
     --topbar-bg:     rgba(237, 232, 223, 0.88);
@@ -193,6 +196,13 @@
             rgba(29, 35, 47, 0.975) 50%,
             rgba(24, 29, 39, 0.985) 100%
         );
+    --theater-hero-bg:
+        radial-gradient(circle at 88% 12%, rgba(52, 211, 153, 0.08), transparent 32%),
+        linear-gradient(135deg, rgba(36, 42, 55, 0.965) 0%, rgba(31, 37, 49, 0.975) 52%, rgba(25, 30, 40, 0.985) 100%);
+    --theater-chart-bg:
+        linear-gradient(135deg, rgba(27, 32, 43, 0.98) 0%, rgba(23, 28, 38, 0.985) 52%, rgba(20, 24, 33, 0.99) 100%);
+    --theater-waterfall-bg:
+        linear-gradient(135deg, rgba(29, 34, 45, 0.97) 0%, rgba(25, 30, 40, 0.98) 52%, rgba(22, 26, 35, 0.985) 100%);
 
     /* Island text (light-on-dark) */
     --island-text-primary:   #F1F5F9;
@@ -229,7 +239,7 @@
        (UNCHANGED)
        ═══════════════════════════════════════════ */
 
-    --sankey-theater-bg: var(--island-bg-gradient);
+    --sankey-theater-bg: var(--theater-chart-bg);
     --sankey-theater-border: var(--island-border);
     --sankey-theater-shadow: var(--island-glow);
     --sankey-zone: rgba(255, 255, 255, 0.04);

@@ -1840,20 +1840,12 @@
                             on:mouseleave={handleChartLeave}>
                             <defs>
                                 <linearGradient id="nwAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%"   stop-color={CYAN_LINE}  stop-opacity="0.66"/>
-                                    <stop offset="5%"   stop-color={CYAN_LINE}  stop-opacity="0.50"/>
-                                    <stop offset="15%"  stop-color="#5EEAD4"     stop-opacity="0.42"/>
-                                    <stop offset="30%"  stop-color={TEAL_AREA}   stop-opacity="0.36"/>
-                                    <stop offset="50%"  stop-color={TEAL_AREA}   stop-opacity="0.26"/>
-                                    <stop offset="70%"  stop-color={TEAL_AREA}   stop-opacity="0.16"/>
-                                    <stop offset="85%"  stop-color={TEAL_AREA}   stop-opacity="0.08"/>
-                                    <stop offset="100%" stop-color={TEAL_AREA}   stop-opacity="0.02"/>
-                                </linearGradient>
-                                <linearGradient id="nwBaseWash" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%"   stop-color={TEAL_AREA_GLOW} stop-opacity="0.14"/>
-                                    <stop offset="38%"  stop-color={TEAL_AREA}      stop-opacity="0.11"/>
-                                    <stop offset="72%"  stop-color={TEAL_AREA}      stop-opacity="0.06"/>
-                                    <stop offset="100%" stop-color={TEAL_AREA}      stop-opacity="0.015"/>
+                                    <stop offset="0%"   stop-color={CYAN_LINE}  stop-opacity="0.42"/>
+                                    <stop offset="14%"  stop-color="#5EEAD4"    stop-opacity="0.34"/>
+                                    <stop offset="34%"  stop-color={TEAL_AREA}  stop-opacity="0.25"/>
+                                    <stop offset="56%"  stop-color={TEAL_AREA}  stop-opacity="0.16"/>
+                                    <stop offset="78%"  stop-color={TEAL_AREA}  stop-opacity="0.085"/>
+                                    <stop offset="100%" stop-color={TEAL_AREA}  stop-opacity="0.015"/>
                                 </linearGradient>
                                 <linearGradient id="nwLineGradCyan" x1="0" y1="0" x2="1" y2="0">
                                     <stop offset="0%"   stop-color={CYAN_LINE} stop-opacity="0.72"/>
@@ -1889,10 +1881,9 @@
                             {#each nwChart.gridLines as gl}
                                 <line x1="0" y1={gl.y} x2="600" y2={gl.y} stroke="var(--text-muted)" stroke-width="1" opacity="0.06" />
                             {/each}
-                            <rect x="0" y="8" width="600" height="124" fill="url(#nwBaseWash)" opacity="0.34" />
-                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" filter="url(#nwAreaGlow)" opacity="0.5" />
-                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" opacity="0.8" />
-                            <path d={nwChart.linePath} fill="none" stroke={CYAN_GLOW} stroke-width="10" stroke-linecap="round" stroke-linejoin="round" filter="url(#nwGlow)" opacity="0.14" />
+                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" filter="url(#nwAreaGlow)" opacity="0.30" />
+                            <path d={nwChart.areaPath} fill="url(#nwAreaGrad)" opacity="0.66" />
+                            <path d={nwChart.linePath} fill="none" stroke={CYAN_GLOW} stroke-width="12" stroke-linecap="round" stroke-linejoin="round" filter="url(#nwGlow)" opacity="0.22" />
                             <path d={nwChart.linePath} fill="none" stroke="url(#nwLineGradCyan)" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round" />
                             <path d={nwChart.linePath} fill="none" stroke="#F0F9FF" stroke-width="0.9" opacity="0.34" stroke-linecap="round" stroke-linejoin="round" />
                             {#if nwChart.endPoint}

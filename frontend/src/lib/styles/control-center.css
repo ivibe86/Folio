@@ -846,6 +846,14 @@
     display: none;
 }
 
+:root:not(.dark) .cc-hero-icon {
+    background: linear-gradient(135deg, #2f3948, #1e2632);
+    color: #f8fafc;
+    box-shadow:
+        0 12px 28px rgba(15, 23, 42, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
 :root:not(.dark) .cc-tabbar {
     background: rgba(250, 247, 242, 0.92);
     box-shadow: 0 12px 26px rgba(15, 23, 42, 0.05);
@@ -853,7 +861,7 @@
 
 :root:not(.dark) .cc-tab-active {
     background: rgba(242, 238, 231, 0.95);
-    border-color: rgba(88, 132, 255, 0.28);
+    border-color: rgba(15, 23, 42, 0.10);
     box-shadow: none;
 }
 
@@ -872,11 +880,11 @@
 }
 
 :root:not(.dark) .cc-table-row-active {
-    border-color: rgba(88, 132, 255, 0.32);
+    border-color: rgba(15, 23, 42, 0.12);
     background: linear-gradient(180deg, rgba(245, 241, 235, 0.97), rgba(250, 247, 242, 0.98));
     box-shadow:
         0 10px 24px rgba(15, 23, 42, 0.08),
-        inset 3px 0 0 rgba(88, 132, 255, 0.75);
+        inset 3px 0 0 color-mix(in srgb, var(--accent) 72%, transparent);
 }
 
 :root:not(.dark) .cc-inspector-section,

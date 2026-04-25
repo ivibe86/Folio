@@ -169,7 +169,14 @@
     --topbar-border: rgba(132, 144, 164, 0.20);
 
     /* —— Sankey Theater —— */
-    --sankey-theater-bg:       linear-gradient(135deg, rgba(30, 34, 42, 0.95) 0%, rgba(25, 29, 37, 0.97) 52%, rgba(21, 24, 31, 0.985) 100%);
+    --theater-hero-bg:
+        radial-gradient(circle at 88% 12%, rgba(52, 211, 153, 0.085), transparent 30%),
+        linear-gradient(135deg, rgba(16, 18, 22, 0.985) 0%, rgba(14, 16, 20, 0.99) 55%, rgba(12, 14, 17, 0.995) 100%);
+    --theater-chart-bg:
+        linear-gradient(135deg, rgba(25, 29, 37, 0.97) 0%, rgba(21, 25, 33, 0.982) 52%, rgba(18, 22, 29, 0.99) 100%);
+    --theater-waterfall-bg:
+        linear-gradient(135deg, rgba(27, 31, 40, 0.965) 0%, rgba(23, 27, 35, 0.978) 52%, rgba(20, 24, 31, 0.986) 100%);
+    --sankey-theater-bg:       var(--theater-chart-bg);
     --sankey-theater-border:   rgba(112, 152, 198, 0.34);
     --sankey-theater-shadow:
         0 2px 8px rgba(10, 22, 38, 0.18),

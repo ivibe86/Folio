@@ -640,6 +640,11 @@
         border-radius: inherit;
         pointer-events: none;
         z-index: 0;
+        display: none;
+    }
+
+    :global(.dark) .rail-effects-layer {
+        display: block;
     }
 
     /* ✅ CHANGED: Dark mode — neutral charcoal inner glow instead of blue */
@@ -716,7 +721,7 @@
         background:
             radial-gradient(
                 400px circle at var(--rail-mx, 50%) var(--rail-my, 50%),
-                rgba(90, 159, 212, 0.06) 0%,
+                rgba(15, 23, 42, 0.035) 0%,
                 transparent 55%
             );
         pointer-events: none;
@@ -755,11 +760,11 @@
             inset 0 -1px 0 rgba(148, 163, 184, 0.03);
     }
 
-    :root:not(.dark) .rail-inner-glow {
+    .rail-inner-glow {
         box-shadow:
-            inset 0 1px 0 rgba(255, 255, 255, 0.85),
+            inset 0 1px 0 rgba(255, 255, 255, 0.68),
             inset 0 -1px 0 rgba(0, 0, 0, 0.02),
-            inset -1px 0 0 rgba(255, 255, 255, 0.40);
+            inset -1px 0 0 rgba(15, 23, 42, 0.035);
     }
 
     /* —— Brand —— */
@@ -793,9 +798,12 @@
         height: 100%;
         object-fit: contain;
         border-radius: inherit;
-        /* Subtle ambient glow that matches the neon edges in f1.png */
-        filter: drop-shadow(0 0 6px rgba(90, 159, 212, 0.35))
-                drop-shadow(0 0 14px rgba(90, 159, 212, 0.12));
+        filter: drop-shadow(0 4px 10px rgba(15, 23, 42, 0.10));
+    }
+
+    :global(.dark) .rail-brand-mark .folio-mark {
+        filter: drop-shadow(0 0 6px rgba(90, 159, 212, 0.28))
+                drop-shadow(0 0 14px rgba(90, 159, 212, 0.10));
     }
 
     .mobile-topbar-spacer {
@@ -1032,10 +1040,10 @@
         top: 50%;
         width: 3px;
         border-radius: 0 4px 4px 0;
-        background: linear-gradient(to bottom, rgba(99, 102, 241, 0.8), rgba(79, 70, 229, 0.6));
+        background: linear-gradient(to bottom, rgba(37, 99, 235, 0.74), rgba(37, 99, 235, 0.46));
         box-shadow:
-            0 0 8px rgba(99, 102, 241, 0.30),
-            0 0 20px rgba(99, 102, 241, 0.15);
+            0 0 8px rgba(37, 99, 235, 0.18),
+            0 0 16px rgba(37, 99, 235, 0.08);
         animation: rail-bar-enter 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
     }
 
@@ -1088,6 +1096,10 @@
 
     .rail-link--active .rail-link-icon {
         color: var(--accent);
+    }
+
+    :root:not(.dark) .rail-link--active .rail-link-icon {
+        filter: none;
     }
 
     :global(.dark) .rail-link--active .rail-link-icon {
