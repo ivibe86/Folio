@@ -852,3 +852,48 @@
     0%, 50% { opacity: 1; }
     51%, 100% { opacity: 0; }
 }
+
+/* Inline memory proposals — "I'd like to remember…" */
+.copilot-memory-proposals {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+    width: 100%;
+}
+.copilot-memory-proposal {
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--accent-soft, rgba(0,0,0,0.03));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.copilot-memory-proposal-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary, #6b7280);
+}
+.copilot-memory-proposal-head strong {
+    color: var(--text-primary);
+    text-transform: capitalize;
+    font-weight: 600;
+}
+.copilot-memory-proposal-body {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+.copilot-memory-proposal-evidence {
+    font-size: 11px;
+    color: var(--text-secondary, #6b7280);
+    font-style: italic;
+}
+.copilot-memory-proposal-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+}

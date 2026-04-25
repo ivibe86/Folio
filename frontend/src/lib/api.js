@@ -372,6 +372,72 @@ export function createApi(fetchFn = fetch) {
             });
         },
 
+        // ── Persistent memory (about_user.md) ──
+
+        getMemoryEntries: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/entries${qs ? '?' + qs : ''}`);
+        },
+        createMemoryEntry: (entry, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/entries${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify(entry),
+            });
+        },
+        updateMemoryEntry: (entryId, body, evidence = null, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/entries/${entryId}${qs ? '?' + qs : ''}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ body, evidence }),
+            });
+        },
+        deleteMemoryEntry: (entryId, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/entries/${entryId}${qs ? '?' + qs : ''}`, { method: 'DELETE' });
+        },
+        getMemoryMarkdown: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/markdown${qs ? '?' + qs : ''}`);
+        },
+        getMemoryProposals: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/proposals${qs ? '?' + qs : ''}`);
+        },
+        acceptMemoryProposal: (proposalId, overrides = null, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/proposals/${proposalId}/accept${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify(overrides || {}),
+            });
+        },
+        rejectMemoryProposal: (proposalId, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/proposals/${proposalId}/reject${qs ? '?' + qs : ''}`, { method: 'POST' });
+        },
+        consolidateMemory: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/memory/consolidate${qs ? '?' + qs : ''}`, { method: 'POST' });
+        },
+
         getCopilotHistory: (limit = 40) => {
             const params = new URLSearchParams();
             params.set('limit', String(limit));

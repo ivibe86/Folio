@@ -902,6 +902,8 @@ def ask_copilot(
             "tool_trace": agent_result.get("tool_trace", []),
             "data_source": agent_result.get("data_source"),
             "iterations": agent_result.get("iterations", 0),
+            "memory_proposals": agent_result.get("memory_proposals", []),
+            "memory_observations": agent_result.get("memory_observations", []),
         }
     except Exception as e:
         logger.exception("Agent loop failed; falling back to single-shot SQL path")

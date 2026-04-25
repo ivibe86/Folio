@@ -28,6 +28,21 @@
     let copilotModelSaving = false;
     let copilotModelInstalling = false;
 
+    // Strip <observation>/<memory_proposal> tags from streamed text so they never
+    // briefly appear in the UI before the server-side cleanup at done. Also reverses
+    // a known model failure mode where it emits literal '/n' instead of a newline.
+    function scrubMemoryTags(text) {
+        if (!text) return text;
+        let out = text.replace(/<observation\b[^>]*>[\s\S]*?<\/observation>/gi, '');
+        out = out.replace(/<memory_proposal\b[^>]*>[\s\S]*?<\/memory_proposal>/gi, '');
+        // Mid-stream: hide the open tag onward until close arrives, so we don't flicker XML
+        const openIdx = out.search(/<(observation|memory_proposal)\b/i);
+        if (openIdx >= 0) out = out.slice(0, openIdx);
+        // Convert literal '/n' (model misfire) → real newline, then collapse runs
+        out = out.replace(/\/n/g, '\n').replace(/\n{3,}/g, '\n\n');
+        return out;
+    }
+
     let messages = [
         {
             role: 'assistant',
@@ -378,7 +393,7 @@
                     break;
                 case 'token':
                     currentContent += ev.text || '';
-                    msg.content = currentContent;
+                    msg.content = scrubMemoryTags(currentContent);
                     break;
                 case 'tool_call':
                     msg.active_tool = ev.name;
@@ -405,6 +420,7 @@
                     msg.data_source = ev.data_source || null;
                     msg.tool_trace = ev.tool_trace || msg.tool_trace || [];
                     msg.active_tool = null;
+                    msg.memory_proposals = ev.memory_proposals || [];
                     if (ev.chart) msg.chart = ev.chart;
                     if (ev.pending_write) {
                         msg.operation = 'write_preview';
@@ -419,6 +435,20 @@
                     }
                     loading = false;
                     cancelStream = null;
+                    break;
+                case 'memory_update':
+                    // Late-arriving proposals from the post-turn detector. Append to
+                    // any existing proposals, dedup by id so re-emits don't duplicate.
+                    {
+                        const incoming = ev.memory_proposals || [];
+                        const existing = msg.memory_proposals || [];
+                        const seen = new Set(existing.map((p) => p.id));
+                        const merged = [...existing];
+                        for (const p of incoming) {
+                            if (!seen.has(p.id)) merged.push(p);
+                        }
+                        msg.memory_proposals = merged;
+                    }
                     break;
                 case 'error':
                     msg.content = ev.message || 'Something went wrong.';
@@ -453,14 +483,45 @@
         messages = [...messages];
 
         try {
-            await api.saveInsight(question, msg.content, 'insight', null, activeProfileId);
-            messages[msgIndex] = { ...messages[msgIndex], saving: false, saved: true };
+            const result = await api.saveInsight(question, msg.content, 'insight', null, activeProfileId);
+            messages[msgIndex] = { ...messages[msgIndex], saving: false, saved: !!result?.saved };
             messages = [...messages];
-            setNotice('Saved to memory.');
+            if (result?.saved && result.entry?.body) {
+                setNotice(`Saved to memory: ${result.entry.body}`);
+            } else if (result?.reason) {
+                setNotice(result.reason);
+            } else {
+                setNotice('Saved to memory.');
+            }
         } catch (error) {
             messages[msgIndex] = { ...messages[msgIndex], saving: false };
             messages = [...messages];
             setNotice(error?.message || 'Failed to save insight.');
+        }
+    }
+
+    async function acceptMemoryProposal(msgIndex, proposalId) {
+        try {
+            await api.acceptMemoryProposal(proposalId, null, activeProfileId);
+            const msg = { ...messages[msgIndex] };
+            msg.memory_proposals = (msg.memory_proposals || []).filter((p) => p.id !== proposalId);
+            messages[msgIndex] = msg;
+            messages = [...messages];
+            setNotice('Added to memory.');
+        } catch (error) {
+            setNotice(error?.message || 'Failed to accept proposal.');
+        }
+    }
+
+    async function rejectMemoryProposal(msgIndex, proposalId) {
+        try {
+            await api.rejectMemoryProposal(proposalId, activeProfileId);
+            const msg = { ...messages[msgIndex] };
+            msg.memory_proposals = (msg.memory_proposals || []).filter((p) => p.id !== proposalId);
+            messages[msgIndex] = msg;
+            messages = [...messages];
+        } catch (error) {
+            setNotice(error?.message || 'Failed to reject proposal.');
         }
     }
 
@@ -697,6 +758,9 @@
             </div>
         </div>
         <div class="copilot-header-actions">
+            <a href="/copilot/memory" class="copilot-side-pill" data-sveltekit-preload-data="hover">
+                Memory
+            </a>
             <button
                 type="button"
                 class="copilot-side-pill"
@@ -849,13 +913,38 @@
                                                 class="copilot-sql-toggle"
                                                 on:click={() => saveInsight(i)}
                                                 disabled={msg.saving || msg.saved}
-                                                title="Save this answer so Copilot remembers it in future questions"
+                                                title="Extract a takeaway from this turn and add to your persistent memory"
                                             >
                                                 <span class="material-symbols-outlined text-[12px]">
                                                     {msg.saved ? 'check' : 'bookmark_add'}
                                                 </span>
                                                 {msg.saved ? 'Saved' : msg.saving ? 'Saving…' : 'Save to memory'}
                                             </button>
+                                        {/if}
+
+                                        {#if msg.memory_proposals && msg.memory_proposals.length > 0}
+                                            <div class="copilot-memory-proposals">
+                                                {#each msg.memory_proposals as prop (prop.id)}
+                                                    <div class="copilot-memory-proposal">
+                                                        <div class="copilot-memory-proposal-head">
+                                                            <span class="material-symbols-outlined text-[14px]">lightbulb</span>
+                                                            <span>I'd like to remember this in <strong>{prop.section.replace('_', ' ')}</strong>:</span>
+                                                        </div>
+                                                        <div class="copilot-memory-proposal-body">{prop.body}</div>
+                                                        {#if prop.evidence}
+                                                            <div class="copilot-memory-proposal-evidence">↳ {prop.evidence}</div>
+                                                        {/if}
+                                                        <div class="copilot-memory-proposal-actions">
+                                                            <button class="copilot-sql-toggle" on:click={() => acceptMemoryProposal(i, prop.id)}>
+                                                                <span class="material-symbols-outlined text-[12px]">check</span>Add
+                                                            </button>
+                                                            <button class="copilot-sql-toggle" on:click={() => rejectMemoryProposal(i, prop.id)}>
+                                                                <span class="material-symbols-outlined text-[12px]">close</span>Skip
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                {/each}
+                                            </div>
                                         {/if}
                                     </div>
                                 </div>

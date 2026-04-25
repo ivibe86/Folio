@@ -23,6 +23,7 @@
     let filterCategory = '';
     let filterAccount = '';
     let editingTxId = null;
+    let selectedTxId = null;
     let months = [];
     let accountNames = [];
 
@@ -344,6 +345,15 @@
     // Transfer types excluded from accrual-basis totals (same model as dashboard)
     const EXCLUDED_EXPENSE_TYPES = new Set(['transfer_internal', 'transfer_cc_payment', 'transfer_household']);
     const NON_SPENDING_CATEGORIES = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const TITLE_CASE_SMALL_WORDS = new Set(['and', 'of', 'the', 'to', 'for', 'by', 'at', 'in']);
+    const MERCHANT_LOCATION_PATTERNS = [
+        { pattern: /\bSAN JOSE\b/i, label: 'San Jose' },
+        { pattern: /\bSUNNYVALE\b/i, label: 'Sunnyvale' },
+        { pattern: /\bMILPITAS\b/i, label: 'Milpitas' },
+        { pattern: /\bPALO ALTO\b/i, label: 'Palo Alto' },
+        { pattern: /\bLOS ALTOS\b/i, label: 'Los Altos' },
+        { pattern: /\bCASTRO ST\b/i, label: 'Castro St.' }
+    ];
 
     $: groupedTxns = groupTransactionsByDate(filteredTxns);
     $: totalSpending = summaryTxns
@@ -558,6 +568,145 @@
             meta: d.toLocaleDateString('en-US', { month: 'short', weekday: 'long' }),
             relative
         };
+    }
+
+    function titleCaseMerchant(value) {
+        const raw = (value || '').trim();
+        if (!raw) return '';
+        if (raw !== raw.toUpperCase()) return raw;
+        return raw
+            .toLowerCase()
+            .split(/\s+/)
+            .map((word, index) => {
+                if (index > 0 && TITLE_CASE_SMALL_WORDS.has(word)) return word;
+                if (/^#?\d+$/.test(word)) return word;
+                return word.charAt(0).toUpperCase() + word.slice(1);
+            })
+            .join(' ');
+    }
+
+    function getMerchantDisplay(tx) {
+        const preferred = tx.merchant_display_name || tx.merchant_name || tx.counterparty_name || '';
+        const raw = tx.description || '';
+        if (!preferred && raw) return splitRawMerchant(raw).name;
+        let label = preferred || raw;
+        label = label
+            .replace(/\s+(INC|LLC|CORP|CO)\.?$/i, '')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+        return titleCaseMerchant(label || 'Transaction');
+    }
+
+    function splitRawMerchant(rawValue) {
+        const raw = (rawValue || '').replace(/[·]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        for (const entry of MERCHANT_LOCATION_PATTERNS) {
+            const match = raw.match(entry.pattern);
+            if (match && match.index > 0) {
+                const name = raw
+                    .slice(0, match.index)
+                    .replace(/\b(EL|CA)\b/gi, '')
+                    .replace(/\s{2,}/g, ' ')
+                    .trim();
+                return {
+                    name: titleCaseMerchant(name || raw),
+                    location: entry.label
+                };
+            }
+        }
+        return { name: titleCaseMerchant(raw), location: '' };
+    }
+
+    function getRawDescriptor(tx) {
+        return (tx.description || tx.raw_description || tx.merchant_name || '').trim();
+    }
+
+    function getMerchantLocation(tx) {
+        if (!(tx.merchant_display_name || tx.merchant_name || tx.counterparty_name)) {
+            return splitRawMerchant(tx.description || '').location;
+        }
+        const display = getMerchantDisplay(tx);
+        const raw = getRawDescriptor(tx);
+        const upperRaw = raw.toUpperCase();
+        const upperDisplay = display.toUpperCase();
+        const leftover = upperRaw.replace(upperDisplay, '').replace(/[^\w\s#]/g, ' ').trim();
+        const locationWords = leftover
+            .split(/\s+/)
+            .filter(w => /^[A-Z]{3,}$/.test(w) && !['DES', 'WEB', 'ID', 'COM', 'BILL', 'PAYMENT'].includes(w));
+        const location = locationWords.slice(-2).join(' ');
+        return titleCaseMerchant(location);
+    }
+
+    function getMerchantTitle(tx) {
+        const name = getMerchantDisplay(tx);
+        const location = getMerchantLocation(tx);
+        if (location && !name.toLowerCase().includes(location.toLowerCase())) return `${name} · ${location}`;
+        return name;
+    }
+
+    function getMerchantKey(tx) {
+        return getMerchantDisplay(tx)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim();
+    }
+
+    function getAccountSuffix(tx) {
+        return tx.account_last4 || tx.last4 || tx.account_mask || '';
+    }
+
+    function hashString(value) {
+        return [...(value || '')].reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0);
+    }
+
+    function getAccountHue(tx) {
+        const palette = ['#f0aa64', '#7dd3fc', '#a78bfa', '#34d399', '#f472b6', '#f87171'];
+        return palette[Math.abs(hashString(tx.account_name || 'account')) % palette.length];
+    }
+
+    function getMonthShare(tx) {
+        const amount = Math.abs(parseFloat(tx.amount || 0));
+        if (!totalSpending || amount <= 0 || NON_SPENDING_CATEGORIES.has(tx.category)) return null;
+        const pct = (amount / totalSpending) * 100;
+        return pct >= 1 || amount >= 100 ? pct : null;
+    }
+
+    function getRowSignal(tx) {
+        const amount = Math.abs(parseFloat(tx.amount || 0));
+        const pct = getMonthShare(tx);
+        if (tx.expense_type && EXCLUDED_EXPENSE_TYPES.has(tx.expense_type)) return null;
+        if (amount >= 500) return 'Large';
+        if (pct && pct >= 3) return `${pct.toFixed(1)}%`;
+        return null;
+    }
+
+    function getMerchantStats(tx) {
+        const key = getMerchantKey(tx);
+        const matches = summaryTxns
+            .filter(item => getMerchantKey(item) === key)
+            .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+        const spentMatches = matches.filter(item => parseFloat(item.amount) < 0);
+        const average = spentMatches.length
+            ? spentMatches.reduce((s, item) => s + Math.abs(parseFloat(item.amount || 0)), 0) / spentMatches.length
+            : 0;
+        const amount = Math.abs(parseFloat(tx.amount || 0));
+        const delta = average ? ((amount - average) / average) * 100 : 0;
+        const recent = matches.filter(item => item.original_id !== tx.original_id).slice(0, 3);
+        const monthsBack = [];
+        const base = tx.date ? new Date(tx.date + 'T00:00:00') : new Date();
+        for (let i = 5; i >= 0; i -= 1) {
+            const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+            const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            const total = spentMatches
+                .filter(item => item.date?.startsWith(month))
+                .reduce((s, item) => s + Math.abs(parseFloat(item.amount || 0)), 0);
+            monthsBack.push({
+                month,
+                label: d.toLocaleDateString('en-US', { month: 'short' }),
+                total
+            });
+        }
+
+        return { visits: matches.length, average, delta, recent, months: monthsBack };
     }
 
     function getMerchantMetaLine(tx) {
@@ -905,51 +1054,76 @@
             </div>
         {:else}
             {#each groupedTxns as [date, txns], gi}
-                {@const daySpent = txns.filter(t => parseFloat(t.amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0)}
-                {@const dayIncome = txns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0)}
+                {@const dayNet = txns.reduce((s, t) => s + parseFloat(t.amount || 0), 0)}
                 {@const dayInfo = formatLedgerDay(date)}
 
-                {@const dayNet = dayIncome - daySpent}
                 <div class="tx-day-group" class:tx-day-group-separated={gi > 0}>
-                    <div class="tx-day-header">
-                        <div class="tx-day-header-left">
+                    <aside class="tx-day-rail">
+                        <div class="tx-day-rail-date">
                             <strong>{dayInfo.day}</strong>
-                            <span>{dayInfo.meta}</span>
-                            {#if dayInfo.relative}<small>{dayInfo.relative}</small>{/if}
+                            <div>
+                                <span>{dayInfo.meta}</span>
+                                {#if dayInfo.relative}<small>{dayInfo.relative}</small>{/if}
+                            </div>
                         </div>
-                        <div class="tx-day-header-right">
-                            <em>{txns.length} tx</em>
-                            {#if dayNet !== 0}
+                    </aside>
+                    <div class="tx-day-body">
+                        <div class="tx-day-summary-strip">
+                            <span></span>
+                            <div>
+                                <em>{txns.length} tx</em>
                                 <span>net</span>
                                 <strong class={dayNet >= 0 ? 'tx-day-income' : 'tx-day-spend'}>
                                     {dayNet >= 0 ? '+' : ''}{formatCurrency(dayNet, 0)}
                                 </strong>
-                            {/if}
+                            </div>
                         </div>
-                    </div>
-                    <div class="tx-day-body">
 
                 {#each txns as tx (tx.original_id)}
                     {@const amount = parseFloat(tx.amount)}
                     {@const sourceInfo = getSourceLabel(tx)}
                     {@const isRecentlyUpdated = recentlyUpdatedTxId === tx.original_id}
+                    {@const isSelected = selectedTxId === tx.original_id}
+                    {@const merchantTitle = getMerchantTitle(tx)}
+                    {@const rawDescriptor = getRawDescriptor(tx)}
+                    {@const monthShare = getMonthShare(tx)}
+                    {@const rowSignal = getRowSignal(tx)}
+                    {@const merchantStats = getMerchantStats(tx)}
+                    {@const hasMerchantTrend = merchantStats.recent.length > 0 && merchantStats.months.some(m => m.total > 0)}
+                    {@const maxMerchantMonth = Math.max(...merchantStats.months.map(m => m.total), Math.abs(amount), 1)}
                     <div class="tx-row-grid group transition-colors tx-row tx-ledger-row"
-                        class:tx-row-updated={isRecentlyUpdated}>
+                        class:tx-row-updated={isRecentlyUpdated}
+                        class:tx-row-selected={isSelected}
+                        role="button"
+                        tabindex="0"
+                        aria-expanded={isSelected}
+                        on:click={() => selectedTxId = isSelected ? null : tx.original_id}
+                        on:keydown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                selectedTxId = isSelected ? null : tx.original_id;
+                            }
+                        }}>
 
                         <!-- Zone 1: Icon + Description + Account -->
                         <div class="tx-zone-desc">
-                            <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
-                                style="background: color-mix(in srgb, {CATEGORY_COLORS[tx.category] || '#627d98'} 8%, transparent)">
-                                <span class="material-symbols-outlined text-[16px]"
-                                    style="color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
-                                    {CATEGORY_ICONS[tx.category] || 'label'}
-                                </span>
+                            <div class="tx-merchant-avatar"
+                                style="--tx-cat-color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
+                                <i></i>
+                                <span>{merchantTitle.charAt(0)}</span>
                             </div>
                             <div class="min-w-0 flex-1">
                                 <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
-                                    {tx.description || '—'}
+                                    {merchantTitle}
                                 </p>
-                                <span class="text-[10px] mt-0.5 block" style="color: var(--text-muted)">{getMerchantMetaLine(tx)}</span>
+                                <span class="tx-row-subline">
+                                    <span class="tx-account-dot" style="background: {getAccountHue(tx)}"></span>
+                                    {tx.account_name || 'Account'}{#if getAccountSuffix(tx)} · ••{getAccountSuffix(tx)}{/if}
+                                    {#if rawDescriptor && rawDescriptor.toUpperCase() !== merchantTitle.toUpperCase()}
+                                        <span class="tx-row-dot"></span>
+                                        <span class="tx-raw-preview">{rawDescriptor}</span>
+                                    {/if}
+                                </span>
                             </div>
                         </div>
 
@@ -1080,14 +1254,76 @@
                             {/if}
                         </div>
 
-                        <!-- Zone 3: Amount (far right, terminal anchor) -->
+                        <!-- Zone 3: Signal and amount -->
+                        <div class="tx-zone-signal">
+                            {#if rowSignal}
+                                <span class="tx-signal-chip" class:tx-signal-chip-alert={rowSignal === 'Large'}>{rowSignal}</span>
+                            {/if}
+                        </div>
+
                         <div class="tx-zone-amount">
-                            <p class="folio-amount-compact"
-                                style="color: {amount >= 0 ? 'var(--positive)' : 'var(--text-primary)'}">
-                                {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
-                            </p>
+                            <div>
+                                <p class="folio-amount-compact"
+                                    style="color: {amount >= 0 ? 'var(--positive)' : 'var(--text-primary)'}">
+                                    {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
+                                </p>
+                                {#if monthShare}
+                                    <small>{monthShare.toFixed(1)}% of month</small>
+                                {/if}
+                            </div>
                         </div>
                     </div>
+
+                    {#if isSelected}
+                        <div class="tx-detail-drawer fade-in" role="presentation" on:click|stopPropagation>
+                            <div class="tx-detail-pane">
+                                <h4>Details</h4>
+                                <dl class="tx-detail-kv">
+                                    <dt>Merchant</dt>
+                                    <dd>{merchantTitle}</dd>
+                                    <dt>Raw descriptor</dt>
+                                    <dd>{rawDescriptor || '—'}</dd>
+                                    <dt>Posted</dt>
+                                    <dd>{formatDate(tx.date)}</dd>
+                                    <dt>Account</dt>
+                                    <dd>{tx.account_name || 'Account'}{#if getAccountSuffix(tx)} · ••{getAccountSuffix(tx)}{/if}</dd>
+                                    <dt>Category</dt>
+                                    <dd class="tx-detail-category">
+                                        <span style="background: {CATEGORY_COLORS[tx.category] || '#627d98'}"></span>
+                                        {tx.category || 'Uncategorized'}
+                                        {#if sourceInfo}<em>{sourceInfo.label}</em>{/if}
+                                    </dd>
+                                </dl>
+                            </div>
+                            <div class="tx-detail-pane">
+                                <h4>Recent at this merchant</h4>
+                                <div class="tx-merchant-history">
+                                    {#if merchantStats.recent.length > 0}
+                                        {#each merchantStats.recent as recent}
+                                            <div>
+                                                <span>{formatDate(recent.date)}</span>
+                                                <strong>{formatCurrency(parseFloat(recent.amount), 2)}</strong>
+                                            </div>
+                                        {/each}
+                                    {:else}
+                                        <p>No earlier matching transactions in this view.</p>
+                                    {/if}
+                                    {#if hasMerchantTrend}
+                                        <div class="tx-history-bars" aria-label="Merchant spending trend">
+                                            {#each merchantStats.months as month}
+                                                <span style="height: {month.total > 0 ? Math.max(8, (month.total / maxMerchantMonth) * 44) : 4}px">
+                                                    <em>{month.label}</em>
+                                                </span>
+                                            {/each}
+                                        </div>
+                                    {/if}
+                                    <p>
+                                        {merchantStats.visits} visit{merchantStats.visits === 1 ? '' : 's'} in the loaded view{#if merchantStats.average > 0}, average <strong>{formatCurrency(merchantStats.average, 2)}</strong>{/if}{#if merchantStats.visits > 1 && merchantStats.average > 0} — this ran <strong class={merchantStats.delta >= 0 ? 'tx-above-average' : 'tx-below-average'}>{merchantStats.delta >= 0 ? '+' : ''}{merchantStats.delta.toFixed(1)}%</strong> vs usual{/if}.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    {/if}
 
                     <!-- Subscription Declaration Prompt -->
                     {#if subscriptionPromptTxId === tx.original_id}

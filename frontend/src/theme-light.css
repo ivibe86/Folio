@@ -138,16 +138,16 @@
     --card-radius: 20px;
 
     /* ── Sidebar — Premium Frosted (CHANGED: warm paper) ── */
-    --sidebar-bg:          rgba(237, 232, 223, 0.95);
+    --sidebar-bg:          rgba(245, 240, 232, 0.96);
     --sidebar-border:      rgba(0, 0, 0, 0.06);
     --sidebar-text:        #5A6478;
     --sidebar-text-active: #1A1F2B;
     --sidebar-hover:       rgba(26, 31, 43, 0.045);
-    --sidebar-active-bg:   rgba(255, 255, 255, 0.56);
+    --sidebar-active-bg:   rgba(255, 255, 255, 0.66);
     --sidebar-logo-shadow: 0 4px 16px rgba(15, 23, 42, 0.12);
 
     /* ── Glass Rail (CHANGED: warm paper) ── */
-    --rail-bg:                   #EDE8DF;
+    --rail-bg:                   #F3EEE6;
     --rail-blur:                 0px;
     --rail-saturate:             1;
     --rail-border:               rgba(0, 0, 0, 0.04);
@@ -155,7 +155,7 @@
         1px 0 0 rgba(0, 0, 0, 0.04),
         0 0 0 0 transparent;
     --rail-link-hover:           rgba(26, 31, 43, 0.045);
-    --rail-link-active-bg:       rgba(255, 255, 255, 0.58);
+    --rail-link-active-bg:       rgba(255, 255, 255, 0.68);
     --rail-link-active-shadow:
         0 1px 2px rgba(15, 23, 42, 0.05),
         0 8px 18px rgba(15, 23, 42, 0.045),

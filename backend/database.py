@@ -146,6 +146,7 @@ def init_db():
         _migrate_category_pinned(conn)
         _migrate_accounts_provider(conn)
         _migrate_accounts_last_four(conn)
+        _migrate_memory_entries_theme(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)          
@@ -351,6 +352,16 @@ def _migrate_accounts_provider(conn: sqlite3.Connection):
         logger.info("Added provider column to accounts table.")
 
 
+def _migrate_memory_entries_theme(conn: sqlite3.Connection):
+    """Add theme column to memory_entries (used to link inferred entries to their observation theme)."""
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(memory_entries)").fetchall()]
+    except Exception:
+        return
+    if cols and "theme" not in cols:
+        conn.execute("ALTER TABLE memory_entries ADD COLUMN theme TEXT DEFAULT NULL")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,6 +505,53 @@ CREATE TABLE IF NOT EXISTS saved_insights (
 
 CREATE INDEX IF NOT EXISTS idx_saved_insights_profile ON saved_insights(profile_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_saved_insights_pinned ON saved_insights(profile_id, pinned) WHERE pinned = 1;
+
+CREATE TABLE IF NOT EXISTS memory_entries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id      TEXT REFERENCES profiles(id),
+    section         TEXT NOT NULL CHECK(section IN ('identity', 'preferences', 'goals', 'concerns', 'open_questions')),
+    body            TEXT NOT NULL,
+    confidence      TEXT NOT NULL DEFAULT 'stated' CHECK(confidence IN ('stated', 'saved', 'inferred')),
+    evidence        TEXT DEFAULT '',
+    theme           TEXT DEFAULT NULL,
+    created_at      TEXT DEFAULT (datetime('now')),
+    superseded_at   TEXT DEFAULT NULL,
+    superseded_by   INTEGER REFERENCES memory_entries(id),
+    expires_at      TEXT DEFAULT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_entries_active ON memory_entries(profile_id, section) WHERE superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_entries_expiry ON memory_entries(expires_at) WHERE expires_at IS NOT NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_entries_theme ON memory_entries(profile_id, theme) WHERE theme IS NOT NULL AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS memory_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id      TEXT REFERENCES profiles(id),
+    theme           TEXT NOT NULL,
+    note            TEXT NOT NULL,
+    source_conversation_id INTEGER REFERENCES copilot_conversations(id),
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_obs_profile_theme ON memory_observations(profile_id, theme, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS memory_proposals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id      TEXT REFERENCES profiles(id),
+    section         TEXT NOT NULL CHECK(section IN ('identity', 'preferences', 'goals', 'concerns', 'open_questions')),
+    body            TEXT NOT NULL,
+    confidence      TEXT NOT NULL DEFAULT 'inferred' CHECK(confidence IN ('stated', 'saved', 'inferred')),
+    evidence        TEXT DEFAULT '',
+    theme           TEXT DEFAULT NULL,
+    supersedes_id   INTEGER REFERENCES memory_entries(id),
+    source          TEXT NOT NULL DEFAULT 'agent' CHECK(source IN ('agent', 'observation_threshold', 'consolidation', 'save_to_memory')),
+    source_conversation_id INTEGER REFERENCES copilot_conversations(id),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
+    created_at      TEXT DEFAULT (datetime('now')),
+    resolved_at     TEXT DEFAULT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending ON memory_proposals(profile_id, status, created_at DESC) WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS subscription_seeds (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

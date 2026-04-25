@@ -326,6 +326,23 @@ class SaveInsightRequest(BaseModel):
     source_conversation_id: int | None = None
 
 
+class MemoryEntryCreate(BaseModel):
+    section: str
+    body: str
+    confidence: str = "stated"
+    evidence: str = ""
+
+
+class MemoryEntryUpdate(BaseModel):
+    body: str
+    evidence: str | None = None
+
+
+class MemoryProposalAccept(BaseModel):
+    body: str | None = None
+    section: str | None = None
+
+
 class LocalLlmSettingsUpdate(BaseModel):
     llm_provider: str | None = None
     preset: str | None = None
@@ -1007,31 +1024,46 @@ def copilot_history(
     return {"items": get_copilot_conversations(limit=limit, profile=profile, conn=db)}
 
 
-_ALLOWED_INSIGHT_KINDS = {"insight", "decision", "policy_note"}
-
-
 @app.post("/api/copilot/insights")
 def save_insight(
     body: SaveInsightRequest,
     profile: str | None = Depends(validate_profile),
     db=Depends(get_db_session),
 ):
-    if body.kind not in _ALLOWED_INSIGHT_KINDS:
-        raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(_ALLOWED_INSIGHT_KINDS)}")
+    """
+    Save to memory: extract a durable takeaway from the Q&A pair via LLM and append
+    to the persistent memory file as a 'saved' entry. Returns the new entry, or
+    {saved: false, reason} if nothing memorable was found.
+    """
+    import memory as _mem
+
     question = body.question.strip()
     answer = body.answer.strip()
     if not question or not answer:
         raise HTTPException(status_code=400, detail="question and answer are required")
-    cursor = db.execute(
-        "INSERT INTO saved_insights (profile_id, question, answer, kind, source_conversation_id) VALUES (?, ?, ?, ?, ?)",
-        (profile, question, answer, body.kind, body.source_conversation_id),
+
+    takeaway = _mem.extract_takeaway(question, answer)
+    if not takeaway:
+        return {
+            "saved": False,
+            "reason": "No durable takeaway detected — this turn was a lookup or routine answer.",
+        }
+
+    new_id = _mem.insert_entry(
+        profile=profile,
+        section=takeaway["section"],
+        body=takeaway["body"],
+        confidence="saved",
+        evidence=takeaway.get("evidence", ""),
+        conn=db,
     )
     db.commit()
     row = db.execute(
-        "SELECT id, profile_id, question, answer, kind, pinned, source_conversation_id, created_at FROM saved_insights WHERE id = ?",
-        (cursor.lastrowid,),
+        "SELECT id, profile_id, section, body, confidence, evidence, theme, created_at "
+        "FROM memory_entries WHERE id = ?",
+        (new_id,),
     ).fetchone()
-    return dict(row)
+    return {"saved": True, "entry": dict(row)}
 
 
 @app.get("/api/copilot/insights")
@@ -1051,6 +1083,170 @@ def list_insights(
         (profile, profile, limit),
     ).fetchall()
     return {"items": [dict(r) for r in rows]}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PERSISTENT MEMORY (about_user.md)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/memory/entries")
+def memory_list_entries(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    return {"items": _mem.list_active_entries(profile, db), "sections": [
+        {"key": k, "label": label} for k, label in _mem.SECTIONS
+    ]}
+
+
+@app.post("/api/memory/entries")
+def memory_create_entry(
+    body: MemoryEntryCreate,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    try:
+        new_id = _mem.insert_entry(
+            profile=profile,
+            section=body.section,
+            body=body.body,
+            confidence=body.confidence,
+            evidence=body.evidence,
+            conn=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    row = db.execute(
+        "SELECT id, profile_id, section, body, confidence, evidence, theme, created_at "
+        "FROM memory_entries WHERE id = ?",
+        (new_id,),
+    ).fetchone()
+    return dict(row)
+
+
+@app.patch("/api/memory/entries/{entry_id}")
+def memory_update_entry(
+    entry_id: int,
+    body: MemoryEntryUpdate,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    try:
+        new_id = _mem.supersede_entry(
+            old_id=entry_id,
+            profile=profile,
+            new_body=body.body,
+            new_evidence=body.evidence or "",
+            conn=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.commit()
+    row = db.execute(
+        "SELECT id, profile_id, section, body, confidence, evidence, theme, created_at "
+        "FROM memory_entries WHERE id = ?",
+        (new_id,),
+    ).fetchone()
+    return dict(row)
+
+
+@app.delete("/api/memory/entries/{entry_id}")
+def memory_delete_entry(
+    entry_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    removed = _mem.delete_entry(entry_id=entry_id, profile=profile, conn=db)
+    if not removed:
+        raise HTTPException(status_code=404, detail="entry not found")
+    db.commit()
+    return {"deleted": True, "id": entry_id}
+
+
+@app.get("/api/memory/markdown")
+def memory_markdown(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """Return the rendered about_user.md text plus a token-budget estimate."""
+    import memory as _mem
+    text = _mem.render_markdown(profile, db)
+    char_count = len(text)
+    # Crude token estimate: ~4 chars per token. Good enough for a budget gauge.
+    token_estimate = max(1, char_count // 4) if text else 0
+    return {
+        "markdown": text,
+        "token_estimate": token_estimate,
+        "char_count": char_count,
+        "budget": 4000,
+    }
+
+
+@app.get("/api/memory/proposals")
+def memory_list_proposals(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    return {"items": _mem.list_pending_proposals(profile, db)}
+
+
+@app.post("/api/memory/proposals/{proposal_id}/accept")
+def memory_accept_proposal(
+    proposal_id: int,
+    body: MemoryProposalAccept | None = None,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    try:
+        new_id = _mem.accept_proposal(
+            proposal_id=proposal_id,
+            profile=profile,
+            conn=db,
+            body_override=(body.body if body else None),
+            section_override=(body.section if body else None),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    row = db.execute(
+        "SELECT id, profile_id, section, body, confidence, evidence, theme, created_at "
+        "FROM memory_entries WHERE id = ?",
+        (new_id,),
+    ).fetchone()
+    return {"accepted": True, "entry": dict(row)}
+
+
+@app.post("/api/memory/proposals/{proposal_id}/reject")
+def memory_reject_proposal(
+    proposal_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    import memory as _mem
+    rejected = _mem.reject_proposal(proposal_id=proposal_id, conn=db)
+    if not rejected:
+        raise HTTPException(status_code=404, detail="proposal not found or already resolved")
+    db.commit()
+    return {"rejected": True, "id": proposal_id}
+
+
+@app.post("/api/memory/consolidate")
+def memory_consolidate(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    """On-demand lint pass — proposes supersedes/merges/removals as proposals the user reviews."""
+    import memory as _mem
+    proposals = _mem.run_consolidation(profile=profile, conn=db)
+    db.commit()
+    return {"proposals_created": len(proposals), "items": proposals}
 
 
 @app.get("/api/copilot/explain-category")
