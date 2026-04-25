@@ -714,9 +714,9 @@
                 <span class="material-symbols-outlined">tune</span>
             </div>
             <div>
-                <div class="cc-kicker">Calibration Surface</div>
-                <h2 class="text-xl font-extrabold font-display" style="color: var(--text-primary)">Control Center</h2>
-                <p class="text-[12px]" style="color: var(--text-muted)">Tune merchant metadata, category rules, and spending behavior with the same calmer visual rhythm as the rest of Folio.</p>
+                <div class="cc-kicker folio-kicker">Calibration Surface</div>
+                <h2 class="folio-page-title" style="font-size: clamp(1.25rem, 0.8vw + 1rem, 1.7rem)">Control Center</h2>
+                <p class="folio-page-subtitle">Tune merchant metadata, category rules, and spending behavior with the same calmer visual rhythm as the rest of Folio.</p>
             </div>
         </div>
         <div class="cc-header-actions">

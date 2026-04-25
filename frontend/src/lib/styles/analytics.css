@@ -1023,9 +1023,10 @@
 }
 
 .analytics-hero-metric-value {
-    font-family: var(--font-mono);
-    font-size: 0.875rem;
-    font-weight: 600;
+    font-family: var(--font-financial);
+    font-size: var(--type-stat-value-sm);
+    font-weight: 400;
+    line-height: 1;
 }
 
 @media (max-width: 768px) {
@@ -1364,7 +1365,7 @@ details > summary {
     background: var(--negative);
     color: white;
     font-size: 0.5625rem;
-    font-weight: 800;
+    font-weight: 700;
     font-family: var(--font-mono);
     line-height: 1;
     animation: eventBadgePulse 2s ease-in-out infinite;
@@ -1495,7 +1496,7 @@ details > summary {
 /* ── User-Declared Badge ── */
 .analytics-recurring-badge-user {
     font-size: 0.4375rem;
-    font-weight: 800;
+    font-weight: 700;
     padding: 0.125rem 0.375rem;
     border-radius: 9999px;
     background: color-mix(in srgb, #8b5cf6 12%, transparent);
@@ -1701,8 +1702,8 @@ details > summary {
 }
 
 .analytics-section-title {
-    font-family: var(--tx-editorial-font);
-    font-size: 1.05rem;
+    font-family: var(--font-editorial);
+    font-size: clamp(1.05rem, 0.45vw + 0.92rem, 1.35rem);
     font-weight: 400;
     color: var(--text-primary);
     letter-spacing: 0;
@@ -1718,7 +1719,7 @@ details > summary {
 
 /* ── 2. Narrative Summary Strip ── */
 .analytics-hero-headline strong {
-    font-family: var(--tx-editorial-font);
+    font-family: var(--font-editorial);
     font-weight: 400;
 }
 
@@ -1776,7 +1777,7 @@ details > summary {
 }
 
 .analytics-merchant-rank {
-    font-family: var(--tx-editorial-font);
+    font-family: var(--font-editorial);
     font-size: 1.25rem;
     font-weight: 400;
     line-height: 1;
@@ -1837,9 +1838,9 @@ details > summary {
 }
 
 .analytics-merchant-amount {
-    font-family: var(--font-mono);
-    font-size: 0.8125rem;
-    font-weight: 600;
+    font-family: var(--font-financial);
+    font-size: var(--type-amount-compact);
+    font-weight: 400;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
 }
@@ -2155,8 +2156,8 @@ details > summary {
 }
 
 .analytics-pulse-card .analytics-pulse-amount {
-    font-family: var(--tx-editorial-font);
-    font-size: 1.35rem;
+    font-family: var(--font-financial);
+    font-size: var(--type-stat-value-sm);
     font-weight: 400;
     line-height: 1.1;
     color: var(--text-primary);

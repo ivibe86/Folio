@@ -286,9 +286,26 @@
     --my: 50%;
 
     /* ── Typography ── */
-    --font-sans:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    --font-display: 'Inter', -apple-system, system-ui, sans-serif;
-    --font-mono:    'DM Mono', 'Cascadia Code', 'SF Mono', monospace;
+    --font-ui:        'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-display:   'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+    --font-nav:       'Manrope', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-editorial: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+    --font-financial: "Times New Roman", Times, ui-serif, serif;
+    --font-tabular:   'DM Mono', 'Cascadia Code', 'SF Mono', monospace;
+    --font-sans:      var(--font-ui);
+    --font-mono:      var(--font-tabular);
+
+    --type-page-title: clamp(1.7rem, 1.15vw + 1.25rem, 2.35rem);
+    --type-page-subtitle: 0.75rem;
+    --type-kicker: 0.625rem;
+    --type-label: 0.625rem;
+    --type-row-title: 0.8125rem;
+    --type-row-meta: 0.6875rem;
+    --type-micro: 0.5625rem;
+    --type-stat-value: clamp(1.55rem, 1.45vw + 0.95rem, 2.55rem);
+    --type-stat-value-sm: clamp(1.15rem, 0.85vw + 0.8rem, 1.75rem);
+    --type-amount: 1rem;
+    --type-amount-compact: 0.8125rem;
 
     /* ── Transitions ── */
     --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);

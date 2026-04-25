@@ -692,8 +692,8 @@
                 <span class="material-symbols-outlined text-white text-[18px]">auto_awesome</span>
             </div>
             <div>
-                <h2 class="text-xl font-extrabold font-display" style="color: var(--text-primary)">Copilot</h2>
-                <p class="text-[11px]" style="color: var(--text-muted)">Chat-first assistant for explanations, proposed edits, and confirmation-backed mutations.</p>
+                <h2 class="folio-page-title" style="font-size: clamp(1.25rem, 0.8vw + 1rem, 1.7rem)">Copilot</h2>
+                <p class="folio-page-subtitle">Chat-first assistant for explanations, proposed edits, and confirmation-backed mutations.</p>
             </div>
         </div>
         <div class="copilot-header-actions">

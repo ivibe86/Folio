@@ -567,7 +567,7 @@
             style="color: var(--sidebar-text-active)">
         <span class="material-symbols-outlined">{mobileMenuOpen ? 'close' : 'menu'}</span>
     </button>
-    <span class="text-[15px] font-bold font-display" style="color: var(--sidebar-text-active)">
+    <span class="mobile-brand-name" style="color: var(--sidebar-text-active)">
         Folio
     </span>
     {#if appConfig.manualSyncEnabled}
@@ -805,6 +805,14 @@
         flex-shrink: 0;
     }
 
+    .mobile-brand-name {
+        font-family: var(--font-nav);
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: -0.035em;
+        line-height: 1;
+    }
+
     .rail-brand-text {
         display: flex;
         flex-direction: column;
@@ -813,10 +821,10 @@
     }
 
     .rail-brand-name {
-        font-family: var(--font-display);
-        font-size: 17px;
-        font-weight: 780;
-        letter-spacing: -0.04em;
+        font-family: var(--font-nav);
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: -0.045em;
         line-height: 1.15;
         color: var(--sidebar-text-active);
         /* Light mode: solid text with subtle shadow */
@@ -838,10 +846,11 @@
     }
 
     .rail-brand-sub {
-        font-size: 9.5px;
-        font-weight: 500;
+        font-family: var(--font-nav);
+        font-size: 9px;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.1em;
+        letter-spacing: 0.14em;
         color: var(--sidebar-text);
         opacity: 0.45;
         line-height: 1;
@@ -942,7 +951,7 @@
     }
 
     .rail-nav-group--secondary .rail-link {
-        font-size: 13px;
+        font-size: 14px;
     }
     .rail-nav-group--secondary .rail-link-icon {
         font-size: 19px;
@@ -965,9 +974,10 @@
         border-radius: 11px;
         text-decoration: none;
         color: var(--sidebar-text);
-        font-size: 13.5px;
-        font-weight: 480;
-        letter-spacing: -0.005em;
+        font-family: var(--font-nav);
+        font-size: 14.5px;
+        font-weight: 650;
+        letter-spacing: -0.025em;
         cursor: pointer;
         overflow: hidden;
         border: 1px solid transparent;
@@ -996,7 +1006,7 @@
     .rail-link--active {
         background: var(--rail-link-active-bg) !important;
         color: var(--sidebar-text-active) !important;
-        font-weight: 600;
+        font-weight: 750;
         border-color: var(--rail-active-border, transparent);
         box-shadow: var(--rail-link-active-shadow);
         transform: none !important;
@@ -1085,7 +1095,7 @@
     }
 
     .rail-link-label {
-        line-height: 1.1;
+        line-height: 1.08;
     }
 
     .rail-link--sm {

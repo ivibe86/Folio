@@ -482,7 +482,7 @@ onMount(() => {
                 <text
                     x={MARGIN.left - 10} y={tick.y + 3.5}
                     text-anchor="end" fill="var(--text-muted)" font-size="9"
-                    font-family="JetBrains Mono, monospace" opacity="0.55"
+                    font-family="DM Mono, monospace" opacity="0.55"
                 >{(void privacyKey, fmtAxis(tick.value))}</text>
             {/each}
 
@@ -543,7 +543,7 @@ onMount(() => {
                     text-anchor="middle"
                     fill={AVG_TEXT_COLOR}
                     font-size="8" font-weight="700"
-                    font-family="JetBrains Mono, monospace"
+                    font-family="DM Mono, monospace"
                     style="pointer-events: none;"
                 >Avg {(void privacyKey, fmtCompact(avgSpending))}/mo</text>
             {/if}
@@ -611,7 +611,7 @@ onMount(() => {
                             text-anchor="middle"
                             fill={INCOME_COLOR}
                             font-size="9" font-weight="700"
-                            font-family="JetBrains Mono, monospace"
+                            font-family="DM Mono, monospace"
                             style="pointer-events: none;"
                         >{(void privacyKey, fmtCompact(d.income))}</text>
                     </g>
@@ -644,7 +644,7 @@ onMount(() => {
                             text-anchor="middle"
                             fill={SPENDING_COLOR}
                             font-size="9" font-weight="700"
-                            font-family="JetBrains Mono, monospace"
+                            font-family="DM Mono, monospace"
                             style="pointer-events: none;"
                         >{(void privacyKey, fmtCompact(d.spending))}</text>
                     </g>
@@ -714,7 +714,7 @@ onMount(() => {
                         text-anchor="middle"
                         fill={bar.positive ? SURPLUS_BAR_COLOR : DEFICIT_BAR_COLOR}
                         font-size="7.5" font-weight="700"
-                        font-family="JetBrains Mono, monospace"
+                        font-family="DM Mono, monospace"
                         style="pointer-events: none;"
                     >{(void privacyKey, fmtSignedCompact(bar.value))}</text>
                 {/if}
@@ -812,7 +812,7 @@ onMount(() => {
                     x={ttX + ttW - 12} y={rowStartY}
                     text-anchor="end"
                     fill={INCOME_COLOR} font-size="9.5" font-weight="700"
-                    font-family="JetBrains Mono, monospace"
+                    font-family="DM Mono, monospace"
                     style="pointer-events: none;"
                 >{(void privacyKey, fmtCurrency(tt.income))}</text>
 
@@ -829,7 +829,7 @@ onMount(() => {
                     x={ttX + ttW - 12} y={spendRowY}
                     text-anchor="end"
                     fill={SPENDING_COLOR} font-size="9.5" font-weight="700"
-                    font-family="JetBrains Mono, monospace"
+                    font-family="DM Mono, monospace"
                     style="pointer-events: none;"
                 >{(void privacyKey, fmtCurrency(tt.spending))}</text>
 
@@ -857,7 +857,7 @@ onMount(() => {
                     x={ttX + ttW - 12} y={netRowY}
                     text-anchor="end"
                     fill={netColor} font-size="9.5" font-weight="700"
-                    font-family="JetBrains Mono, monospace"
+                    font-family="DM Mono, monospace"
                     style="pointer-events: none;"
                 >{(void privacyKey, $privacyMode ? '$\u2022\u2022\u2022\u2022\u2022' : ((tt.net >= 0 ? '+' : '') + formatCurrency(tt.net)))}</text>
 
@@ -892,7 +892,7 @@ onMount(() => {
                             x={ttX + ttW - 12} y={catY}
                             text-anchor="end"
                             fill="rgba(241, 245, 249, 0.55)" font-size="8" font-weight="600"
-                            font-family="JetBrains Mono, monospace"
+                            font-family="DM Mono, monospace"
                             style="pointer-events: none;"
                         >{(void privacyKey, $privacyMode ? '\u2022\u2022\u2022' : formatCurrency(cat.total))}</text>
                     {/each}

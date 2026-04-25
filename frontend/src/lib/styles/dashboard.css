@@ -875,10 +875,12 @@
 }
 
 .ivs-stat-value {
-    font-family: var(--font-mono);
-    font-size: 0.8125rem;
-    font-weight: 600;
+    font-family: var(--font-financial);
+    font-size: var(--type-amount);
+    font-weight: 400;
     line-height: 1.2;
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
 }
 
 .ivs-stat-sub {

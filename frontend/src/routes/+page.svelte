@@ -1788,7 +1788,7 @@
     <!-- ═══ HEADER ═══ -->
     <div class="dashboard-hero-header mb-8 fade-in">
         <div class="dashboard-hero-meta-row">
-            <p class="dashboard-hero-greeting text-[10px] font-bold tracking-[0.2em] uppercase" style="color: var(--accent)">{greeting}</p>
+            <p class="dashboard-hero-greeting folio-kicker" style="color: var(--accent)">{greeting}</p>
             <div class="dashboard-hero-controls">
                 <button
                     on:click={() => privacyMode.toggle()}
@@ -1810,11 +1810,11 @@
             </div>
         </div>
         {#if isHousehold}
-            <h2 class="dashboard-hero-title text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+            <h2 class="dashboard-hero-title folio-page-title">
                 Your finances at a glance
             </h2>
         {:else}
-            <h2 class="dashboard-hero-title dashboard-hero-title-personal text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+            <h2 class="dashboard-hero-title dashboard-hero-title-personal folio-page-title">
                 <span class="dashboard-hero-title-desktop">{greeting}, {activeProfileName}.</span>
                 <span class="dashboard-hero-title-mobile">{activeProfileName}</span>
             </h2>
@@ -1927,7 +1927,7 @@
                                 <line x1={hoverPoint.x} y1="8" x2={hoverPoint.x} y2="132" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3,3" opacity="0.3" />
                                 <circle cx={hoverPoint.x} cy={hoverPoint.y} r="5" fill="#CCFBF1" stroke={CYAN_LINE} stroke-width="2" filter="url(#nwDotGlow)" />
                                 <rect x={hoverPoint.x > 480 ? hoverPoint.x - 130 : hoverPoint.x + 10} y={Math.max(4, hoverPoint.y - 36)} width="120" height="32" rx="6" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="1" opacity="0.95" />
-                                <text x={hoverPoint.x > 480 ? hoverPoint.x - 70 : hoverPoint.x + 70} y={Math.max(4, hoverPoint.y - 36) + 13} text-anchor="middle" fill="var(--text-primary)" font-size="10" font-weight="700" font-family="JetBrains Mono, monospace" style="pointer-events: none">{(void privacyKey, formatCurrency(hoverPoint.value))}</text>
+                                <text x={hoverPoint.x > 480 ? hoverPoint.x - 70 : hoverPoint.x + 70} y={Math.max(4, hoverPoint.y - 36) + 13} text-anchor="middle" fill="var(--text-primary)" font-size="10" font-weight="700" font-family="DM Mono, monospace" style="pointer-events: none">{(void privacyKey, formatCurrency(hoverPoint.value))}</text>
                                 <text x={hoverPoint.x > 480 ? hoverPoint.x - 70 : hoverPoint.x + 70} y={Math.max(4, hoverPoint.y - 36) + 26} text-anchor="middle" fill="var(--text-muted)" font-size="8" font-weight="500" font-family="Inter, system-ui, sans-serif" style="pointer-events: none">{hoverPoint.date}</text>
                             {/if}
                         </svg>
@@ -1955,7 +1955,7 @@
                     </div>
                 </div>
                                 
-                <p class="text-[2.5rem] md:text-[2.75rem] font-extrabold font-display mt-0 mb-2 tracking-tight leading-none"
+                <p class="folio-stat-value mt-0 mb-2"
                    style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}; opacity: {animationStarted ? 1 : 0}; transition: opacity 0.2s ease-out;">
                     {formatCurrency(animationDone ? netWorth : animatedNetWorth)}
                 </p>
@@ -1968,7 +1968,7 @@
                         <span class="material-symbols-outlined text-[15px]" style="color: #4ade80">account_balance</span>
                     </div>
                     <p class="text-[9px] font-bold tracking-[0.15em] uppercase" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">Accounts</p>
-                    <p class="ml-auto text-base font-bold font-mono" style="color: {$darkMode ? 'var(--positive)' : 'var(--island-positive)'}">{(void privacyKey, formatCurrency(totalCash))}</p>
+                    <p class="ml-auto folio-stat-value-sm" style="color: {$darkMode ? 'var(--positive)' : 'var(--island-positive)'}">{(void privacyKey, formatCurrency(totalCash))}</p>
                 </div>
                 <div class="hero-account-scroll-wrapper">
                     <div class="hero-account-scroll" use:checkScrollOverflow>
@@ -1987,7 +1987,7 @@
                                 </div>
                             </div>
                             <div class="text-right flex-shrink-0 ml-2">
-                                <p class="text-[12px] font-bold font-mono" style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}">{(void privacyKey, formatCurrency(acc.balance))}</p>
+                                <p class="folio-amount-compact" style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}">{(void privacyKey, formatCurrency(acc.balance))}</p>
                                 <p class="text-[9px] font-mono" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">
                                     {accPct.toFixed(0)}%
                                     {#if currentMonthData && prevMonthData && accountDeltas._portfolioDelta !== undefined}
@@ -2018,7 +2018,7 @@
                         <span class="material-symbols-outlined text-[15px]" style="color: #f59e0b">account_balance_wallet</span>
                     </div>
                     <p class="text-[9px] font-bold tracking-[0.15em] uppercase" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">Liabilities</p>
-                    <p class="ml-auto text-base font-bold font-mono" style="color: {$darkMode ? 'var(--warning)' : 'var(--island-warning)'}">{(void privacyKey, formatCurrency(totalOwed))}</p>
+                    <p class="ml-auto folio-stat-value-sm" style="color: {$darkMode ? 'var(--warning)' : 'var(--island-warning)'}">{(void privacyKey, formatCurrency(totalOwed))}</p>
                 </div>
                 <div class="hero-account-scroll-wrapper">
                     <div class="hero-account-scroll" use:checkScrollOverflow>
@@ -2041,7 +2041,7 @@
                                     {/if}
                                 </div>
                             </div>
-                            <p class="text-[12px] font-bold font-mono ml-3" style="color: {parseFloat(acc.balance) > 0 ? ($darkMode ? 'var(--warning)' : 'var(--island-warning)') : ($darkMode ? 'var(--positive)' : 'var(--island-positive)')}">
+                            <p class="folio-amount-compact ml-3" style="color: {parseFloat(acc.balance) > 0 ? ($darkMode ? 'var(--warning)' : 'var(--island-warning)') : ($darkMode ? 'var(--positive)' : 'var(--island-positive)')}">
                                 {(void privacyKey, formatCurrency(acc.balance))}
                             </p>
                         </div>
@@ -2069,7 +2069,7 @@
          ═══════════════════════════════════════════════════════ -->
     <section class="mb-6 fade-in-up" style="animation-delay: 100ms">
         <div class="flex flex-col gap-3 mb-3 sm:flex-row sm:items-center sm:justify-between">
-            <p class="section-header">Income & Spending</p>
+            <h3 class="folio-section-title">Income & Spending</h3>
             <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <div class="period-toggle-track" style="--seg-count: {periodOptions.length}; --active-idx: {activePeriodIdx};">
                     <div class="period-toggle-thumb"></div>
@@ -2196,8 +2196,7 @@
     <section class="mb-10 fade-in-up" style="animation-delay: 140ms">
         <div class="flex items-center justify-between mb-4">
             <div class="flex items-center gap-2">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Money Flow</p>
+                <h3 class="folio-section-title">Money Flow</h3>
                 {#if debugLoadingMode}
                     <span class="text-[9px] font-semibold px-2 py-0.5 rounded-md"
                         style="background: rgba(59, 130, 246, 0.10); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.18);">
@@ -2301,7 +2300,7 @@
                             <p class="text-[13px] font-semibold" style="color: var(--text-primary)">{selectedSankeyCategory}</p>
                             <p class="text-[10px]" style="color: var(--text-muted)">{sankeyDrillTxns.length} transactions · by amount</p>
                         </div>
-                        <p class="ml-auto text-[13px] font-bold font-mono" style="color: var(--negative)">{formatCurrency(drillTotal)}</p>
+                        <p class="ml-auto folio-amount" style="color: var(--negative)">{formatCurrency(drillTotal)}</p>
                     </div>
                     {#if drillUpdateFeedback}
                         <div class="drill-feedback-toast fade-in">
@@ -2321,7 +2320,7 @@
                                 <p class="text-[10px]" style="color: var(--text-muted)">{formatDate(tx.date)} · {tx.account_name}</p>
                             </div>
                             <div class="drill-tx-right">
-                                <p class="text-[13px] font-bold font-mono" style="color: {amount >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                                <p class="folio-amount-compact" style="color: {amount >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                                     {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
                                 </p>
                                 {#if amount > 0 && (selectedSankeyCategory === 'Savings Transfer' || selectedSankeyCategory === 'Personal Transfer')}
@@ -2493,8 +2492,7 @@
     {#if fixedVsVariable && fixedVsVariable.grandTotal > 0}
         <section class="mb-10 fade-in-up" style="animation-delay: 155ms">
             <div class="flex items-center gap-2 mb-4">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Fixed vs Variable</p>
+                <h3 class="folio-section-title">Fixed vs Variable</h3>
             </div>
 
             <div class="card" style="padding: 1.25rem 1.5rem">
@@ -2625,8 +2623,7 @@
     <section class="mb-10 fade-in-up" style="animation-delay: 170ms">
         <div class="flex items-center justify-between mb-4">
             <div class="flex items-center gap-2">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Income vs Spending</p>
+                <h3 class="folio-section-title">Income vs Spending</h3>
                 <span class="section-zone-label">Last 12 Months</span>
             </div>
         </div>

@@ -140,8 +140,8 @@
 <div class="profile-transition" class:profile-loading={profileSwitching}>
     <div class="flex items-start justify-between mb-8 fade-in">
         <div>
-            <h2 class="text-2xl md:text-3xl font-extrabold font-display" style="color: var(--text-primary)">Budgets</h2>
-            <p class="text-[12px] mt-1" style="color: var(--text-muted)">Set limits, track spending by category</p>
+            <h2 class="folio-page-title">Budgets</h2>
+            <p class="folio-page-subtitle">Set limits, track spending by category</p>
         </div>
         <ProfileSwitcher />
     </div>
@@ -149,16 +149,16 @@
     <!-- Summary row -->
     <div class="grid grid-cols-3 gap-3 mb-6 fade-in-up" style="animation-delay: 60ms">
         <div class="card" style="padding: 0.875rem 1.125rem">
-            <p class="stat-label">Total Budget</p>
-            <p class="text-lg font-bold font-mono mt-1" style="color: var(--accent)">{formatCurrency(totalBudget)}</p>
+            <p class="folio-stat-label">Total Budget</p>
+            <p class="folio-stat-value-sm mt-1" style="color: var(--accent)">{formatCurrency(totalBudget)}</p>
         </div>
         <div class="card" style="padding: 0.875rem 1.125rem">
-            <p class="stat-label">Total Spent</p>
-            <p class="text-lg font-bold font-mono mt-1 text-negative">{formatCurrency(totalSpent)}</p>
+            <p class="folio-stat-label">Total Spent</p>
+            <p class="folio-stat-value-sm mt-1 text-negative">{formatCurrency(totalSpent)}</p>
         </div>
         <div class="card" style="padding: 0.875rem 1.125rem">
-            <p class="stat-label">Remaining</p>
-            <p class="text-lg font-bold font-mono mt-1"
+            <p class="folio-stat-label">Remaining</p>
+            <p class="folio-stat-value-sm mt-1"
                 style="color: {totalRemaining >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                 {formatCurrency(totalRemaining)}
             </p>
@@ -170,7 +170,7 @@
         <div class="card mb-6 fade-in-up" style="animation-delay: 100ms">
             <div class="flex items-center justify-between mb-2">
                 <span class="text-[12px] font-medium" style="color: var(--text-secondary)">Overall Utilization</span>
-                <span class="text-[12px] font-mono font-bold"
+                <span class="folio-amount-compact"
                     style="color: {totalSpent/totalBudget > 1 ? 'var(--negative)' : totalSpent/totalBudget > 0.8 ? 'var(--warning)' : 'var(--positive)'}">
                     {formatPercent(Math.min(totalSpent / totalBudget * 100, 100))}
                 </span>
@@ -186,7 +186,7 @@
 
     <!-- Category budgets -->
     <div class="flex items-center justify-between mb-3 fade-in">
-        <p class="text-[9px] font-bold tracking-[0.2em] uppercase" style="color: var(--text-muted)">By Category</p>
+        <h3 class="folio-section-title">By Category</h3>
         <select bind:value={selectedMonth}
             class="px-3 py-2 rounded-xl text-[12px] border-none"
             style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border)">
@@ -208,8 +208,8 @@
                             </span>
                         </div>
                         <div>
-                            <p class="text-[13px] font-semibold" style="color: var(--text-primary)">{item.category}</p>
-                            <p class="text-[10px] font-mono" style="color: var(--text-muted)">
+                            <p class="folio-row-title">{item.category}</p>
+                            <p class="folio-row-meta">
                                 {formatCurrency(item.spent)} spent
                             </p>
                         </div>
@@ -220,14 +220,14 @@
                             <div class="flex items-center gap-1">
                                 <span class="text-[11px]" style="color: var(--text-muted)">$</span>
                                 <input bind:value={editValue} type="number"
-                                    class="w-24 px-2 py-1 rounded-lg text-[12px] font-mono text-right border-none"
+                                    class="w-24 px-2 py-1 rounded-lg folio-amount-compact text-right border-none"
                                     style="background: var(--surface-200); color: var(--text-primary)"
                                     on:keydown={(e) => { if (e.key === 'Enter') commitEdit(item.category); }}
                                     on:blur={() => commitEdit(item.category)} />
                             </div>
                         {:else}
                             <button on:click={() => startEdit(item.category, item.budget)}
-                                class="text-[12px] font-mono px-3 py-1 rounded-lg transition-colors hover:opacity-80"
+                                class="folio-amount-compact px-3 py-1 rounded-lg transition-colors hover:opacity-80"
                                 style="background: var(--surface-200); color: {item.budget > 0 ? 'var(--text-primary)' : 'var(--text-muted)'}">
                                 {item.budget > 0 ? formatCurrency(item.budget) : 'Set budget'}
                             </button>
@@ -251,9 +251,9 @@
                         </div>
                     </div>
                     <div class="flex justify-between mt-1.5">
-                        <span class="text-[9px] font-mono" style="color: var(--text-muted)">{formatPercent(item.budgetPercent)}</span>
-                        <span class="text-[9px] font-mono"
-                            style="color: {item.remaining >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                        <span class="folio-row-meta" style="font-size: var(--type-micro); color: var(--text-muted)">{formatPercent(item.budgetPercent)}</span>
+                        <span class="folio-row-meta"
+                            style="font-size: var(--type-micro); color: {item.remaining >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                             {item.remaining >= 0 ? formatCurrency(item.remaining) + ' left' : formatCurrency(Math.abs(item.remaining)) + ' over'}
                         </span>
                     </div>

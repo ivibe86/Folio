@@ -17,9 +17,9 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    font-size: var(--type-micro);
+    font-weight: 760;
+    letter-spacing: 0.12em;
     padding: 3px 10px;
     border-radius: 8px;
     width: fit-content;
@@ -60,8 +60,8 @@
 .copilot-data-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6875rem;
+    font-family: var(--font-tabular);
 }
 
 .copilot-data-table thead {
@@ -73,9 +73,9 @@
 .copilot-data-table th {
     background: var(--surface-100);
     color: var(--text-muted);
-    font-size: 9px;
+    font-size: var(--type-micro);
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     text-align: left;
     padding: 8px 12px;
@@ -103,11 +103,11 @@
 
 /* Preview table (in confirmation card) — slightly different styling */
 .copilot-data-table-preview {
-    font-size: 10px;
+    font-size: 0.625rem;
 }
 
 .copilot-data-table-preview th {
-    font-size: 8px;
+    font-size: 0.5rem;
     padding: 6px 10px;
 }
 
@@ -131,7 +131,7 @@
     padding: 7px 16px;
     border-radius: 10px;
     border: none;
-    font-size: 12px;
+    font-size: var(--type-page-subtitle);
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -174,7 +174,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 10px;
+    font-size: 0.625rem;
     font-weight: 600;
     color: #34d399;
     padding: 4px 10px;
@@ -188,7 +188,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 10px;
+    font-size: 0.625rem;
     font-weight: 500;
     color: var(--text-muted);
     background: none;
@@ -203,8 +203,8 @@
 }
 
 .copilot-sql-block {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
     line-height: 1.5;
     padding: 10px 14px;
     border-radius: 8px;
@@ -235,7 +235,7 @@
     border: 1px solid var(--card-border);
     background: var(--card-bg);
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--type-page-subtitle);
     font-weight: 600;
     cursor: pointer;
     transition: all 0.18s ease;
@@ -259,7 +259,7 @@
     background: color-mix(in srgb, var(--positive) 10%, var(--card-bg));
     color: var(--text-primary);
     border: 1px solid color-mix(in srgb, var(--positive) 20%, var(--card-border));
-    font-size: 12px;
+    font-size: 0.75rem;
     font-weight: 600;
 }
 
@@ -300,14 +300,14 @@
 
 .copilot-panel-header h3 {
     margin: 0;
-    font-size: 15px;
-    font-weight: 800;
+    font-size: 0.9375rem;
+    font-weight: 700;
     color: var(--text-primary);
 }
 
 .copilot-panel-header p {
     margin: 3px 0 0;
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: var(--text-muted);
 }
 
@@ -330,8 +330,8 @@
         radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 12%, transparent), transparent 55%),
         var(--card-bg);
     color: var(--text-primary);
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 600;
     cursor: pointer;
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
@@ -370,14 +370,14 @@
 
 .copilot-row-title {
     margin: 0;
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 600;
     color: var(--text-primary);
 }
 
 .copilot-row-subtitle {
     margin: 3px 0 0;
-    font-size: 10px;
+    font-size: 0.625rem;
     color: var(--text-muted);
 }
 
@@ -406,8 +406,8 @@
     border-radius: 10px;
     background: var(--surface-200);
     color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 0.6875rem;
+    font-weight: 600;
 }
 
 .copilot-inline-btn:hover:not(:disabled),
@@ -430,8 +430,8 @@
     border-radius: 12px;
     background: linear-gradient(135deg, var(--accent), var(--accent-hover));
     color: #ffffff;
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 600;
     box-shadow: 0 6px 20px rgba(74, 144, 217, 0.22);
 }
 
@@ -444,7 +444,7 @@
     background: var(--card-bg);
     color: var(--text-primary);
     padding: 9px 11px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     min-width: 0;
 }
 
@@ -472,10 +472,10 @@
 }
 
 .copilot-form-fields label span {
-    font-size: 10px;
+    font-size: 0.5625rem;
     font-weight: 700;
     color: var(--text-muted);
-    letter-spacing: 0.04em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
 }
 
@@ -509,21 +509,21 @@
 
 .copilot-history-response {
     margin: 0;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--text-secondary);
     line-height: 1.55;
 }
 
 .copilot-data-help {
     margin: -4px 0 0;
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: var(--text-muted);
     line-height: 1.5;
 }
 
 .copilot-data-help code {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
     color: var(--text-secondary);
 }
 
@@ -532,7 +532,7 @@
     border-radius: 14px;
     border: 1px dashed var(--card-border);
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: 0.75rem;
     text-align: center;
     background: color-mix(in srgb, var(--surface-100) 70%, transparent);
 }
@@ -544,9 +544,9 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     color: var(--accent);
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
+    font-size: 0.5625rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
 }
 
@@ -561,7 +561,7 @@
     border-radius: 999px;
     background: rgba(245, 158, 11, 0.10);
     color: #d97706;
-    font-size: 10px;
+    font-size: 0.625rem;
     font-weight: 700;
 }
 
@@ -574,7 +574,7 @@
 .copilot-suggestion-btn {
     padding: 8px 12px;
     border-radius: 12px;
-    font-size: 11px;
+    font-size: 0.6875rem;
     font-weight: 600;
     transition: all 0.18s ease;
     background: var(--card-bg);

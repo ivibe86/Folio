@@ -174,7 +174,113 @@ h1, h2, h3, h4, h5, h6 {
 .stat-label {
     font-size: 0.625rem;
     font-weight: 700;
-    letter-spacing: 0.15em;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.folio-page-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(1.8rem, 1.25vw + 1.08rem, 2.65rem);
+    font-weight: 740;
+    line-height: 0.98;
+    letter-spacing: -0.035em;
+    color: var(--text-primary);
+}
+
+.folio-page-subtitle {
+    margin: 0.35rem 0 0;
+    font-family: var(--font-ui);
+    font-size: var(--type-page-subtitle);
+    font-weight: 500;
+    line-height: 1.45;
+    letter-spacing: 0;
+    color: var(--text-muted);
+}
+
+.folio-kicker,
+.folio-stat-label {
+    font-family: var(--font-ui);
+    font-size: var(--type-kicker);
+    font-weight: 760;
+    line-height: 1.2;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.folio-editorial-heading {
+    font-family: var(--font-editorial);
+    font-weight: 400;
+    line-height: 1.05;
+    letter-spacing: 0;
+    color: var(--text-primary);
+}
+
+.folio-stat-value,
+.folio-stat-value-sm,
+.folio-amount,
+.folio-amount-compact {
+    font-family: var(--font-financial);
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: 0;
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
+    color: var(--text-primary);
+}
+
+.folio-section-title {
+    margin: 0;
+    font-family: var(--font-editorial);
+    font-size: clamp(1.05rem, 0.45vw + 0.92rem, 1.35rem);
+    font-weight: 400;
+    line-height: 1.1;
+    letter-spacing: 0;
+    color: var(--text-primary);
+}
+
+.folio-stat-value {
+    font-size: var(--type-stat-value);
+}
+
+.folio-stat-value-sm {
+    font-size: var(--type-stat-value-sm);
+}
+
+.folio-amount {
+    font-size: var(--type-amount);
+}
+
+.folio-amount-compact {
+    font-size: var(--type-amount-compact);
+}
+
+.folio-row-title {
+    font-family: var(--font-ui);
+    font-size: var(--type-row-title);
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+    color: var(--text-primary);
+}
+
+.folio-row-meta {
+    font-family: var(--font-ui);
+    font-size: var(--type-row-meta);
+    font-weight: 500;
+    line-height: 1.35;
+    letter-spacing: 0;
+    color: var(--text-muted);
+}
+
+.folio-micro {
+    font-family: var(--font-ui);
+    font-size: var(--type-micro);
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-muted);
 }
@@ -828,22 +934,23 @@ h1, h2, h3, h4, h5, h6 {
 .metric-ribbon-label {
     font-size: 0.5625rem;
     font-weight: 700;
-    letter-spacing: 0.15em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-muted);
 }
 
 .metric-ribbon-value {
-    font-family: var(--font-mono);
+    font-family: var(--font-financial);
     font-variant-numeric: tabular-nums;
-    font-size: 1.125rem;
-    font-weight: 500;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
+    font-size: var(--type-stat-value-sm);
+    font-weight: 400;
     line-height: 1.2;
 }
 
 .metric-ribbon-item.metric-derived .metric-ribbon-value {
-    font-size: 1.125rem;
-    font-weight: 500;
+    font-size: var(--type-stat-value-sm);
+    font-weight: 400;
 }
 
 .metric-ribbon-item.metric-derived .metric-ribbon-label {
@@ -1296,7 +1403,7 @@ h1, h2, h3, h4, h5, h6 {
 .section-header {
     font-size: 0.6875rem;
     font-weight: 700;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-secondary);
 }

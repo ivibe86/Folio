@@ -5,9 +5,9 @@ export default {
     theme: {
         extend: {
             fontFamily: {
-                sans: ['Inter', 'system-ui', 'sans-serif'],
-                display: ['Inter', 'system-ui', 'sans-serif'],
-                mono: ['DM Mono', 'Cascadia Code', 'monospace']
+                sans: ['var(--font-ui)'],
+                display: ['var(--font-display)'],
+                mono: ['var(--font-tabular)']
             },
             colors: {
                 surface: {
@@ -77,4 +77,3 @@ export default {
     },
     plugins: []
 };
-

@@ -5,7 +5,6 @@
    ═══════════════════════════════════════════════════════ */
 
 :root {
-    --tx-editorial-font: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
     --tx-ink-card: #121417;
     --tx-ink-card-2: #171b1d;
     --tx-warm-line: rgba(255, 255, 255, 0.11);
@@ -56,8 +55,8 @@
 
 .tx-story-title {
     margin: 0.55rem 0 1.65rem;
-    font-family: var(--tx-editorial-font);
-    font-size: clamp(1.35rem, 1.3vw + 1rem, 2.05rem);
+    font-family: var(--font-editorial);
+    font-size: clamp(1.25rem, 1.15vw + 0.95rem, 1.9rem);
     font-weight: 400;
     letter-spacing: 0;
     color: #fbf8f1;
@@ -97,17 +96,19 @@
 
 .tx-story-metric strong {
     display: block;
-    font-family: var(--tx-editorial-font);
-    font-size: clamp(1.9rem, 2.9vw, 4.4rem);
+    font-family: var(--font-financial);
+    font-size: clamp(1.7rem, 2.45vw, 3.8rem);
     font-weight: 400;
     line-height: 0.95;
     letter-spacing: 0;
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
     color: #eef2f6;
     white-space: nowrap;
 }
 
 .tx-story-metric:not(.tx-story-metric-main) strong {
-    font-size: clamp(1.55rem, 1.8vw, 3.15rem);
+    font-size: clamp(1.4rem, 1.55vw, 2.7rem);
 }
 
 .tx-story-metric small {
@@ -628,10 +629,12 @@
 }
 
 .tx-day-header-left strong {
-    font-family: var(--tx-editorial-font);
+    font-family: var(--font-financial);
     font-size: 1.45rem;
     font-weight: 400;
     line-height: 1;
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
     color: var(--text-primary);
 }
 
@@ -678,10 +681,12 @@
 }
 
 .tx-day-header-right strong {
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    font-weight: 700;
+    font-family: var(--font-financial);
+    font-size: 0.95rem;
+    font-weight: 400;
     letter-spacing: 0;
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
     text-transform: none;
 }
 
@@ -1280,7 +1285,7 @@
     border-radius: 8px;
     font-size: 12px;
     font-weight: 600;
-    font-family: 'JetBrains Mono', 'DM Mono', monospace;
+    font-family: var(--font-mono);
     color: var(--text-secondary);
     background: var(--surface-100);
     border: 1px solid var(--card-border);

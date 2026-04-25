@@ -1098,11 +1098,11 @@
     <!-- --- HEADER --- -->
     <div class="flex items-start justify-between mb-8 fade-in" style="position: relative; z-index: 100;">
         <div>
-            <p class="text-[10px] font-bold tracking-[0.2em] uppercase mb-1.5" style="color: var(--accent)">Insights</p>
-            <h2 class="text-2xl md:text-[2rem] font-extrabold font-display tracking-tight" style="color: var(--text-primary)">
+            <p class="folio-kicker mb-1.5" style="color: var(--accent)">Insights</p>
+            <h2 class="folio-page-title">
                 Analytics
             </h2>
-            <p class="text-[12px] mt-1" style="color: var(--text-muted)">What your data means and what to do about it</p>
+            <p class="folio-page-subtitle">What your data means and what to do about it</p>
         </div>
         <ProfileSwitcher />
     </div>
@@ -1122,7 +1122,7 @@
         <section class="mb-8 fade-in-up" style="animation-delay: 30ms">
             <div class="analytics-hero-strip">
                 <div class="analytics-hero-headline">
-                    <p>In <strong>{formatMonth(selectedMonth)}</strong>, you spent <strong class="font-mono">{formatCurrency(currentMonthSummary.expenses)}</strong>
+                    <p>In <strong>{formatMonth(selectedMonth)}</strong>, you spent <strong>{formatCurrency(currentMonthSummary.expenses)}</strong>
                         — <span style="color: {expVsAvgPct <= 0 ? 'var(--positive)' : 'var(--negative)'}; font-weight: 700;">{formatPercent(Math.abs(expVsAvgPct))}</span>
                         {expVsAvgPct <= 0 ? 'below' : 'above'} your average.
                     </p>

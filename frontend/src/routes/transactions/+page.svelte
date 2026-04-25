@@ -640,8 +640,8 @@
 <div class="profile-transition" class:profile-loading={profileSwitching}>
 <div class="flex items-start justify-between mb-6 fade-in">
     <div>
-        <h2 class="text-2xl md:text-3xl font-extrabold font-display" style="color: var(--text-primary)">Transactions</h2>
-        <p class="text-[12px] mt-1" style="color: var(--text-muted)">
+        <h2 class="folio-page-title">Transactions</h2>
+        <p class="folio-page-subtitle">
             {#if selectedPeriod === 'all'}All time{:else if selectedPeriod === 'ytd'}YTD {new Date().getFullYear()}{:else if selectedPeriod === 'custom'}{formatMonth(selectedCustomMonth)}{:else}{formatMonth(getMonthForPeriod(selectedPeriod))}{/if} · {totalCount} transactions{#if totalCount > pageLimit} (showing {pageOffset + 1}–{Math.min(pageOffset + pageLimit, totalCount)}){/if}
         </p>
     </div>
@@ -1082,7 +1082,7 @@
 
                         <!-- Zone 3: Amount (far right, terminal anchor) -->
                         <div class="tx-zone-amount">
-                            <p class="text-[13px] font-bold font-mono"
+                            <p class="folio-amount-compact"
                                 style="color: {amount >= 0 ? 'var(--positive)' : 'var(--text-primary)'}">
                                 {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
                             </p>
