@@ -139,7 +139,10 @@ def _chat_with_tools_anthropic(
     max_tokens: int,
 ) -> dict:
     import copilot_tools
-    anth_tools = copilot_tools.tools_for_anthropic()
+    if tools and isinstance(tools[0], str):
+        anth_tools = copilot_tools.tools_for_anthropic(tools)
+    else:
+        anth_tools = tools or []
     anth_messages = []
     for msg in messages:
         role = msg.get("role")
@@ -171,10 +174,11 @@ def _chat_with_tools_anthropic(
         "model": _ANTHROPIC_MODEL,
         "max_tokens": max_tokens,
         "messages": anth_messages,
-        "tools": anth_tools,
     }
     if system:
         payload["system"] = system
+    if anth_tools:
+        payload["tools"] = anth_tools
 
     resp = httpx.post(
         _ANTHROPIC_URL,
@@ -218,7 +222,10 @@ def _chat_with_tools_ollama(
     purpose: str,
 ) -> dict:
     import copilot_tools
-    ollama_tools = copilot_tools.tools_for_ollama()
+    if tools and isinstance(tools[0], str):
+        ollama_tools = copilot_tools.tools_for_ollama(tools)
+    else:
+        ollama_tools = tools or []
     ollama_config = get_ollama_config()
     model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
     timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
@@ -256,11 +263,12 @@ def _chat_with_tools_ollama(
     payload = {
         "model": model,
         "messages": ollama_msgs,
-        "tools": ollama_tools,
         "stream": False,
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
+    if ollama_tools:
+        payload["tools"] = ollama_tools
 
     url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
     resp = httpx.post(url, json=payload, timeout=timeout)
@@ -310,7 +318,10 @@ def chat_with_tools_stream(
 
 def _chat_with_tools_stream_anthropic(messages, tools, system, max_tokens):
     import copilot_tools
-    anth_tools = copilot_tools.tools_for_anthropic()
+    if tools and isinstance(tools[0], str):
+        anth_tools = copilot_tools.tools_for_anthropic(tools)
+    else:
+        anth_tools = tools or []
     anth_messages = []
     for msg in messages:
         role = msg.get("role")
@@ -342,11 +353,12 @@ def _chat_with_tools_stream_anthropic(messages, tools, system, max_tokens):
         "model": _ANTHROPIC_MODEL,
         "max_tokens": max_tokens,
         "messages": anth_messages,
-        "tools": anth_tools,
         "stream": True,
     }
     if system:
         payload["system"] = system
+    if anth_tools:
+        payload["tools"] = anth_tools
 
     active_tool = None
     with httpx.stream(
@@ -406,7 +418,10 @@ def _chat_with_tools_stream_anthropic(messages, tools, system, max_tokens):
 
 def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose):
     import copilot_tools
-    ollama_tools = copilot_tools.tools_for_ollama()
+    if tools and isinstance(tools[0], str):
+        ollama_tools = copilot_tools.tools_for_ollama(tools)
+    else:
+        ollama_tools = tools or []
     ollama_config = get_ollama_config()
     model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
     timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
@@ -441,11 +456,12 @@ def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
     payload = {
         "model": model,
         "messages": ollama_msgs,
-        "tools": ollama_tools,
         "stream": True,
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
+    if ollama_tools:
+        payload["tools"] = ollama_tools
 
     url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
     with httpx.stream("POST", url, json=payload, timeout=timeout) as resp:

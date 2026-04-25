@@ -183,9 +183,15 @@
     .copilot-chart {
         margin-top: 8px;
         padding: 12px 14px 10px;
+        width: 100%;
         border-radius: 14px;
         background: var(--card-bg, #fff);
         border: 1px solid var(--card-border, rgba(148, 163, 184, 0.22));
+    }
+    .copilot-chart svg {
+        display: block;
+        width: 100%;
+        height: auto;
     }
     .chart-title {
         font-size: 12px;

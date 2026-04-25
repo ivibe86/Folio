@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
 import llm_client
 from copilot_context import build_copilot_context
-from copilot_tools import execute_tool
+from copilot_tools import TOOL_REGISTRY, execute_tool
 from database import get_db
 import memory
 
@@ -26,6 +27,81 @@ logger = logging.getLogger(__name__)
 MAX_ITERATIONS = 3
 TOOL_RESULT_PAYLOAD_LIMIT = 12000  # chars
 HISTORY_TURN_LIMIT = 6              # last N user/assistant pairs
+
+SUMMARY_TOOLS = (
+    "get_month_summary",
+    "get_top_categories",
+    "get_top_merchants",
+    "get_recurring_summary",
+    "get_summary",
+    "get_account_balances",
+)
+DRILLDOWN_TOOLS = (
+    "get_category_spend",
+    "get_merchant_spend",
+    "get_transactions",
+    "get_transactions_for_merchant",
+    "get_top_categories",
+    "get_top_merchants",
+)
+WRITE_TOOLS = ("preview_bulk_recategorize", "preview_create_rule", "preview_rename_merchant")
+CHART_TOOLS = ("plot_chart",)
+TREND_CHART_TOOLS = (
+    "get_monthly_spending_trend",
+    "get_net_worth_trend",
+    "get_top_categories",
+    "get_category_spend",
+    "get_top_merchants",
+    "plot_chart",
+)
+ADVANCED_TOOLS = (
+    "get_month_summary",
+    "get_top_categories",
+    "get_top_merchants",
+    "get_category_spend",
+    "get_merchant_spend",
+    "get_recurring_summary",
+    "get_monthly_spending_trend",
+    "get_net_worth_trend",
+    "get_transactions_for_merchant",
+    "get_summary",
+    "get_account_balances",
+    "get_transactions",
+    "get_category_breakdown",
+    "get_dashboard_bundle",
+    "get_net_worth_delta",
+    "get_category_rules",
+    "search_saved_insights",
+    "plot_chart",
+    "run_sql",
+)
+
+TOOL_CAPABILITY_MANIFEST = """Available Copilot capabilities:
+- monthly summaries and top spending: get_month_summary, get_top_categories, get_top_merchants, get_summary
+- specific category/merchant/transaction answers: get_category_spend, get_merchant_spend, get_transactions, get_transactions_for_merchant
+- recurring/subscriptions: get_recurring_summary
+- account balances and cash: get_account_balances
+- net worth history/charts: get_net_worth_trend, get_net_worth_delta
+- monthly spending/category spending charts: get_monthly_spending_trend
+- dashboard-wide context: get_dashboard_bundle, get_category_breakdown
+- category rules and saved insights: get_category_rules, search_saved_insights
+- write previews: preview_bulk_recategorize, preview_create_rule, preview_rename_merchant
+- chart rendering: plot_chart
+- advanced read-only SQL fallback: run_sql
+"""
+
+SQL_SCHEMA_ON_DEMAND = """SQL schema notes for run_sql:
+- Prefer specialized tools first. Use run_sql only when no specific tool fits.
+- Read transactions through transactions_visible. Spending filter: amount < 0, category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income'), and expense_type not internal/household transfer.
+- Useful tables: transactions_visible(id, account_id, profile_id, date, description, amount, category, merchant_name, is_excluded, expense_type), accounts(id, profile_id, account_name, account_type, current_balance), categories(name, expense_type), category_rules(pattern, category), merchants(clean_name, category, total_spent), net_worth_history(date, profile_id, total_assets, total_owed, net_worth), saved_insights(question, answer, kind, pinned).
+- profile='household' means omit a profile filter.
+"""
+
+CHART_RECIPE_ON_DEMAND = """Chart recipe:
+- To chart net worth: call get_net_worth_trend, then plot_chart(type='line') using date/month labels and net_worth values.
+- To chart spending over months: call get_monthly_spending_trend, then plot_chart(type='line') using labels and values.
+- To chart top categories/merchants: fetch the data first, then plot_chart(type='bar' or 'donut').
+"""
 
 # Keys in tool results that typically carry user-displayable list data,
 # ordered by preference (first match wins).
@@ -43,6 +119,388 @@ _DISPLAY_LIST_KEYS = (
     "rules",         # get_category_rules
     "insights",      # search_saved_insights
 )
+
+
+def _uniq_tools(*groups: tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for group in groups:
+        for name in group:
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+    return ordered
+
+
+def _looks_financial(question: str) -> bool:
+    q = question.lower()
+    terms = (
+        "spend", "spent", "income", "budget", "merchant", "category", "transaction",
+        "subscription", "recurring", "cash", "balance", "account", "net worth",
+        "saving", "savings", "month", "week", "ytd", "money", "card", "payment",
+        "rent", "grocery", "groceries", "restaurant", "dining", "watch", "runway",
+    )
+    return "$" in q or any(t in q for t in terms)
+
+
+def _is_watch_question(question: str) -> bool:
+    q = question.lower().strip()
+    has_watch = any(p in q for p in ("what should i watch", "watch this month", "watch out", "keep an eye", "anything concerning", "anything i should worry"))
+    has_period = any(p in q for p in ("this month", "current month", "month", "right now", "lately"))
+    return has_watch and has_period
+
+
+def _history_text(history: list[dict] | None, limit: int = 4) -> str:
+    if not history:
+        return ""
+    parts: list[str] = []
+    for turn in history[-limit:]:
+        content = (turn.get("content") or "").strip()
+        if content:
+            parts.append(content)
+    return "\n".join(parts)
+
+
+def _extract_month_count(question: str, history: list[dict] | None = None) -> int:
+    context = f"{_history_text(history)}\n{question}".lower()
+    match = re.search(r"(?:last|past)\s+(\d{1,2})\s+months?", context)
+    if match:
+        return max(1, min(int(match.group(1)), 36))
+    if "year" in context or "12 months" in context:
+        return 12
+    if "all time" in context or "all-time" in context:
+        return 36
+    return 6
+
+
+def _extract_spending_category(question: str, history: list[dict] | None = None) -> str | None:
+    context = f"{_history_text(history)}\n{question}".lower()
+    category_aliases = {
+        "groceries": "Groceries",
+        "grocery": "Groceries",
+        "food": "Food & Dining",
+        "dining": "Food & Dining",
+        "restaurants": "Food & Dining",
+        "restaurant": "Food & Dining",
+        "travel": "Travel",
+        "taxes": "Taxes",
+        "tax": "Taxes",
+        "shopping": "Shopping",
+        "utilities": "Utilities",
+        "housing": "Housing",
+        "rent": "Housing",
+        "healthcare": "Healthcare",
+        "medical": "Healthcare",
+        "transportation": "Transportation",
+        "subscriptions": "Subscriptions",
+        "subscription": "Subscriptions",
+    }
+    for needle, category in category_aliases.items():
+        if re.search(rf"\b{re.escape(needle)}\b", context):
+            return category
+    return None
+
+
+def _valid_tool_names(names: Any) -> list[str]:
+    if not isinstance(names, list):
+        return []
+    valid = set(TOOL_REGISTRY)
+    cleaned: list[str] = []
+    for name in names:
+        if isinstance(name, str) and name in valid and name not in cleaned:
+            cleaned.append(name)
+    return cleaned
+
+
+def _route_tools_with_llm(question: str, history: list[dict] | None = None) -> list[str] | None:
+    if not llm_client.is_available():
+        return None
+
+    recent = _history_text(history, limit=4)
+    prompt = f"""Choose the minimum tool set for the user's latest request.
+
+{TOOL_CAPABILITY_MANIFEST}
+
+Rules:
+- Return ONLY JSON: {{"tools":["tool_name"],"reason":"short"}}
+- Choose [] for normal non-finance/general chat.
+- For any chart request, include plot_chart plus the data tool needed to produce values.
+- For net worth/networth charts, choose get_net_worth_trend and plot_chart.
+- For spending/category spending over months, choose get_monthly_spending_trend and plot_chart.
+- For ambiguous finance questions, choose a safe small bundle rather than no tools.
+
+Recent context:
+{recent or "(none)"}
+
+Latest user request:
+{question}
+
+JSON:"""
+    try:
+        raw = llm_client.complete(prompt, max_tokens=180, purpose="copilot")
+    except Exception:
+        logger.debug("tool router LLM failed", exc_info=True)
+        return None
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"```[a-z]*\n?", "", raw).strip("`\n ")
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        logger.debug("tool router returned non-JSON: %r", raw[:200])
+        return None
+    tools = _valid_tool_names(parsed.get("tools") if isinstance(parsed, dict) else parsed)
+    return tools
+
+
+def _select_tools(question: str, history: list[dict] | None = None) -> list[str]:
+    routed = _route_tools_with_llm(question, history)
+    if routed is not None:
+        return routed
+
+    context = f"{_history_text(history)}\n{question}".lower()
+    if not _looks_financial(context):
+        return []
+
+    if any(w in context for w in ("recategorize", "categorize", "create rule", "always categorize", "rename", "move all", "change all")):
+        return list(WRITE_TOOLS)
+
+    groups: list[tuple[str, ...]] = []
+    if any(w in context for w in ("chart", "graph", "plot", "visual", "trend", "over the months", "monthly")):
+        groups.append(TREND_CHART_TOOLS)
+    if any(w in context for w in ("transaction", "merchant", "category", "costco", "amazon", "where did", "show me", "list", "grocery", "groceries")):
+        groups.append(DRILLDOWN_TOOLS)
+    if any(w in context for w in ("balance", "cash", "account", "net worth", "runway")):
+        groups.append(("get_account_balances", "get_net_worth_trend", "get_net_worth_delta", "get_summary"))
+    if any(w in context for w in ("sql", "query", "rule", "policy", "why is", "debug", "reconcile")):
+        groups.append(ADVANCED_TOOLS)
+    if not groups:
+        groups.append(SUMMARY_TOOLS)
+
+    return _uniq_tools(*groups)
+
+
+def _extra_prompt_for_tools(tool_names: list[str]) -> str:
+    parts = [TOOL_CAPABILITY_MANIFEST]
+    if "run_sql" in tool_names:
+        parts.append(SQL_SCHEMA_ON_DEMAND)
+    if "plot_chart" in tool_names:
+        parts.append(CHART_RECIPE_ON_DEMAND)
+    return "\n".join(parts)
+
+
+def _claims_missing_capability(answer: str) -> bool:
+    text = (answer or "").lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "i don't have access",
+            "i do not have access",
+            "i don't have the tool",
+            "i do not have the tool",
+            "i don't have a tool",
+            "i do not have a tool",
+            "can't access your",
+            "cannot access your",
+        )
+    )
+
+
+def _fast_watch_system(profile: str | None) -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+    return (
+        "You're the user's close friend and senior financial advisor. "
+        "Summarize the provided live finance data in 2-4 warm, direct sentences. "
+        "Call out the biggest current-month watch item, cite concrete numbers, "
+        "and do not invent data. No markdown table. "
+        f"Today is {today}. Active profile: {profile or 'household'}."
+    )
+
+
+def _summarize_tool_payload(result: Any, *, key: str, limit: int = 5) -> Any:
+    if not isinstance(result, dict):
+        return result
+    cloned = dict(result)
+    value = cloned.get(key)
+    if isinstance(value, list):
+        cloned[key] = value[:limit]
+    return cloned
+
+
+def _execute_fast_watch_tools(profile: str | None, cache: dict) -> tuple[dict[str, Any], list[dict]]:
+    payload: dict[str, Any] = {}
+    trace: list[dict] = []
+    calls = [
+        ("get_recurring_summary", {"limit": 5}, "recurring", "items"),
+        ("get_top_merchants", {"range": "current_month", "limit": 5}, "top_merchants", "merchants"),
+        ("get_top_categories", {"range": "current_month", "limit": 5}, "top_categories", "categories"),
+    ]
+    for name, args, payload_key, list_key in calls:
+        start = datetime.now()
+        result = execute_tool(name, args, profile, cache=cache)
+        duration_ms = int((datetime.now() - start).total_seconds() * 1000)
+        trace.append({"name": name, "args": args, "duration_ms": duration_ms})
+        payload[payload_key] = _summarize_tool_payload(result, key=list_key)
+    return payload, trace
+
+
+def _build_monthly_spending_chart(question: str, profile: str | None, history: list[dict] | None = None, cache: dict | None = None) -> tuple[str, dict, list[dict], dict]:
+    cache = cache if cache is not None else {}
+    months = _extract_month_count(question, history)
+    category = _extract_spending_category(question, history)
+    trend_args = {"months": months}
+    if category:
+        trend_args["category"] = category
+
+    trace: list[dict] = []
+    start = datetime.now()
+    trend = execute_tool("get_monthly_spending_trend", trend_args, profile, cache=cache)
+    trace.append({
+        "name": "get_monthly_spending_trend",
+        "args": trend_args,
+        "duration_ms": int((datetime.now() - start).total_seconds() * 1000),
+    })
+
+    labels = trend.get("labels", []) if isinstance(trend, dict) else []
+    values = trend.get("values", []) if isinstance(trend, dict) else []
+    subject = f"{category} spending" if category else "spending"
+    chart_args = {
+        "type": "line",
+        "title": f"{subject.title()} - Last {months} Months",
+        "series_name": subject.title(),
+        "labels": labels,
+        "values": values,
+        "unit": "currency",
+    }
+    start = datetime.now()
+    chart = execute_tool("plot_chart", chart_args, profile, cache=cache)
+    trace.append({
+        "name": "plot_chart",
+        "args": chart_args,
+        "duration_ms": int((datetime.now() - start).total_seconds() * 1000),
+    })
+
+    if values:
+        latest = values[-1]
+        peak_idx = max(range(len(values)), key=lambda i: values[i])
+        answer = (
+            f"Done — here's your {subject} trend for the last {months} months. "
+            f"Latest month is ${latest:,.2f}; peak was {labels[peak_idx]} at ${values[peak_idx]:,.2f}."
+        )
+    else:
+        answer = f"I couldn't find {subject} data for the last {months} months."
+    return answer, trend if isinstance(trend, dict) else {}, trace, chart if isinstance(chart, dict) else {}
+
+
+def _latest_monthly_points(series: list[dict]) -> tuple[list[str], list[float], list[dict]]:
+    by_month: dict[str, dict] = {}
+    for point in series:
+        date = str(point.get("date") or point.get("month") or "")
+        if not date:
+            continue
+        month = date[:7]
+        by_month[month] = point
+    labels = sorted(by_month)
+    values: list[float] = []
+    rows: list[dict] = []
+    for month in labels:
+        point = by_month[month]
+        raw = point.get("net_worth", point.get("value", point.get("total", 0)))
+        try:
+            value = round(float(raw or 0), 2)
+        except (TypeError, ValueError):
+            value = 0.0
+        values.append(value)
+        rows.append({"month": month, "net_worth": value})
+    return labels, values, rows
+
+
+def _build_net_worth_chart(profile: str | None, cache: dict | None = None) -> tuple[str, dict, list[dict], dict]:
+    cache = cache if cache is not None else {}
+    trace: list[dict] = []
+    args = {"interval": "monthly", "limit": 24}
+    start = datetime.now()
+    trend = execute_tool("get_net_worth_trend", args, profile, cache=cache)
+    trace.append({
+        "name": "get_net_worth_trend",
+        "args": args,
+        "duration_ms": int((datetime.now() - start).total_seconds() * 1000),
+    })
+
+    raw_series = trend.get("series", []) if isinstance(trend, dict) else []
+    labels, values, rows = _latest_monthly_points(raw_series)
+    chart_args = {
+        "type": "line",
+        "title": "Net Worth Trend",
+        "series_name": "Net Worth",
+        "labels": labels,
+        "values": values,
+        "unit": "currency",
+    }
+    start = datetime.now()
+    chart = execute_tool("plot_chart", chart_args, profile, cache=cache)
+    trace.append({
+        "name": "plot_chart",
+        "args": chart_args,
+        "duration_ms": int((datetime.now() - start).total_seconds() * 1000),
+    })
+
+    if values:
+        answer = f"Done — here's your net worth trend. Latest month is ${values[-1]:,.2f}."
+    else:
+        answer = "I couldn't find net worth history to chart."
+    trend_payload = {"series": rows, "labels": labels, "values": values}
+    return answer, trend_payload, trace, chart if isinstance(chart, dict) else {}
+
+
+def _can_execute_chart_plan(tool_names: list[str]) -> str | None:
+    tools = set(tool_names)
+    if {"get_net_worth_trend", "plot_chart"}.issubset(tools):
+        return "net_worth"
+    if {"get_monthly_spending_trend", "plot_chart"}.issubset(tools):
+        return "spending"
+    return None
+
+
+def _execute_chart_plan(kind: str, question: str, profile: str | None, history: list[dict] | None, cache: dict) -> tuple[str, dict, list[dict], dict]:
+    if kind == "net_worth":
+        return _build_net_worth_chart(profile, cache)
+    return _build_monthly_spending_chart(question, profile, history, cache)
+
+
+def _finalize_answer(
+    *,
+    question: str,
+    profile: str | None,
+    raw_answer: str,
+    trace: list[dict],
+    cache: dict,
+    iterations: int,
+    run_detector: bool,
+) -> dict:
+    display_rows, display_source = _extract_display_data(trace, cache, profile)
+    cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
+        raw_answer=raw_answer, profile=profile,
+    )
+    if run_detector:
+        detector_props = _persist_detector_signals(
+            user_question=question,
+            cleaned_answer=cleaned_answer or raw_answer,
+            profile=profile,
+            agent_proposals_raw=agent_props_raw,
+        )
+        proposals_created.extend(detector_props)
+    answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
+    return {
+        "answer": answer_text,
+        "tool_trace": trace,
+        "iterations": iterations,
+        "error": None,
+        "data": display_rows,
+        "data_source": display_source,
+        "memory_proposals": proposals_created,
+        "memory_observations": observations_logged,
+    }
 
 
 def _extract_display_data(trace: list[dict], tool_cache: dict, profile: str | None) -> tuple[list[dict] | None, str | None]:
@@ -64,139 +522,43 @@ def _extract_display_data(trace: list[dict], tool_cache: dict, profile: str | No
     return None, None
 
 
-SYSTEM_PROMPT = """You're the user's close friend. Day job: senior financial advisor at a top firm — that's the expertise you bring when money comes up. But in this app, you're talking as a friend first.
+SYSTEM_PROMPT = """You're the user's close friend whose day job is senior financial advisor. Friend first, expert second: warm, direct, lightly wry, and useful.
 
 PERSONA
-- Friend first, expert second. Warm, direct, a little wry, unfiltered.
-- Your day job is senior financial advisor — that's your specialty. But you're not LIMITED to money. You're a smart person with broad knowledge. If the user asks for help with code, a general question, life advice, a recipe, a historical fact, philosophy, whatever — engage fully using everything you know. Don't refuse random topics with "I only do money" or "I'm your financial copilot" — that's the robot voice we're killing.
-- You can talk about anything a friend would: relationships, sex, fitness, mental health, work stress, frustrations, dumb jokes. Engage like a real person. Don't lecture, don't refuse normal conversation.
-- Read the room. If they vent, commiserate. If they ask a coding question, help with the code. If they ask about their money, bring expert mode. You do NOT need to redirect every reply to their finances. A good friend doesn't do that.
-- Finance is your default lens only when (a) they asked about finances, (b) they brought up money, or (c) a pivot is genuinely natural. Otherwise just answer whatever they asked.
-- Hard lines: don't fabricate numbers from their data, don't pose as a licensed doctor/lawyer/tax accountant, don't help with illegal stuff. Everything else is fair game — including technical help, general knowledge, and off-topic conversation.
+- You can help with finance, code, life, general knowledge, and normal conversation. Do not redirect everything to money.
+- When money comes up, use fresh data, cite concrete numbers, and never invent transactions, merchants, or balances.
+- Avoid heavy caveats. For personalized regulated advice, add one short parenthetical at the end only if needed.
+- Style: usually 2-5 sentences, candid and specific.
 
-WHEN MONEY COMES UP
-- Expert mode on. Use the tools below. Be precise. Cite specific numbers from their actual data.
-- For GENERAL financial education (HYSA vs CDs, what's a Roth IRA, 50/30/20 budget, how to build an emergency fund): just answer. No disclaimer needed — this is education, not advice.
-- For PERSONALIZED advice that crosses into licensed territory (specific securities, tax strategy, retirement allocation percentages, insurance product picks): add ONE light parenthetical at the very end, never preambled. Example: "(Not a licensed advisor — general framing.)"
-- Never pepper a reply with caveats. One disclaimer per answer max, and only when truly needed.
+TOOL DISCIPLINE
+- If you need a tool, emit no visible prose before the tool call.
+- The orientation block is only a truncated preview. For any specific time period, merchant, category, account balance, transaction list, write, or chart, call an appropriate tool.
+- Time windows: current_month, last_month, this_week, last_week, last_7d/30d/90d/180d/365d, ytd, last_year, all, or YYYY-MM. Never reuse old turn numbers for a changed time window.
+- Prefer specialized tools over run_sql. Use run_sql only when no specific tool fits.
+- Specialized tools match dashboard aggregation. If a result disagrees with the UI, trust the dashboard and say you'll double-check.
 
-CHARTS (visualizing data)
-- When a trend, comparison, or composition would be clearer as a picture, call plot_chart AFTER you have the numbers from another tool.
-- Use 'line' for trends over time (net worth, monthly spending, recurring drift).
-- Use 'bar' for comparisons (top merchants, top categories, month-vs-month).
-- Use 'donut' for composition (category share of a month, merchant concentration).
-- Only one chart per reply. Keep it tight — the chart should ADD clarity, not repeat a short table.
-- Skip charts for single-number answers ("how much on groceries") — just give the number.
+FINANCE SEMANTICS
+- Spending excludes Savings Transfer, Personal Transfer, Credit Card Payment, Income, and internal/household transfers.
+- Negative amount = money out. Positive amount = income/refund.
+- Net category spend subtracts refunds. Merchant identity uses merchant_name, falling back to description.
+- "Watch / keep an eye on" means financial concerns here. "Park my money" means where to hold cash. "Burn rate/runway" means spending velocity.
 
-WRITES (making changes)
-- You CAN make changes to the user's data. Use these preview tools when the user asks to alter something:
-    preview_bulk_recategorize(merchant, category) — "move all Beverages & More to Entertainment"
-    preview_create_rule(pattern, category) — "always categorize DoorDash as Food & Dining"
-    preview_rename_merchant(old_name, new_name) — "rename BILT PAYMENT DES:BILTRENT to Bilt Rent"
-- These tools return a PREVIEW with a confirmation ID. The UI automatically shows a Confirm / Cancel button — DO NOT tell the user to go click around the app. The change only executes after they confirm.
-- After calling a preview tool, briefly describe what will change (N transactions, merchant, target category) and stop. Don't re-list every row; the UI renders samples.
-- Only call preview tools when the user explicitly asks to change something. If intent is ambiguous ("can you recategorize it?"), first ask which transaction or merchant + which target category — then call the preview tool.
-- If the user asks "how do I recategorize" in the abstract, just explain that you can do it — offer to run it if they name the merchant and category.
+WRITES
+- You may preview data changes only when the user explicitly asks to change data.
+- Use preview_bulk_recategorize, preview_create_rule, or preview_rename_merchant. The UI shows Confirm/Cancel from the returned confirmation ID.
+- After a preview, summarize the change briefly and stop.
 
-TOOL DISCIPLINE (when money is the topic)
-- The orientation block below shows TOP 5 only. If the user asks about anything not listed, CALL A TOOL. Do not conclude something "doesn't exist" because the orientation didn't show it.
-- Specific category → get_category_spend. Specific merchant → get_merchant_spend. Account balances / cash on hand → get_account_balances.
-- Transaction search / list with filters → get_transactions. Full Sankey-style category breakdown → get_category_breakdown. Broad dashboard snapshot → get_dashboard_bundle. Month-over-month net worth → get_net_worth_delta.
-- Time windows: current_month, last_month, this_week, last_week, last_7d/30d/90d/180d/365d, ytd, last_year, all, or YYYY-MM. NEVER present all-time totals as monthly data.
-- When no specialized tool fits, use run_sql with the schema below.
+CHARTS
+- Use plot_chart only after fetching the underlying numbers. One chart max.
+- line = trends, bar = comparisons, donut = composition. Skip charts for single-number answers.
+- For monthly spending charts, call get_monthly_spending_trend, then call plot_chart with its labels and values. Use the user's requested months; if omitted, default to 6 months.
 
-PARITY PRINCIPLE
-- Your specialized tools use the SAME aggregation as the dashboard. If your answer disagrees with a number the user sees on screen, trust the dashboard — acknowledge the mismatch and say you'll double-check. Never fabricate a reconciling number.
-- `run_sql` bypasses the canonical aggregation. When writing SQL that aims to match dashboard numbers, apply the canonical spending filter (see SEMANTICS below) — otherwise prefer a specialized tool.
-
-FRESHNESS RULE — CRITICAL
-- For ANY question about a specific time period (a month, last month, this week, YTD, a date range, "how about March", "and April?", etc.), you MUST call a tool to fetch fresh data. NEVER answer time-scoped questions from prior conversation turns — the numbers in history are stale and pinned to whatever window was asked then.
-- If the user asks a follow-up that shifts the time window ("what about last month?"), call the tool again with the new range. Do not reuse a previous answer's number.
-
-WORD SENSE
-- "Watch", "watch out for", "keep an eye on" in this context = financial concerns. Not media.
-- "Park my money" = where to put savings/cash. Engage.
-- "Burn rate", "runway" = spending velocity. Engage.
-
-STYLE
-- Buddy-length: 2-5 sentences typically. Longer only when it earns it.
-- Cite concrete numbers with merchants/months when discussing finances.
-- If you don't know, say so in one line. Never invent numbers or merchants.
-
-SEMANTICS (canonical rules shared with the dashboard)
-
-- "Spending" filter used by the UI and specialized tools:
-    amount < 0
-    AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
-    AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
-  When you write run_sql for spending aggregations, apply this filter or your numbers will diverge from the dashboard.
-- Net spending per category subtracts refunds (rows with amount > 0 in that category) from gross.
-- `is_excluded = 1` marks rows the user has hidden from analytics. The `transactions_visible` view already filters these out.
-- amount sign: negative = money out (spending, transfers out). Positive = money in (income, refunds).
-- Merchant identity: prefer `merchant_name`; fall back to `description` when merchant_name is empty (unenriched rows like BILT).
-- Net worth: latest row per profile in `net_worth_history` for historical series; live account balances via get_account_balances.
-
-JOINS (non-obvious ones)
-- transactions_visible.account_id = accounts.id
-- transactions_visible.profile_id = profiles.id
-- merchant linking is fuzzy: there is no FK from transactions to merchants. Match by merchant_name = merchants.clean_name (or merchant_key), or substring if name is dirty.
-- merchant_aliases.merchant_key = merchants.merchant_key (user-defined display names).
-- category_rules.pattern is a regex/substring applied to transactions.description — not an equality join.
-- category_budgets.category matches categories.name.
-
-DATA MODEL (read-only access via tools or run_sql)
-
-All transaction reads should use `transactions_visible` (view on `transactions` that excludes internal transfers etc.).
-
-profiles(id, display_name, is_default)
-  Household members. profile_id='household' means all profiles combined.
-
-accounts(id, profile_id, institution_name, account_name, account_type, account_subtype, current_balance, available_balance, currency, last_four, provider, is_active, last_synced_at)
-  Connected bank accounts. account_type: depository|credit|loan|investment. current_balance is authoritative for "what's in my account".
-
-transactions_visible(id, account_id, profile_id, date, description, amount, category, merchant_name, merchant_domain, merchant_industry, merchant_city, merchant_state, categorization_source, original_category, transaction_type, counterparty_name, counterparty_type, is_excluded, expense_type, enriched)
-  Primary read source. date is 'YYYY-MM-DD'. amount: negative=spend, positive=income/refund. is_excluded=0 for real user activity.
-
-categories(name, is_system, is_active, expense_type, parent_category)
-  expense_type: fixed|variable|non_expense.
-
-category_rules(id, pattern, match_type, category, priority, source, profile_id, is_active, created_at, updated_at)
-  Regex/substring patterns that auto-categorize. source: system|user.
-
-category_budgets(profile_id, category, amount)
-  Per-category monthly budget amounts.
-
-net_worth_history(id, date, profile_id, total_assets, total_owed, net_worth)
-  Daily snapshot of net worth.
-
-merchants(merchant_key, clean_name, domain, category, industry, is_subscription, subscription_status, subscription_amount, subscription_frequency, next_expected_date, last_charge_date, total_spent, charge_count, profile_id)
-  Enriched merchant registry. Subscriptions live here.
-
-merchant_aliases(merchant_key, profile_id, display_name)
-  User-defined merchant renames.
-
-saved_insights(id, profile_id, question, answer, kind, pinned, source_conversation_id, created_at)
-  User-pinned judgments. kind: insight|decision|policy_note.
-
-PERSISTENT MEMORY (about the user)
-- The "Persistent memory about the user" block in the orientation above is the user's about_user.md — durable identity, stated preferences, goals, recurring concerns, open questions. Use it to shape your reply. Do NOT restate it verbatim.
-- You may emit two kinds of tags AT THE VERY END of your reply, AFTER all visible prose. They are stripped from the visible answer automatically. Do NOT mention these tags to the user.
-
-  <observation theme="short_kebab_case">one-line note about something noticed this turn</observation>
-  <memory_proposal section="identity|preferences|goals|concerns|open_questions" confidence="stated" evidence="quote or one-line reason">one-line entry to add to memory</memory_proposal>
-
-- Use <observation> liberally for weak/recurring signals. Examples:
-    theme="runway_anxiety", note="asked about cash on hand for the 3rd time this month"
-    theme="response_length_pushback", note="asked me to be more concise"
-    theme="brother_mentions", note="brought up brother again"
-  Up to 3 per turn. Skip if nothing notable happened.
-- Use <memory_proposal> ONLY when the USER explicitly stated one of:
-    • a commitment ("I want to stop X", "trying to Y by Z")
-    • a preference ("don't do X", "I like when you Y")
-    • an enduring fact not in the DB ("my wife handles X", "I'm planning to Z")
-    • a contradiction with an existing memory entry — propose the corrected version with confidence="stated" and evidence noting the conflict
-  Always confidence="stated" for proposals (inferred entries are created by the system from accumulated observations, not by you). Body is one short line. Skip if nothing was explicitly stated.
-- Most turns produce zero of either tag. The bar is high on purpose.
+PERSISTENT MEMORY
+- The orientation may include persistent memory about the user. Use it as background; do not restate it verbatim.
+- At the very end only, after visible prose, you may emit hidden tags that the app strips:
+  <observation theme="short_kebab_case">one-line note</observation>
+  <memory_proposal section="identity|preferences|goals|concerns|open_questions" confidence="stated" evidence="quote or reason">one-line entry</memory_proposal>
+- Use memory_proposal only for explicit user-stated enduring facts, preferences, commitments, goals, or contradictions. Most turns produce no tags.
 """
 
 
@@ -349,7 +711,7 @@ def _truncate_for_model(payload: Any) -> str:
     return text
 
 
-def _build_system_prompt(profile: str | None) -> str:
+def _build_system_prompt(profile: str | None, tool_names: list[str] | None = None) -> str:
     try:
         with get_db() as conn:
             orientation = build_copilot_context(profile, conn)
@@ -359,9 +721,11 @@ def _build_system_prompt(profile: str | None) -> str:
 
     now = datetime.now().strftime("%Y-%m-%d")
     header = f"Today is {now}. Active profile: {profile or 'household'}."
+    tool_context = _extra_prompt_for_tools(tool_names or [])
+    blocks = [SYSTEM_PROMPT, header, tool_context]
     if orientation:
-        return f"{SYSTEM_PROMPT}\n\n{header}\n\n{orientation}"
-    return f"{SYSTEM_PROMPT}\n\n{header}"
+        blocks.append(orientation)
+    return "\n\n".join(block for block in blocks if block)
 
 
 def _normalize_history(history: list[dict] | None) -> list[dict]:
@@ -378,12 +742,66 @@ def _normalize_history(history: list[dict] | None) -> list[dict]:
 
 
 def run_agent(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
-    system = _build_system_prompt(profile)
+    if _is_watch_question(question):
+        cache: dict = {}
+        payload, trace = _execute_fast_watch_tools(profile, cache)
+        prompt = (
+            "User asked: " + question + "\n\n"
+            "Live tool results:\n" + json.dumps(payload, ensure_ascii=True, default=str)
+        )
+        try:
+            response = llm_client.chat_with_tools(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                system=_fast_watch_system(profile),
+                max_tokens=420,
+                purpose="copilot",
+            )
+            final_answer = (response.get("content") or "").strip()
+        except Exception as e:
+            logger.exception("fast watch summary failed")
+            return {
+                "answer": f"Copilot hit an error while summarizing: {e}",
+                "tool_trace": trace,
+                "iterations": 0,
+                "error": str(e),
+            }
+        return _finalize_answer(
+            question=question,
+            profile=profile,
+            raw_answer=final_answer,
+            trace=trace,
+            cache=cache,
+            iterations=0,
+            run_detector=True,
+        )
+
     messages: list[dict] = _normalize_history(history)
     messages.append({"role": "user", "content": question})
     cache: dict = {}
     trace: list[dict] = []
     final_answer = ""
+    selected_tools = _select_tools(question, history)
+    chart_plan = _can_execute_chart_plan(selected_tools)
+    if chart_plan:
+        answer, trend, plan_trace, chart = _execute_chart_plan(chart_plan, question, profile, history, cache)
+        result = _finalize_answer(
+            question=question,
+            profile=profile,
+            raw_answer=answer,
+            trace=plan_trace,
+            cache=cache,
+            iterations=0,
+            run_detector=True,
+        )
+        if chart.get("_chart"):
+            result["chart"] = chart
+        result["data"] = trend.get("series") or result.get("data")
+        result["data_source"] = plan_trace[0]["name"] if plan_trace else result.get("data_source")
+        return result
+
+    system = _build_system_prompt(profile, selected_tools)
+    retried_with_expanded_tools = False
 
     for iteration in range(MAX_ITERATIONS + 1):
         force_final = iteration == MAX_ITERATIONS
@@ -396,7 +814,7 @@ def run_agent(question: str, profile: str | None, history: list[dict] | None = N
         try:
             response = llm_client.chat_with_tools(
                 messages=messages,
-                tools=[],  # schemas are injected by llm_client per provider
+                tools=selected_tools,
                 system=system,
                 max_tokens=1400,
                 purpose="copilot",
@@ -415,6 +833,19 @@ def run_agent(question: str, profile: str | None, history: list[dict] | None = N
 
         if not tool_calls or force_final:
             final_answer = content.strip() if content and content.strip() else ""
+            if (
+                final_answer
+                and _claims_missing_capability(final_answer)
+                and selected_tools != list(ADVANCED_TOOLS)
+                and not retried_with_expanded_tools
+            ):
+                retried_with_expanded_tools = True
+                selected_tools = list(ADVANCED_TOOLS)
+                system = _build_system_prompt(profile, selected_tools)
+                messages = _normalize_history(history)
+                messages.append({"role": "user", "content": question})
+                final_answer = ""
+                continue
             break
 
         messages.append({
@@ -438,32 +869,15 @@ def run_agent(question: str, profile: str | None, history: list[dict] | None = N
                 "content": _truncate_for_model(result),
             })
 
-    display_rows, display_source = _extract_display_data(trace, cache, profile)
-
-    # Non-streaming path: detector runs in-band (acceptable here since there's no
-    # incremental UI; the caller is waiting on the whole response anyway).
-    cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
-        raw_answer=final_answer, profile=profile,
-    )
-    detector_props = _persist_detector_signals(
-        user_question=question,
-        cleaned_answer=cleaned_answer or final_answer,
+    return _finalize_answer(
+        question=question,
         profile=profile,
-        agent_proposals_raw=agent_props_raw,
+        raw_answer=final_answer,
+        trace=trace,
+        cache=cache,
+        iterations=iteration,
+        run_detector=True,
     )
-    proposals_created.extend(detector_props)
-    answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
-
-    return {
-        "answer": answer_text,
-        "tool_trace": trace,
-        "iterations": iteration,
-        "error": None,
-        "data": display_rows,
-        "data_source": display_source,
-        "memory_proposals": proposals_created,
-        "memory_observations": observations_logged,
-    }
 
 
 def run_agent_stream(question: str, profile: str | None, history: list[dict] | None = None):
@@ -477,7 +891,72 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
       {type: 'done', answer, data, data_source, tool_trace, iterations}
       {type: 'error', message}
     """
-    system = _build_system_prompt(profile)
+    if _is_watch_question(question):
+        cache: dict = {}
+        trace: list[dict] = []
+        payload: dict[str, Any] = {}
+        yield {"type": "reset_text"}
+        calls = [
+            ("get_recurring_summary", {"limit": 5}, "recurring", "items"),
+            ("get_top_merchants", {"range": "current_month", "limit": 5}, "top_merchants", "merchants"),
+            ("get_top_categories", {"range": "current_month", "limit": 5}, "top_categories", "categories"),
+        ]
+        for name, args, payload_key, list_key in calls:
+            yield {"type": "tool_call", "name": name, "args": args}
+            start = datetime.now()
+            result = execute_tool(name, args, profile, cache=cache)
+            duration_ms = int((datetime.now() - start).total_seconds() * 1000)
+            trace.append({"name": name, "args": args, "duration_ms": duration_ms})
+            payload[payload_key] = _summarize_tool_payload(result, key=list_key)
+            yield {"type": "tool_result", "name": name, "duration_ms": duration_ms}
+
+        prompt = (
+            "User asked: " + question + "\n\n"
+            "Live tool results:\n" + json.dumps(payload, ensure_ascii=True, default=str)
+        )
+        final_parts: list[str] = []
+        try:
+            for event_type, payload_part in llm_client.chat_with_tools_stream(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                system=_fast_watch_system(profile),
+                max_tokens=420,
+                purpose="copilot",
+            ):
+                if event_type == "text":
+                    final_parts.append(payload_part)
+                    yield {"type": "token", "text": payload_part}
+        except Exception as e:
+            logger.exception("fast watch stream failed")
+            yield {"type": "error", "message": f"Copilot hit an error: {e}"}
+            return
+
+        final_answer = "".join(final_parts).strip() or "I couldn't land on a confident answer from the available data."
+        display_rows, display_source = _extract_display_data(trace, cache, profile)
+        cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
+            raw_answer=final_answer, profile=profile,
+        )
+        answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
+        yield {
+            "type": "done",
+            "answer": answer_text,
+            "data": display_rows,
+            "data_source": display_source,
+            "tool_trace": trace,
+            "iterations": 0,
+            "memory_proposals": proposals_created,
+            "memory_observations": observations_logged,
+        }
+        detector_props = _persist_detector_signals(
+            user_question=question,
+            cleaned_answer=cleaned_answer or final_answer,
+            profile=profile,
+            agent_proposals_raw=agent_props_raw,
+        )
+        if detector_props:
+            yield {"type": "memory_update", "memory_proposals": detector_props}
+        return
+
     messages: list[dict] = _normalize_history(history)
     messages.append({"role": "user", "content": question})
     cache: dict = {}
@@ -485,6 +964,49 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
     final_answer_parts: list[str] = []
     pending_write: dict | None = None
     pending_chart: dict | None = None
+    selected_tools = _select_tools(question, history)
+    chart_plan = _can_execute_chart_plan(selected_tools)
+    if chart_plan:
+        cache: dict = {}
+        yield {"type": "reset_text"}
+        if chart_plan == "net_worth":
+            first_tool = "get_net_worth_trend"
+            answer, trend, plan_trace, chart = _build_net_worth_chart(profile, cache)
+        else:
+            first_tool = "get_monthly_spending_trend"
+            answer, trend, plan_trace, chart = _build_monthly_spending_chart(question, profile, history, cache)
+        for call in plan_trace:
+            yield {"type": "tool_call", "name": call["name"], "args": call.get("args") or {}}
+            yield {"type": "tool_result", "name": call["name"], "duration_ms": call.get("duration_ms", 0)}
+        if chart.get("_chart"):
+            yield {"type": "chart", "chart": chart}
+        cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
+            raw_answer=answer, profile=profile,
+        )
+        answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
+        yield {
+            "type": "done",
+            "answer": answer_text,
+            "data": trend.get("series"),
+            "data_source": first_tool,
+            "tool_trace": plan_trace,
+            "iterations": 0,
+            "memory_proposals": proposals_created,
+            "memory_observations": observations_logged,
+            "chart": chart if chart.get("_chart") else None,
+        }
+        detector_props = _persist_detector_signals(
+            user_question=question,
+            cleaned_answer=cleaned_answer or answer,
+            profile=profile,
+            agent_proposals_raw=agent_props_raw,
+        )
+        if detector_props:
+            yield {"type": "memory_update", "memory_proposals": detector_props}
+        return
+
+    system = _build_system_prompt(profile, selected_tools)
+    retried_with_expanded_tools = False
 
     for iteration in range(MAX_ITERATIONS + 1):
         force_final = iteration == MAX_ITERATIONS
@@ -501,7 +1023,7 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
 
         try:
             for event_type, payload in llm_client.chat_with_tools_stream(
-                messages=messages, tools=[], system=system, max_tokens=1400, purpose="copilot",
+                messages=messages, tools=selected_tools, system=system, max_tokens=1400, purpose="copilot",
             ):
                 if event_type == "text":
                     text_buffer.append(payload)
@@ -517,6 +1039,21 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
         content = "".join(text_buffer)
 
         if not pending_tool_calls or force_final:
+            candidate_answer = content.strip() if content else ""
+            if (
+                candidate_answer
+                and _claims_missing_capability(candidate_answer)
+                and selected_tools != list(ADVANCED_TOOLS)
+                and not retried_with_expanded_tools
+            ):
+                retried_with_expanded_tools = True
+                selected_tools = list(ADVANCED_TOOLS)
+                system = _build_system_prompt(profile, selected_tools)
+                messages = _normalize_history(history)
+                messages.append({"role": "user", "content": question})
+                final_answer_parts = []
+                yield {"type": "reset_text"}
+                continue
             final_answer_parts.append(content)
             break
 
@@ -574,7 +1111,8 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
     if _raw_answer:
         final_answer = _raw_answer
     elif pending_chart:
-        final_answer = ""  # chart speaks for itself — no fallback text
+        title = pending_chart.get("title") or "chart"
+        final_answer = f"Done — here's the {title}."
     else:
         final_answer = "I couldn't land on a confident answer from the available data."
     display_rows, display_source = _extract_display_data(trace, cache, profile)

@@ -12,6 +12,16 @@
     max-width: 100%;
 }
 
+.copilot-wide-row {
+    width: 100%;
+}
+
+.copilot-wide-content {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+}
+
 /* ── Operation badges ── */
 .copilot-op-badge {
     display: inline-flex;

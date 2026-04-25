@@ -53,6 +53,11 @@ def _month_bounds(year: int, month: int) -> tuple[str, str]:
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
 
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    idx = year * 12 + (month - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+
 def _resolve_range(token: str | None) -> tuple[str | None, str | None, str]:
     """
     Translate a range token to (start_iso_date, end_iso_date, label).
@@ -337,6 +342,68 @@ def _t_get_net_worth_trend(args: dict, profile: str | None, conn) -> Any:
 
     limit = int(args.get("limit") or 24)
     return {"interval": interval, "range": label, "series": series[-limit:]}
+
+
+def _t_get_monthly_spending_trend(args: dict, profile: str | None, conn) -> Any:
+    """
+    Monthly spending trend for charting. Uses canonical spending semantics and
+    optionally narrows to one category.
+    """
+    try:
+        months = max(1, min(int(args.get("months") or 6), 36))
+    except (TypeError, ValueError):
+        months = 6
+    category = (args.get("category") or "").strip()
+
+    now = datetime.now()
+    month_keys: list[str] = []
+    bounds: list[tuple[str, str, str]] = []
+    for offset in range(-(months - 1), 1):
+        y, m = _shift_month(now.year, now.month, offset)
+        start, end = _month_bounds(y, m)
+        label = f"{y:04d}-{m:02d}"
+        month_keys.append(label)
+        bounds.append((label, start, end))
+
+    start_date = bounds[0][1]
+    end_date = bounds[-1][2]
+    pclause, pparams = _profile_filter(profile)
+    params: list[Any] = [start_date, end_date]
+    category_clause = ""
+    if category:
+        category_clause = " AND LOWER(category) = LOWER(?)"
+        params.append(category)
+    params.extend(pparams)
+
+    rows = conn.execute(
+        f"""
+        SELECT substr(date, 1, 7) AS month,
+               SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE -ABS(amount) END) AS total
+        FROM transactions_visible
+        WHERE date >= ? AND date <= ?
+          AND is_excluded = 0
+          AND category IS NOT NULL
+          AND category != ''
+          AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
+          AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
+          {category_clause}
+          {pclause}
+        GROUP BY month
+        ORDER BY month
+        """,
+        params,
+    ).fetchall()
+    by_month = {r["month"]: _fmt_money(r["total"]) for r in rows}
+    series = [{"month": m, "total": by_month.get(m, 0.0)} for m in month_keys]
+    return {
+        "category": category or None,
+        "months": months,
+        "start": start_date,
+        "end": end_date,
+        "series": series,
+        "labels": [s["month"] for s in series],
+        "values": [s["total"] for s in series],
+    }
 
 
 def _t_get_transactions_for_merchant(args: dict, profile: str | None, conn) -> Any:
@@ -658,6 +725,17 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_monthly_spending_trend": {
+        "fn": _t_get_monthly_spending_trend,
+        "description": "Monthly spending trend for line charts. Returns labels and values for total spending or one category over the last N calendar months including the current month.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "months": {"type": "integer", "default": 6, "description": "Number of calendar months to include, 1-36."},
+                "category": {"type": "string", "description": "Optional exact category name, e.g. 'Groceries'."},
+            },
+        },
+    },
     "get_transactions_for_merchant": {
         "fn": _t_get_transactions_for_merchant,
         "description": "Recent transactions for a specific merchant (deep drill-down).",
@@ -798,17 +876,24 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
-def tools_for_anthropic() -> list[dict]:
+def _selected_tool_items(names: list[str] | tuple[str, ...] | set[str] | None = None):
+    if not names:
+        return TOOL_REGISTRY.items()
+    wanted = set(names)
+    return [(name, spec) for name, spec in TOOL_REGISTRY.items() if name in wanted]
+
+
+def tools_for_anthropic(names: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict]:
     return [
         {"name": name, "description": spec["description"], "input_schema": spec["parameters"]}
-        for name, spec in TOOL_REGISTRY.items()
+        for name, spec in _selected_tool_items(names)
     ]
 
 
-def tools_for_ollama() -> list[dict]:
+def tools_for_ollama(names: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict]:
     return [
         {"type": "function", "function": {"name": name, "description": spec["description"], "parameters": spec["parameters"]}}
-        for name, spec in TOOL_REGISTRY.items()
+        for name, spec in _selected_tool_items(names)
     ]
 
 

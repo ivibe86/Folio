@@ -186,14 +186,31 @@ def _persistent_memory(profile: str | None, conn) -> str:
     )
 
 
-def _saved_insights(profile: str | None, conn, limit: int = 10) -> str:
+def _short_line(text: str, limit: int = 180) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _saved_insights(profile: str | None, conn, limit: int = 3) -> str:
     try:
-        rows = conn.execute(
+        pinned = conn.execute(
             """
             SELECT question, answer, kind, pinned
             FROM saved_insights
             WHERE (? IS NULL OR profile_id = ? OR profile_id IS NULL)
-            ORDER BY pinned DESC, created_at DESC
+              AND pinned = 1
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            (profile, profile),
+        ).fetchall()
+        recent = conn.execute(
+            """
+            SELECT question, answer, kind, pinned
+            FROM saved_insights
+            WHERE (? IS NULL OR profile_id = ? OR profile_id IS NULL)
+              AND (pinned IS NULL OR pinned = 0)
+            ORDER BY created_at DESC
             LIMIT ?
             """,
             (profile, profile, limit),
@@ -201,13 +218,15 @@ def _saved_insights(profile: str | None, conn, limit: int = 10) -> str:
     except Exception:
         logger.debug("insights lookup failed", exc_info=True)
         return ""
+    rows = list(pinned) + list(recent)
     if not rows:
         return ""
     lines = []
     for r in rows:
         tag = "[pinned]" if r["pinned"] else f"[{r['kind']}]"
-        lines.append(f"- {tag} Q: {r['question']}  A: {r['answer']}")
-    return "Saved insights (more via search_saved_insights):\n" + "\n".join(lines)
+        answer = _short_line(r["answer"] or r["question"])
+        lines.append(f"- {tag} {answer}")
+    return "Saved insights (compact; more via search_saved_insights):\n" + "\n".join(lines)
 
 
 def build_copilot_context(profile: str | None, conn) -> str:

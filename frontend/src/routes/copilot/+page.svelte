@@ -781,13 +781,13 @@
             <div bind:this={chatContainer} class="flex-1 overflow-y-auto space-y-3.5 pr-2 mb-4" style="scrollbar-width: thin">
                 {#each messages as msg, i}
                     <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'} fade-in" style="animation-delay: {Math.min(i * 40, 240)}ms">
-                        <div class="max-w-[90%] {msg.role === 'user' ? 'order-2' : ''}">
+                        <div class="max-w-[90%] {msg.role === 'user' ? 'order-2' : ''}" class:w-full={msg.role === 'assistant' && (msg.chart || (msg.data && msg.data.length > 0))}>
                             {#if msg.role === 'assistant'}
-                                <div class="flex items-start gap-2.5">
+                                <div class="flex items-start gap-2.5" class:copilot-wide-row={msg.chart || (msg.data && msg.data.length > 0)}>
                                     <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5" style="background: var(--accent-soft)">
                                         <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">auto_awesome</span>
                                     </div>
-                                    <div class="copilot-msg-container">
+                                    <div class="copilot-msg-container" class:copilot-wide-content={msg.chart || (msg.data && msg.data.length > 0)}>
                                         {#if msg.operation === 'write_preview'}
                                             <div class="copilot-op-badge copilot-op-write">
                                                 <span class="material-symbols-outlined text-[12px]">edit</span>
@@ -895,11 +895,11 @@
                                         {/if}
 
                                         {#if msg.tool_trace && msg.tool_trace.length > 0 && msg.operation !== 'streaming'}
-                                            <button class="copilot-sql-toggle" on:click={() => showSqlForMsg[i] = !showSqlForMsg[i]}>
+                                            <button class="copilot-sql-toggle" on:click={() => showSqlForMsg = { ...showSqlForMsg, ['trace_' + i]: !showSqlForMsg['trace_' + i] }}>
                                                 <span class="material-symbols-outlined text-[12px]">manage_search</span>
                                                 {showSqlForMsg['trace_' + i] ? 'Hide' : 'How I answered'} ({msg.tool_trace.length} tool{msg.tool_trace.length !== 1 ? 's' : ''})
                                             </button>
-                                            {#if showSqlForMsg[i]}
+                                            {#if showSqlForMsg['trace_' + i]}
                                                 <div class="copilot-sql-block" style="font-size: 11px; line-height: 1.6;">
                                                     {#each msg.tool_trace as t}
                                                         <div>→ <strong>{t.name}</strong>({Object.entries(t.args || {}).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ')}){t.duration_ms != null ? ` · ${t.duration_ms}ms` : ''}</div>
