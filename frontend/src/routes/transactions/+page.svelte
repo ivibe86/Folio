@@ -35,6 +35,7 @@
         { key: 'this_month', label: 'This Month' },
         { key: 'last_month', label: 'Last Month' },
         { key: 'ytd',        label: 'YTD' },
+        { key: 'custom',     label: 'Custom' },
         { key: 'all',        label: 'All Time' }
     ];
     $: activePeriodIdx = Math.max(periodOptions.findIndex(p => p.key === selectedPeriod), 0);
@@ -399,22 +400,7 @@
         return { date, spent };
     }).reverse().slice(-24);
     $: maxDailySpend = Math.max(...dailySpendBars.map(d => d.spent), 1);
-    $: topCategory = (() => {
-        const cats = {};
-        summaryTxns.filter(t => {
-            const amount = parseFloat(t.amount);
-            if (amount >= 0) return false;
-            if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
-            if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
-            return true;
-        }).forEach(t => {
-            if (t.category) {
-                cats[t.category] = (cats[t.category] || 0) + Math.abs(parseFloat(t.amount));
-            }
-        });
-        const sorted = Object.entries(cats).sort((a, b) => b[1] - a[1]);
-        return sorted[0] ? { name: sorted[0][0], total: sorted[0][1] } : null;
-    })();
+
 
     async function updateCategory(txId, newCategory, oneOff = false) {
         try {
@@ -741,6 +727,7 @@
                 </button>
             {/each}
         </div>
+        {#if selectedPeriod === 'custom'}
         <div class="month-dropdown-wrapper">
             <button
                 class="month-dropdown-trigger"
@@ -773,6 +760,7 @@
                 </div>
             {/if}
         </div>
+        {/if}
 
         <!-- Category Filter Pill -->
         <div class="relative" style="z-index: 51">
@@ -921,24 +909,25 @@
                 {@const dayIncome = txns.filter(t => parseFloat(t.amount) > 0).reduce((s, t) => s + parseFloat(t.amount), 0)}
                 {@const dayInfo = formatLedgerDay(date)}
 
+                {@const dayNet = dayIncome - daySpent}
                 <div class="tx-day-group" class:tx-day-group-separated={gi > 0}>
-                    <div class="tx-day-stamp">
-                        <strong>{dayInfo.day}</strong>
-                        <span>{dayInfo.meta}</span>
-                        {#if dayInfo.relative}<small>{dayInfo.relative}</small>{/if}
+                    <div class="tx-day-header">
+                        <div class="tx-day-header-left">
+                            <strong>{dayInfo.day}</strong>
+                            <span>{dayInfo.meta}</span>
+                            {#if dayInfo.relative}<small>{dayInfo.relative}</small>{/if}
+                        </div>
+                        <div class="tx-day-header-right">
+                            <em>{txns.length} tx</em>
+                            {#if dayNet !== 0}
+                                <span>net</span>
+                                <strong class={dayNet >= 0 ? 'tx-day-income' : 'tx-day-spend'}>
+                                    {dayNet >= 0 ? '+' : ''}{formatCurrency(dayNet, 0)}
+                                </strong>
+                            {/if}
+                        </div>
                     </div>
                     <div class="tx-day-body">
-                        <div class="tx-day-summary">
-                            <div>
-                                <em>{txns.length} tx</em>
-                                {#if dayIncome > 0}
-                                    <strong class="tx-day-income">+{formatCurrency(dayIncome, 0)}</strong>
-                                {/if}
-                                {#if daySpent > 0}
-                                    <strong class="tx-day-spend">-{formatCurrency(daySpent, 0)}</strong>
-                                {/if}
-                            </div>
-                        </div>
 
                 {#each txns as tx (tx.original_id)}
                     {@const amount = parseFloat(tx.amount)}
@@ -1091,7 +1080,6 @@
                             {/if}
                         </div>
 
-                        <!-- Zone 3: Amount (far right, terminal anchor) -->
                         <!-- Zone 3: Amount (far right, terminal anchor) -->
                         <div class="tx-zone-amount">
                             <p class="text-[13px] font-bold font-mono"

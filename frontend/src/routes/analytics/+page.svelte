@@ -22,6 +22,7 @@
     let profileSwitching = false;
     let selectedMonth = '';
     let monthPickerOpen = false;
+    let pulseExpanded = false;
     
     // iOS-style period toggle
     const analyticsPeriods = ['This Month', 'Last Month', 'Custom'];
@@ -93,6 +94,12 @@
 
     // Cancelled subscriptions dropdown state (closed by default)
     let cancelledOpen = false;
+
+    // Height of the subscriptions card — bound via bind:clientHeight.
+    // subsCollapsedHeight is frozen whenever inactive/cancelled are both closed,
+    // so the merchant list matches the subs card's natural collapsed height.
+    let subsCardHeight = 0;
+    let subsCollapsedHeight = 0;
 
     // Total historically spent on inactive subscriptions
     // Uses total_spent from backend, falls back to amount × charge_count
@@ -757,6 +764,54 @@
         return { best, worst };
     })();
 
+    // Freeze collapsed height whenever both dropdowns are closed
+    $: if (!inactiveOpen && !cancelledOpen && subsCardHeight > 0) {
+        subsCollapsedHeight = subsCardHeight;
+    }
+
+    /* ═══════════════════════════════════════
+       PER-SECTION INSIGHTS
+       ═══════════════════════════════════════ */
+    $: pulseInsight = (() => {
+        const overCards = spendingPulseCards.filter(c => c.isOver);
+        if (!overCards.length) return null;
+        const top = overCards[0];
+        return `${top.category} is ${Math.round(top.deviation)}% above its average this month`;
+    })();
+
+    $: merchantInsight = (() => {
+        if (topMerchants.length < 2 || !currentMonthSummary?.expenses) return null;
+        const n = Math.min(topMerchants.length, 3);
+        const topNTotal = topMerchants.slice(0, n).reduce((s, m) => s + m.total_spent, 0);
+        const pct = Math.round((topNTotal / currentMonthSummary.expenses) * 100);
+        if (pct < 10) return null;
+        return `Top ${n} merchants · ${pct}% of spending`;
+    })();
+
+    $: subscriptionInsight = (() => {
+        if (!inactiveRecurring.length) return null;
+        const savingsPerYear = inactiveRecurring.reduce((s, i) => s + (i.annual_cost || 0), 0);
+        if (savingsPerYear < 1) return null;
+        return `${inactiveRecurring.length} inactive · ${formatCurrency(savingsPerYear)}/yr still tracked`;
+    })();
+
+    $: momInsight = (() => {
+        if (!momDiff.length || !prevMonthData) return null;
+        const biggest = momDiff[0];
+        if (Math.abs(biggest.delta) < 5) return null;
+        const dir = biggest.delta > 0 ? 'up' : 'down';
+        return `${biggest.category} ${dir} ${formatCurrency(Math.abs(biggest.delta))} vs. ${formatMonthShort(prevMonthData.month)}`;
+    })();
+
+    $: trendsInsight = (() => {
+        if (!savingsRateTrend) return null;
+        const { currentRate, target } = savingsRateTrend;
+        const diff = Math.abs(Math.round(currentRate - target));
+        return currentRate >= target
+            ? `Current rate ${formatPercent(currentRate)} · ${diff}pp above ${target}% target`
+            : `Current rate ${formatPercent(currentRate)} · ${diff}pp below ${target}% target`;
+    })();
+
     /* ═══════════════════════════════════════
        S8: ACTIONABLE NUDGE
        ═══════════════════════════════════════ */
@@ -1095,9 +1150,8 @@
     {#if waterfallData && waterfallGeometry}
         <section class="mb-10 fade-in-up" style="animation-delay: 60ms">
             <div class="flex flex-col gap-3 mb-1 sm:flex-row sm:items-center sm:justify-between" style="position: relative; z-index: 90;">
-                <div class="flex items-center gap-2">
-                    <div class="section-accent-bar"></div>
-                    <p class="section-header">Cash Flow Waterfall</p>
+                <div class="analytics-section-header" style="margin-bottom:0">
+                    <h3 class="analytics-section-title">Cash Flow Waterfall</h3>
                 </div>
                 <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-3">
                     <!-- iOS-style period toggle (relocated from header) -->
@@ -1333,56 +1387,80 @@
     {/if}
 
     <!-- ═══════════════════════════════════════
-         TOP MERCHANTS
+         TOP MERCHANTS + RECURRING SUBSCRIPTIONS (paired)
          ═══════════════════════════════════════ -->
-    {#if topMerchants.length > 0}
-        <section class="mb-10 fade-in-up" style="animation-delay: 120ms">
-            <div class="flex items-center gap-2 mb-4">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Top Merchants</p>
+    {#if topMerchants.length > 0 || (recurringData && recurringData.items && recurringData.items.length > 0)}
+    <div class="analytics-paired-layout mb-10" class:analytics-paired-scroll={activeRecurring.length >= 6}>
+        {#if topMerchants.length > 0}
+        <section class="analytics-paired-col fade-in-up" style="animation-delay: 120ms">
+            <div class="analytics-section-header">
+                <h3 class="analytics-section-title">Top Merchants</h3>
+                {#if merchantInsight}<p class="analytics-section-context">{merchantInsight}</p>{/if}
             </div>
 
-            <div class="card" style="padding: 0; overflow: hidden">
+            <div class="card analytics-merchant-list" style="padding: 0; overflow: hidden; {activeRecurring.length >= 6 && subsCollapsedHeight > 0 ? `height: ${subsCollapsedHeight}px; overflow-y: auto;` : ''}">
+                <div class="analytics-merchant-header">
+                    <span></span>
+                    <span>Merchant</span>
+                    <span>Amount</span>
+                </div>
                 {#each topMerchants.slice(0, 8) as merchant, i}
-                    {@const maxSpend = topMerchants[0]?.total_spent || 1}
-                    {@const barPct = (merchant.total_spent / maxSpend) * 100}
-                    <div class="flex items-center gap-4 px-5 py-3" style="border-bottom: {i < Math.min(topMerchants.length, 8) - 1 ? '1px solid var(--card-border)' : 'none'}">
-                        <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
-                            style="background: color-mix(in srgb, var(--accent) 8%, transparent)">
-                            <span class="text-[11px] font-bold" style="color: var(--accent)">{i + 1}</span>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2">
-                                <p class="text-[12px] font-semibold truncate" style="color: var(--text-primary)">{merchant.name}</p>
-                                {#if merchant.industry}
-                                    <span class="text-[9px] px-1.5 py-0.5 rounded-full flex-shrink-0" style="background: var(--surface-200); color: var(--text-muted)">{merchant.industry}</span>
-                                {/if}
-                            </div>
-                            <div class="flex items-center gap-2 mt-1">
-                                <div class="flex-1 h-1 rounded-full" style="background: var(--surface-200)">
-                                    <div class="h-1 rounded-full transition-all duration-500" style="width: {barPct}%; background: var(--accent); opacity: 0.6"></div>
-                                </div>
-                                <span class="text-[9px] font-mono" style="color: var(--text-muted)">{merchant.transaction_count} txn{merchant.transaction_count !== 1 ? 's' : ''}</span>
+                    {@const barPct = (merchant.total_spent / (topMerchants[0]?.total_spent || 1)) * 100}
+                    <div class="analytics-merchant-row">
+                        <span class="analytics-merchant-rank">{String(i + 1).padStart(2, '0')}</span>
+                        <div class="analytics-merchant-body">
+                            <span class="analytics-merchant-name">{merchant.name}</span>
+                            {#if merchant.industry}
+                                <span class="analytics-merchant-caption">{merchant.industry}</span>
+                            {/if}
+                            <div class="analytics-merchant-bar-track">
+                                <div class="analytics-merchant-bar-fill" style="width: {barPct}%"></div>
                             </div>
                         </div>
-                        <p class="text-[12px] font-bold font-mono flex-shrink-0" style="color: var(--text-primary)">{formatCurrency(merchant.total_spent)}</p>
+                        <div class="analytics-merchant-right">
+                            <span class="analytics-merchant-amount">{formatCurrency(merchant.total_spent)}</span>
+                            <span class="analytics-merchant-txns">{merchant.transaction_count} txn{merchant.transaction_count !== 1 ? 's' : ''}</span>
+                        </div>
                     </div>
                 {/each}
             </div>
         </section>
-    {/if}
+        {/if}
 
-    <!-- ═══════════════════════════════════════
-         RECURRING SUBSCRIPTIONS
-         ═══════════════════════════════════════ -->
-    {#if recurringData && recurringData.items && recurringData.items.length > 0}
-        <section class="mb-10 fade-in-up" style="animation-delay: 130ms">
-            <div class="flex items-center gap-2 mb-1">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Recurring Subscriptions</p>
-                {#if unreadEventCount > 0}
-                    <span class="analytics-event-count-badge">{unreadEventCount}</span>
-                {/if}
+        {#if recurringData && recurringData.items && recurringData.items.length > 0}
+        <section class="analytics-paired-col fade-in-up" style="animation-delay: 130ms">
+            <div class="analytics-section-header" style="margin-bottom:0.75rem">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <h3 class="analytics-section-title">Recurring Subscriptions</h3>
+                    {#if unreadEventCount > 0}
+                        <span class="analytics-event-count-badge">{unreadEventCount}</span>
+                    {/if}
+                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--positive)">
+                        {recurringData.active_count || activeRecurring.length} active
+                    </span>
+                    {#if (recurringData.inactive_count || inactiveRecurring.length) > 0}
+                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--warning)">
+                            {recurringData.inactive_count || inactiveRecurring.length} inactive
+                        </span>
+                    {/if}
+                    {#if (recurringData.cancelled_count || cancelledRecurring.length) > 0}
+                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--negative)">
+                            {recurringData.cancelled_count || cancelledRecurring.length} cancelled
+                        </span>
+                    {/if}
+                    {#if (recurringData.dismissed_count || dismissedRecurring.length) > 0}
+                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--text-muted)">
+                            {recurringData.dismissed_count || dismissedRecurring.length} dismissed
+                        </span>
+                    {/if}
+                    <span class="text-[11px] font-mono" style="color: var(--text-muted)">
+                        <span class="font-bold" style="color: var(--text-primary)">{formatCurrency(recurringData.total_monthly)}/mo</span>
+                        · {formatCurrency(recurringData.total_annual)}/yr
+                    </span>
+                    {#if priceChangeCount > 0}
+                        <span class="text-[10px]" style="color: var(--negative)">{priceChangeCount} price increase{priceChangeCount !== 1 ? 's' : ''}</span>
+                    {/if}
+                </div>
                 <div class="flex items-center gap-2 ml-auto">
                     <button class="analytics-redetect-btn" on:click|stopPropagation={handleRedetectSubscriptions}
                         disabled={redetectLoading} title="Re-scan for subscriptions">
@@ -1398,35 +1476,7 @@
                     {/if}
                 </div>
             </div>
-            <div class="flex items-center gap-2 mb-2 ml-6 flex-wrap">
-                <span class="analytics-sub-summary-badge" style="--badge-color: var(--positive)">
-                    {recurringData.active_count || activeRecurring.length} active
-                </span>
-                {#if (recurringData.inactive_count || inactiveRecurring.length) > 0}
-                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--warning)">
-                        {recurringData.inactive_count || inactiveRecurring.length} inactive
-                    </span>
-                {/if}
-                {#if (recurringData.cancelled_count || cancelledRecurring.length) > 0}
-                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--negative)">
-                        {recurringData.cancelled_count || cancelledRecurring.length} cancelled
-                    </span>
-                {/if}
-                {#if (recurringData.dismissed_count || dismissedRecurring.length) > 0}
-                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--text-muted)">
-                        {recurringData.dismissed_count || dismissedRecurring.length} dismissed
-                    </span>
-                {/if}
-            </div>
-            <p class="text-[11px] mb-4 ml-6" style="color: var(--text-muted)">
-                <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(recurringData.total_monthly)}/mo</span> ·
-                <span class="font-mono" style="color: var(--text-muted)">{formatCurrency(recurringData.total_annual)}/yr</span>
-                {#if priceChangeCount > 0}
-                    · <span class="text-[10px]" style="color: var(--negative)">{priceChangeCount} price increase{priceChangeCount !== 1 ? 's' : ''}</span>
-                {/if}
-            </p>
-
-            <div class="card" style="padding: 0; overflow: hidden">
+            <div class="card" style="padding: 0; overflow: hidden" bind:clientHeight={subsCardHeight}>
                 <!-- Subscription Events / Alerts Strip -->
                 {#if subscriptionEvents.length > 0}
                     <div class="analytics-events-strip">
@@ -1470,90 +1520,55 @@
                     </div>
                 {/if}
 
-                <!-- Header -->
-                <div class="analytics-recurring-header">
-                    <span class="analytics-recurring-hcell flex-1">Merchant</span>
-                    <span class="analytics-recurring-hcell w-16 text-center">Freq</span>
-                    <span class="analytics-recurring-hcell w-20 text-right">Amount</span>
-                    <span class="analytics-recurring-hcell w-20 text-right">Annual</span>
-                    <span class="analytics-recurring-hcell w-16 text-center">Status</span>
-                    <span class="analytics-recurring-hcell w-16 text-center">Conf.</span>
-                    <span class="analytics-recurring-hcell w-8"></span>
-                </div>
-
                 <!-- Active subscriptions -->
+                <div class="analytics-sub-header">
+                    <span>Merchant</span>
+                    <span>Freq</span>
+                    <span>Amount</span>
+                    <span>Annual</span>
+                    <span>Status</span>
+                    <span></span>
+                </div>
                 {#each activeRecurring.slice(0, 10) as item, i}
-                    <div class="analytics-recurring-row" style="border-bottom: {i < Math.min(activeRecurring.length, 10) - 1 ? '1px solid color-mix(in srgb, var(--card-border) 50%, transparent)' : 'none'}">
-                        <div class="flex items-center gap-3 flex-1 min-w-0">
-                            <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                    <div class="analytics-sub-row" style="border-bottom: {i < Math.min(activeRecurring.length, 10) - 1 ? '1px solid color-mix(in srgb, var(--card-border) 50%, transparent)' : 'none'}">
+                        <div class="analytics-sub-left">
+                            <div class="analytics-sub-avatar"
                                 style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 10%, transparent)">
                                 {#if item.logo_url}
-                                    <img src={item.logo_url} alt="" class="w-5 h-5 rounded" style="object-fit: contain" />
+                                    <img src={item.logo_url} alt="" class="w-4 h-4 rounded" style="object-fit: contain" />
                                 {:else}
-                                    <span class="material-symbols-outlined text-[13px]"
+                                    <span class="material-symbols-outlined text-[12px]"
                                         style="color: {CATEGORY_COLORS[item.category] || '#627d98'}">
                                         {item.is_subscription ? 'subscriptions' : 'event_repeat'}
                                     </span>
                                 {/if}
                             </div>
-                            <div class="min-w-0">
-                                <div class="flex items-center gap-1.5">
-                                    <p class="text-[12px] font-medium truncate" style="color: var(--text-primary)">{item.clean_name || item.merchant}</p>
-                                    {#if item.matched_by === 'user' || item.confidence === 'user'}
-                                        <span class="analytics-recurring-badge-user">User</span>
-                                    {/if}
-                                </div>
-                                <div class="flex items-center gap-1.5 flex-wrap">
-                                    <span class="text-[9px]" style="color: {CATEGORY_COLORS[item.category] || 'var(--text-muted)'}">{item.category}</span>
-                                    {#if item.charge_count}
-                                        <span class="text-[9px]" style="color: var(--text-muted)">· {item.charge_count} charges</span>
-                                    {/if}
-                                    {#if item.total_spent}
-                                        <span class="text-[9px]" style="color: var(--text-muted)">· {formatCurrency(item.total_spent)} total</span>
-                                    {/if}
-                                    {#if item.last_charge}
-                                        <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
-                                    {/if}
-                                    {#if item.next_expected}
-                                        <span class="text-[9px] font-medium" style="color: var(--accent)">· next ~{formatDateWithYear(item.next_expected)}</span>
-                                    {/if}
-                                    {#if item.price_change}
+                            <div class="analytics-sub-body">
+                                <span class="analytics-sub-name">{item.clean_name || item.merchant}</span>
+                                {#if item.price_change}
+                                    <span class="analytics-sub-meta">
                                         <span class="analytics-recurring-price-change" class:price-up={item.price_change.change > 0} class:price-down={item.price_change.change < 0}
                                             title="{item.price_change.change > 0 ? 'Price increased' : 'Price decreased'}: {formatCurrency(item.price_change.previous)} → {formatCurrency(item.price_change.current)}">
                                             <span class="material-symbols-outlined text-[9px]">{item.price_change.change > 0 ? 'trending_up' : 'trending_down'}</span>
                                             {item.price_change.change > 0 ? '+' : ''}{formatCurrency(item.price_change.change)}
                                         </span>
-                                    {/if}
-                                </div>
+                                    </span>
+                                {/if}
                             </div>
                         </div>
-                        <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
-                            <span class="text-[9px] font-mono font-medium" style="color: var(--text-muted)">{item.frequency}</span>
-                        </div>
-                        <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-bold font-mono w-20 text-right" style="color: var(--text-primary)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                        <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                        <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
-                            <span class="analytics-recurring-badge-active">Active</span>
-                        </div>
-                        <div class="analytics-recurring-meta analytics-recurring-meta-confidence w-16 flex justify-center">
+                        <span class="analytics-sub-col">{item.frequency}</span>
+                        <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
+                        <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+                        <span class="analytics-sub-col analytics-sub-col-status">
                             {#if item.confidence === 'user'}
-                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
-                                    style="background: color-mix(in srgb, #8b5cf6 12%, transparent); color: #8b5cf6">
-                                    User
-                                </span>
+                                <span class="analytics-sub-dot" style="background: #8b5cf6"></span> User
                             {:else if item.confidence === 'high'}
-                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
-                                    style="background: color-mix(in srgb, var(--positive) 12%, transparent); color: var(--positive)">
-                                    High
-                                </span>
+                                <span class="analytics-sub-dot" style="background: var(--positive)"></span> High
                             {:else}
-                                <span class="text-[8px] font-bold px-1.5 py-0.5 rounded-full"
-                                    style="background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning)">
-                                    Low
-                                </span>
+                                <span class="analytics-sub-dot" style="background: var(--warning)"></span> Low
                             {/if}
-                        </div>
-                        <div class="analytics-recurring-actions w-8 flex justify-center">
+                        </span>
+                        <div class="analytics-sub-actions">
                             <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
                                 title="Not a subscription — dismiss"
                                 on:click|stopPropagation={() => handleDismissSubscription(item)}>
@@ -1595,55 +1610,35 @@
                     {#if inactiveOpen}
                         <div class="analytics-recurring-inactive-body">
                             {#each inactiveRecurring as item, i}
-                                <div class="analytics-recurring-row analytics-recurring-row-inactive" style="border-bottom: {i < inactiveRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
-                                    <div class="flex items-center gap-3 flex-1 min-w-0">
-                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                <div class="analytics-sub-row analytics-sub-row-inactive" style="border-bottom: {i < inactiveRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="analytics-sub-left">
+                                        <div class="analytics-sub-avatar"
                                             style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 6%, transparent)">
                                             {#if item.logo_url}
-                                                <img src={item.logo_url} alt="" class="w-5 h-5 rounded" style="object-fit: contain; opacity: 0.5" />
+                                                <img src={item.logo_url} alt="" class="w-4 h-4 rounded" style="object-fit: contain; opacity: 0.5" />
                                             {:else}
-                                                <span class="material-symbols-outlined text-[13px]"
+                                                <span class="material-symbols-outlined text-[12px]"
                                                     style="color: {CATEGORY_COLORS[item.category] || '#627d98'}; opacity: 0.5">
                                                     {item.is_subscription ? 'subscriptions' : 'event_repeat'}
                                                 </span>
                                             {/if}
                                         </div>
-                                        <div class="min-w-0">
-                                            <p class="text-[12px] font-medium truncate" style="color: var(--text-muted)">{item.clean_name || item.merchant}</p>
-                                            <div class="flex items-center gap-1.5 flex-wrap">
-                                                <span class="text-[9px]" style="color: var(--text-muted)">{item.category}</span>
-                                                {#if item.charge_count}
-                                                    <span class="text-[9px]" style="color: var(--text-muted)">· {item.charge_count} charges</span>
-                                                {/if}
-                                                {#if item.last_charge}
-                                                    <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
-                                                {/if}
-                                                {#if item.price_change}
-                                                    <span class="analytics-recurring-price-change" class:price-up={item.price_change.change > 0} class:price-down={item.price_change.change < 0}
-                                                        title="{item.price_change.change > 0 ? 'Price increased' : 'Price decreased'}: {formatCurrency(item.price_change.previous)} → {formatCurrency(item.price_change.current)}">
-                                                        <span class="material-symbols-outlined text-[9px]">{item.price_change.change > 0 ? 'trending_up' : 'trending_down'}</span>
-                                                        {item.price_change.change > 0 ? '+' : ''}{formatCurrency(item.price_change.change)}
-                                                    </span>
-                                                {/if}
-                                            </div>
+                                        <div class="analytics-sub-body">
+                                            <span class="analytics-sub-name" style="color: var(--text-muted)">{item.clean_name || item.merchant}</span>
                                         </div>
                                     </div>
-                                    <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
-                                        <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
-                                    </div>
-                                    <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                                    <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
-                                        <span class="analytics-recurring-badge-inactive">Inactive</span>
-                                    </div>
-                                    <div class="analytics-recurring-actions w-16 flex justify-center">
+                                    <span class="analytics-sub-col">{item.frequency}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+                                    <span class="analytics-sub-col analytics-sub-col-status">
+                                        <span class="analytics-sub-dot" style="background: var(--warning)"></span> Inactive
+                                    </span>
+                                    <div class="analytics-sub-actions" style="opacity: 0.6">
                                         <button class="analytics-recurring-action-btn analytics-recurring-cancel-btn"
                                             title="Confirm cancelled"
                                             on:click|stopPropagation={() => handleCancelSubscription(item)}>
                                             <span class="text-[8px] font-bold whitespace-nowrap">Cancel</span>
                                         </button>
-                                    </div>
-                                    <div class="analytics-recurring-actions w-8 flex justify-center">
                                         <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
                                             title="Not a subscription — dismiss"
                                             on:click|stopPropagation={() => handleDismissSubscription(item)}>
@@ -1679,41 +1674,26 @@
                     {#if cancelledOpen}
                         <div class="analytics-recurring-inactive-body">
                             {#each cancelledRecurring as item, i}
-                                <div class="analytics-recurring-row analytics-recurring-row-inactive" style="border-bottom: {i < cancelledRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
-                                    <div class="flex items-center gap-3 flex-1 min-w-0">
-                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                                <div class="analytics-sub-row analytics-sub-row-inactive" style="border-bottom: {i < cancelledRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="analytics-sub-left">
+                                        <div class="analytics-sub-avatar"
                                             style="background: color-mix(in srgb, var(--negative) 6%, transparent)">
-                                            <span class="material-symbols-outlined text-[13px]"
+                                            <span class="material-symbols-outlined text-[12px]"
                                                 style="color: var(--negative); opacity: 0.5">
                                                 cancel
                                             </span>
                                         </div>
-                                        <div class="min-w-0">
-                                            <div class="flex items-center gap-1.5">
-                                                <p class="text-[12px] font-medium truncate" style="color: var(--text-muted); text-decoration: line-through;">{item.clean_name || item.merchant}</p>
-                                                <span class="analytics-recurring-badge-cancelled">Cancelled</span>
-                                            </div>
-                                            <div class="flex items-center gap-1.5 flex-wrap">
-                                                <span class="text-[9px]" style="color: var(--text-muted)">{item.category}</span>
-                                                {#if item.last_charge}
-                                                    <span class="text-[9px]" style="color: var(--text-muted)">· last {formatDateWithYear(item.last_charge)}</span>
-                                                {/if}
-                                                {#if item.total_spent}
-                                                    <span class="text-[9px]" style="color: var(--text-muted)">· {formatCurrency(item.total_spent)} total spent</span>
-                                                {/if}
-                                            </div>
+                                        <div class="analytics-sub-body">
+                                            <span class="analytics-sub-name" style="color: var(--text-muted); text-decoration: line-through;">{item.clean_name || item.merchant}</span>
                                         </div>
                                     </div>
-                                    <div class="analytics-recurring-meta analytics-recurring-meta-frequency w-16 flex justify-center">
-                                        <span class="text-[9px] font-mono" style="color: var(--text-muted)">{item.frequency}</span>
-                                    </div>
-                                    <span class="analytics-recurring-meta analytics-recurring-meta-amount text-[12px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="analytics-recurring-meta analytics-recurring-meta-annual text-[11px] font-mono w-20 text-right" style="color: var(--text-muted)">{formatCurrency(item.annual_cost)}</span>
-                                    <div class="analytics-recurring-meta analytics-recurring-meta-status w-16 flex justify-center">
-                                        <span class="analytics-recurring-badge-cancelled">Cancelled</span>
-                                    </div>
-                                    <div class="analytics-recurring-actions w-16"></div>
-                                    <div class="analytics-recurring-actions w-8"></div>
+                                    <span class="analytics-sub-col">{item.frequency}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+                                    <span class="analytics-sub-col analytics-sub-col-status">
+                                        <span class="analytics-sub-dot" style="background: var(--negative)"></span> Cancelled
+                                    </span>
+                                    <span class="analytics-sub-col"></span>
                                 </div>
                             {/each}
                         </div>
@@ -1743,24 +1723,24 @@
                     {#if dismissedOpen}
                         <div class="analytics-recurring-inactive-body">
                             {#each dismissedRecurring as item, i}
-                                <div class="analytics-recurring-row analytics-recurring-row-inactive"
+                                <div class="analytics-sub-row analytics-sub-row-inactive"
                                     style="border-bottom: {i < dismissedRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
-                                    <div class="flex items-center gap-3 flex-1 min-w-0">
-                                        <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-                                            style="background: var(--surface-100)">
-                                            <span class="material-symbols-outlined text-[13px]"
+                                    <div class="analytics-sub-left">
+                                        <div class="analytics-sub-avatar" style="background: var(--surface-100)">
+                                            <span class="material-symbols-outlined text-[12px]"
                                                 style="color: var(--text-muted); opacity: 0.4">
                                                 visibility_off
                                             </span>
                                         </div>
-                                        <div class="min-w-0">
-                                            <p class="text-[12px] font-medium truncate" style="color: var(--text-muted)">{item.merchant}</p>
-                                            {#if item.dismissed_at}
-                                                <span class="text-[9px]" style="color: var(--text-muted)">Dismissed {formatDateWithYear(item.dismissed_at)}</span>
-                                            {/if}
+                                        <div class="analytics-sub-body">
+                                            <span class="analytics-sub-name" style="color: var(--text-muted)">{item.merchant}</span>
                                         </div>
                                     </div>
-                                    <div class="analytics-recurring-actions flex-shrink-0">
+                                    <span class="analytics-sub-col"></span>
+                                    <span class="analytics-sub-col"></span>
+                                    <span class="analytics-sub-col"></span>
+                                    <span class="analytics-sub-col"></span>
+                                    <div class="analytics-sub-actions" style="opacity: 0.6">
                                         <button class="analytics-recurring-restore-btn"
                                             on:click|stopPropagation={() => handleRestoreSubscription(item)}>
                                             <span class="material-symbols-outlined text-[12px]">undo</span>
@@ -1774,29 +1754,31 @@
                 {/if}
 
                 <!-- Summary footer -->
-                <div class="flex items-center justify-between px-5 py-3" style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
-                    <div class="flex items-center gap-2">
-                        <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">lightbulb</span>
-                        <span class="text-[11px]" style="color: var(--text-secondary)">
-                            {activeRecurring.length} active subscription{activeRecurring.length !== 1 ? 's' : ''} totaling
-                            <span class="font-bold" style="color: var(--text-primary)">{formatCurrency(recurringData.total_annual)}/yr</span>
-                            {#if inactiveRecurring.length > 0}
-                                · {inactiveRecurring.length} inactive — review for savings
-                            {/if}
-                            {#if cancelledRecurring.length > 0}
-                                · {cancelledRecurring.length} cancelled
-                            {/if}
-                            {#if activeRecurring.filter(i => i.price_change && i.price_change.change > 0).length > 0}
-                                {@const priceIncreases = activeRecurring.filter(i => i.price_change && i.price_change.change > 0)}
-                                {@const totalIncrease = priceIncreases.reduce((sum, i) => sum + i.price_change.change, 0)}
-                                · <span style="color: var(--negative)">{priceIncreases.length} recent price increase{priceIncreases.length !== 1 ? 's' : ''}</span>
-                                <span class="font-mono font-bold" style="color: var(--negative)">(+{formatCurrency(totalIncrease)}/mo)</span>
-                            {/if}
-                        </span>
-                    </div>
+                <div class="analytics-sub-footer">
+                    <span class="analytics-sub-footer-text">
+                        {activeRecurring.length} active subscription{activeRecurring.length !== 1 ? 's' : ''} totaling <strong>{formatCurrency(recurringData.total_annual)}/yr</strong>
+                        {#if inactiveRecurring.length > 0}
+                            · {inactiveRecurring.length} inactive — review for savings
+                        {/if}
+                        {#if cancelledRecurring.length > 0}
+                            · {cancelledRecurring.length} cancelled
+                        {/if}
+                        {#if activeRecurring.filter(i => i.price_change && i.price_change.change > 0).length > 0}
+                            {@const priceIncreases = activeRecurring.filter(i => i.price_change && i.price_change.change > 0)}
+                            {@const totalIncrease = priceIncreases.reduce((sum, i) => sum + i.price_change.change, 0)}
+                            · <span style="color: var(--negative)">{priceIncreases.length} recent price increase{priceIncreases.length !== 1 ? 's' : ''} (+{formatCurrency(totalIncrease)}/mo)</span>
+                        {/if}
+                    </span>
+                    {#if inactiveRecurring.length > 0}
+                        <button class="analytics-sub-footer-action" on:click|stopPropagation={() => { inactiveOpen = !inactiveOpen; }}>
+                            Review
+                        </button>
+                    {/if}
                 </div>
             </div>
         </section>
+        {/if}
+    </div>
     {/if}
 
     <!-- ═══════════════════════════════════════
@@ -1804,93 +1786,57 @@
          ═══════════════════════════════════════ -->
     {#if currentMonthSummary && spendingPulseCards.length > 0}
         <section class="mb-10 fade-in-up" style="animation-delay: 140ms">
-            <div class="flex items-center gap-2 mb-1">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Spending Pulse</p>
+            <div class="analytics-section-header">
+                <h3 class="analytics-section-title">Spending Pulse</h3>
+                <p class="analytics-section-context">You spent {formatCurrency(currentMonthSummary.expenses)} in {formatMonth(selectedMonth)} — here's what stands out.</p>
+                {#if pulseInsight}<p class="analytics-section-context">{pulseInsight}</p>{/if}
             </div>
-            <p class="text-[11px] mb-4 ml-6" style="color: var(--text-muted)">
-                You spent <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(currentMonthSummary.expenses)}</span> in {formatMonth(selectedMonth)} — here's what stands out.
-            </p>
 
             <div class="analytics-pulse-grid">
-                {#each spendingPulseCards.slice(0, 6) as card, i}
-                    {@const isClickable = true}
+                {#each (pulseExpanded ? spendingPulseCards : spendingPulseCards.slice(0, 4)) as card, i}
+                    {@const maxBar = Math.max(card.total, card.avgTotal)}
                     <button
                         on:click={() => drillIntoCategory(card.category)}
                         class="analytics-pulse-card card card-interactive"
-                        class:analytics-pulse-anomaly={card.isOver}
-                        class:analytics-pulse-under={card.isUnder}
                         class:ring-2={selectedCategory === card.category}
                         class:ring-accent={selectedCategory === card.category}
                         style="animation-delay: {i * 40}ms; --pulse-color: {card.color}">
 
-                        <div class="flex items-center justify-between mb-2">
-                            <div class="flex items-center gap-2">
-                                {#if card.isOver && !card.isPeriodic}
-                                    <span class="analytics-anomaly-badge">
-                                        <span class="material-symbols-outlined text-[11px]">warning</span>
-                                    </span>
-                                {:else if card.isOver && card.isPeriodic}
-                                    <span class="analytics-periodic-icon-badge">
-                                        <span class="material-symbols-outlined text-[11px]">event_repeat</span>
-                                    </span>
-                                {:else}
-                                    <span class="analytics-ok-badge">
-                                        <span class="material-symbols-outlined text-[11px]">check_circle</span>
-                                    </span>
-                                {/if}
-                                <span class="text-[11px] font-semibold truncate" style="color: var(--text-secondary)">{card.category}</span>
-                            </div>
+                        <div class="analytics-pulse-category">
+                            <span class="analytics-pulse-dot" style="background: {card.color}"></span>
+                            <span class="truncate">{card.category}</span>
                         </div>
 
-                        <p class="text-base font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(card.total)}</p>
+                        <p class="analytics-pulse-amount">{formatCurrency(card.total)}</p>
 
-                        <div class="mt-1.5">
+                        <div class="analytics-pulse-status" style="color: {card.isOver ? 'var(--negative)' : card.isUnder ? 'var(--positive)' : 'var(--text-muted)'}">
                             {#if card.isOver}
-                                <span class="text-[10px] font-semibold" style="color: var(--negative)">
-                                    {#if card.isPeriodic}<span class="analytics-periodic-badge" title="Periodic/seasonal expense">♻</span>{/if}
-                                    ▲ {formatPercent(Math.abs(card.deviation))}{Math.abs(card.rawDeviation) > 999 ? '+' : ''} above avg
-                                </span>
+                                ▲ {formatPercent(Math.abs(card.deviation))} above avg
                             {:else if card.isUnder}
-                                <span class="text-[10px] font-semibold" style="color: var(--positive)">
-                                    {#if card.isPeriodic}<span class="analytics-periodic-badge" title="Periodic/seasonal expense">♻</span>{/if}
-                                    ▼ {formatPercent(Math.abs(card.deviation))}{Math.abs(card.rawDeviation) > 999 ? '+' : ''} below avg
-                                </span>
+                                ▼ {formatPercent(Math.abs(card.deviation))} below avg
                             {:else}
-                                <span class="text-[10px] font-medium" style="color: var(--text-muted)">
-                                    {#if card.isPeriodic}<span class="analytics-periodic-badge" title="Periodic/seasonal expense">♻</span>{/if}
-                                    On track
-                                    {#if card.deviation !== 0}
-                                        · {card.deviation > 0 ? '▲' : '▼'}{formatPercent(Math.abs(card.deviation))}
-                                    {/if}
-                                </span>
-                            {/if}
-                            {#if card.comparisonLabel && card.isPeriodic}
-                                <span class="text-[8px] font-medium block mt-0.5" style="color: var(--text-muted); opacity: 0.7">
-                                    vs {card.comparisonLabel}
-                                </span>
+                                On track {#if card.deviation !== 0}· {card.deviation > 0 ? '▲' : '▼'}{formatPercent(Math.abs(card.deviation))}{/if}
                             {/if}
                         </div>
 
-                        <!-- Mini comparison bar: current vs avg -->
                         {#if card.avgTotal > 0}
-                            {@const maxBar = Math.max(card.total, card.avgTotal)}
-                            <div class="mt-2 flex items-center gap-1.5">
-                                <div class="flex-1 h-1 rounded-full" style="background: var(--surface-200)">
-                                    <div class="h-1 rounded-full transition-all duration-500"
-                                        style="width: {(card.total / maxBar) * 100}%; background: {card.isOver ? 'var(--negative)' : card.color}"></div>
-                                </div>
-                                <span class="text-[8px] font-mono" style="color: var(--text-muted)">avg {formatCompact(card.avgTotal)}</span>
+                            <div class="analytics-pulse-track">
+                                <div class="analytics-pulse-track-fill" style="width: {(card.total / maxBar) * 100}%"></div>
+                                <div class="analytics-pulse-track-marker" style="left: {(card.avgTotal / maxBar) * 100}%"></div>
                             </div>
+                            <div class="analytics-pulse-track-label">avg {formatCompact(card.avgTotal)}</div>
                         {/if}
                     </button>
                 {/each}
             </div>
 
-            {#if spendingPulseCards.length > 6}
-                <p class="text-[10px] mt-2 ml-6" style="color: var(--text-muted)">
-                    + {spendingPulseCards.length - 6} more categories
-                </p>
+            {#if spendingPulseCards.length > 4}
+                <button
+                    class="text-[10px] mt-3 font-medium"
+                    style="color: var(--text-muted); background: none; border: none; cursor: pointer;"
+                    on:click={() => pulseExpanded = !pulseExpanded}>
+                    {pulseExpanded ? 'Show fewer categories' : `+ ${spendingPulseCards.length - 4} more categories`}
+                </button>
             {/if}
         </section>
     {/if}
@@ -1899,9 +1845,9 @@
          S4: TRENDS & TRAJECTORY (2-panel)
          ═══════════════════════════════════════ -->
     <section class="mb-10 fade-in-up" style="animation-delay: 180ms">
-        <div class="flex items-center gap-2 mb-4">
-            <div class="section-accent-bar"></div>
-            <p class="section-header">Trends & Trajectory</p>
+        <div class="analytics-section-header">
+            <h3 class="analytics-section-title">Trends & Trajectory</h3>
+            {#if trendsInsight}<p class="analytics-section-context">{trendsInsight}</p>{/if}
         </div>
 
         <div class="analytics-two-panel">
@@ -2027,6 +1973,16 @@
                             <span class="analytics-health-sub">
                                 {formatCompact(projectedYearEnd.pessimistic)} — {formatCompact(projectedYearEnd.optimistic)} range
                             </span>
+                            {#if analyticsContext.sortedMonthly.length >= 2}
+                                {@const nets = analyticsContext.sortedMonthly.slice(-8).map(m => m.income - m.expenses - (m.external_transfers || 0))}
+                                {@const sparkMin = Math.min(...nets)}
+                                {@const sparkMax = Math.max(...nets)}
+                                {@const sparkRange = sparkMax - sparkMin || 1}
+                                {@const sparkPts = nets.map((n, i) => `${(i / Math.max(nets.length - 1, 1)) * 46},${12 - ((n - sparkMin) / sparkRange) * 10}`).join(' ')}
+                                <svg width="48" height="14" class="health-sparkline" style="margin-top: 0.375rem">
+                                    <polyline points={sparkPts} fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                                </svg>
+                            {/if}
                         {:else}
                             <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
                         {/if}
@@ -2042,6 +1998,15 @@
                             <span class="analytics-health-sub">
                                 {projectedYearEnd.remainingMonths} months left in {projectedYearEnd.currentYear}
                             </span>
+                            {#if analyticsContext.sortedMonthly.length >= 2}
+                                {@const nets = analyticsContext.sortedMonthly.slice(-6).map(m => m.income - m.expenses - (m.external_transfers || 0))}
+                                {@const maxAbs = Math.max(...nets.map(n => Math.abs(n)), 1)}
+                                <div class="health-mini-bars" style="margin-top: 0.375rem">
+                                    {#each nets as n}
+                                        <div style="height: {Math.max(Math.abs(n) / maxAbs * 12, 2)}px; background: {n >= 0 ? 'var(--positive)' : 'var(--negative)'}; opacity: 0.5; width: 5px; border-radius: 1px; align-self: flex-end;"></div>
+                                    {/each}
+                                </div>
+                            {/if}
                         {:else}
                             <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
                         {/if}
@@ -2078,6 +2043,13 @@
                                 <span class="analytics-health-value" style="color: var(--text-primary)">{incomeStability.streak} mo</span>
                             </div>
                             <span class="analytics-health-sub">consecutive income · avg {formatCompact(incomeStability.avgIncome)}/mo</span>
+                            {#if analyticsContext.sortedMonthly.length >= 2}
+                                <div class="health-streak-dots">
+                                    {#each analyticsContext.sortedMonthly.slice(-6) as m}
+                                        <span class="health-streak-dot {m.income > 0 ? 'filled' : ''}"></span>
+                                    {/each}
+                                </div>
+                            {/if}
                         {:else}
                             <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
                         {/if}
@@ -2092,9 +2064,9 @@
          ═══════════════════════════════════════ -->
     {#if momDiff.length > 0 && prevMonthData}
         <section class="mb-10 fade-in-up" style="animation-delay: 260ms">
-            <div class="flex items-center gap-2 mb-4">
-                <div class="section-accent-bar"></div>
-                <p class="section-header">Month-over-Month Changes</p>
+            <div class="analytics-section-header">
+                <h3 class="analytics-section-title">Month-over-Month Changes</h3>
+                {#if momInsight}<p class="analytics-section-context">{momInsight}</p>{/if}
             </div>
 
             <div class="mom-glass-grid">
@@ -2110,14 +2082,9 @@
                 {#each momDiff.slice(0, 8) as row}
                     {@const isPositiveChange = row.delta <= 0}
                     <div class="mom-glass-row"
-                         style="--row-tint: {isPositiveChange ? 'var(--positive)' : 'var(--negative)'};">
+                         style="--row-tint: {row.color}">
                         <div class="mom-glass-cell mom-cell-category">
-                            <div class="flex items-center gap-2">
-                                <div class="w-5 h-5 rounded-md flex items-center justify-center" style="background: color-mix(in srgb, {row.color} 10%, transparent)">
-                                    <span class="material-symbols-outlined text-[11px]" style="color: {row.color}">{row.icon}</span>
-                                </div>
-                                <span class="text-[11px] font-medium" style="color: var(--text-primary)">{row.category}</span>
-                            </div>
+                            <span class="text-[11px] font-medium" style="color: var(--text-primary)">{row.category}</span>
                         </div>
                         <span class="mom-glass-cell mom-cell-right text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(row.currentTotal)}</span>
                         <span class="mom-glass-cell mom-cell-right text-[11px] font-mono" style="color: var(--text-muted)">{formatCurrency(row.prevTotal)}</span>
@@ -2186,9 +2153,8 @@
     <details style="margin-bottom: 0;">
         <summary class="flex items-center gap-3 cursor-pointer select-none mb-3 rounded-xl transition-colors duration-150 hover:bg-[var(--surface-100)]"
             style="list-style: none;">
-            <div class="section-accent-bar"></div>
             <div class="flex-1">
-                <p class="section-header" style="margin: 0;">Monthly Data Table</p>
+                <p class="analytics-section-title" style="margin: 0;">Monthly Data Table</p>
                 <p class="text-[10px]" style="color: var(--text-muted); margin: 0;">Click to view detailed monthly breakdown</p>
             </div>
             <span class="material-symbols-outlined text-[18px] transition-transform duration-200" style="color: var(--text-primary)">expand_more</span>
