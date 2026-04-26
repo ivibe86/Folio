@@ -12,6 +12,7 @@
 
     let transactions = [];
     let summaryTransactions = [];
+    let historyTransactions = [];
     let totalCount = 0;
     let pageLimit = 50;
     let pageOffset = 0;
@@ -163,6 +164,25 @@
         subscriptionPromptFrequency = '';
     }
 
+    async function fetchTransactionHistory() {
+        let offset = 0;
+        let all = [];
+        let expectedTotal = null;
+
+        do {
+            const result = await api.getTransactions({ limit: 1000, offset });
+            const page = result.data || [];
+            all = all.concat(page);
+            expectedTotal = result.total_count ?? all.length;
+            offset += page.length;
+
+            if (page.length === 0) break;
+        } while (offset < expectedTotal);
+
+        historyTransactions = all;
+        return all;
+    }
+
     onMount(async () => {
         const handleSyncComplete = async (event) => {
             const detail = event?.detail || {};
@@ -174,8 +194,7 @@
                 await fetchTransactions();
                 await fetchSummaryTransactions();
 
-                const allResult = await api.getTransactions({ limit: 1000 });
-                const allTxns = allResult.data || [];
+                const allTxns = await fetchTransactionHistory();
                 const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
                 months = [...monthSet].sort().reverse();
                 accountNames = [...new Set(allTxns.map(t => t.account_name).filter(Boolean))].sort();
@@ -197,8 +216,7 @@
             summaryTransactions = result.data || [];
 
             // Fetch all months and accounts for filter dropdowns (lightweight metadata query)
-            const allResult = await api.getTransactions({ limit: 1000 });
-            const allTxns = allResult.data;
+            const allTxns = await fetchTransactionHistory();
             const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
             months = [...monthSet].sort().reverse();
             if (months.length > 0 && selectedCustomMonth === getCurrentMonth()) {
@@ -663,27 +681,23 @@
         return palette[Math.abs(hashString(tx.account_name || 'account')) % palette.length];
     }
 
-    function getMonthShare(tx) {
-        const amount = Math.abs(parseFloat(tx.amount || 0));
-        if (!totalSpending || amount <= 0 || NON_SPENDING_CATEGORIES.has(tx.category)) return null;
-        const pct = (amount / totalSpending) * 100;
-        return pct >= 1 || amount >= 100 ? pct : null;
-    }
-
     function getRowSignal(tx) {
         const amount = Math.abs(parseFloat(tx.amount || 0));
-        const pct = getMonthShare(tx);
         if (tx.expense_type && EXCLUDED_EXPENSE_TYPES.has(tx.expense_type)) return null;
         if (amount >= 500) return 'Large';
-        if (pct && pct >= 3) return `${pct.toFixed(1)}%`;
         return null;
     }
 
     function getMerchantStats(tx) {
         const key = getMerchantKey(tx);
-        const matches = summaryTxns
+        const sourceTxns = historyTransactions.length > 0 ? historyTransactions : summaryTxns;
+        const byId = new Map();
+        sourceTxns
             .filter(item => getMerchantKey(item) === key)
-            .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+            .forEach(item => byId.set(item.original_id || `${item.date}-${item.description}-${item.amount}`, item));
+        byId.set(tx.original_id || `${tx.date}-${tx.description}-${tx.amount}`, tx);
+
+        const matches = [...byId.values()].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
         const spentMatches = matches.filter(item => parseFloat(item.amount) < 0);
         const average = spentMatches.length
             ? spentMatches.reduce((s, item) => s + Math.abs(parseFloat(item.amount || 0)), 0) / spentMatches.length
@@ -691,6 +705,13 @@
         const amount = Math.abs(parseFloat(tx.amount || 0));
         const delta = average ? ((amount - average) / average) * 100 : 0;
         const recent = matches.filter(item => item.original_id !== tx.original_id).slice(0, 3);
+        const categoryCounts = matches.reduce((counts, item) => {
+            const category = item.category || 'Uncategorized';
+            counts[category] = (counts[category] || 0) + 1;
+            return counts;
+        }, {});
+        const dominantCategory = Object.entries(categoryCounts)
+            .sort((a, b) => b[1] - a[1])[0] || [tx.category || 'Uncategorized', 1];
         const monthsBack = [];
         const base = tx.date ? new Date(tx.date + 'T00:00:00') : new Date();
         for (let i = 5; i >= 0; i -= 1) {
@@ -706,7 +727,23 @@
             });
         }
 
-        return { visits: matches.length, average, delta, recent, months: monthsBack };
+        const activeMonths = monthsBack.filter(month => month.total > 0);
+        const looksMonthly = spentMatches.length >= 3 && activeMonths.length >= 3 && Math.abs(delta) <= 15;
+        const firstSeen = matches[matches.length - 1]?.date || '';
+        const lastSeen = matches[0]?.date || '';
+
+        return {
+            visits: matches.length,
+            average,
+            delta,
+            recent,
+            months: monthsBack,
+            dominantCategory: dominantCategory[0],
+            dominantCategoryCount: dominantCategory[1],
+            looksMonthly,
+            firstSeen,
+            lastSeen
+        };
     }
 
     function getMerchantMetaLine(tx) {
@@ -757,14 +794,14 @@
             const [result, cats, metaResult] = await Promise.all([
                 api.getTransactions({ limit: pageLimit, offset: 0 }),
                 api.getCategories(),
-                api.getTransactions({ limit: 1000 })
+                fetchTransactionHistory()
             ]);
             transactions = result.data;
             totalCount = result.total_count;
             pageOffset = 0;
             allCategories = cats;
 
-            const allTxns = metaResult.data;
+            const allTxns = metaResult;
             const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
             months = [...monthSet].sort().reverse();
             const accSet = new Set(allTxns.map(t => t.account_name).filter(Boolean));
@@ -1068,8 +1105,8 @@
                         </div>
                     </aside>
                     <div class="tx-day-body">
+                        {#if txns.length > 1}
                         <div class="tx-day-summary-strip">
-                            <span></span>
                             <div>
                                 <em>{txns.length} tx</em>
                                 <span>net</span>
@@ -1078,6 +1115,7 @@
                                 </strong>
                             </div>
                         </div>
+                        {/if}
 
                 {#each txns as tx (tx.original_id)}
                     {@const amount = parseFloat(tx.amount)}
@@ -1086,7 +1124,6 @@
                     {@const isSelected = selectedTxId === tx.original_id}
                     {@const merchantTitle = getMerchantTitle(tx)}
                     {@const rawDescriptor = getRawDescriptor(tx)}
-                    {@const monthShare = getMonthShare(tx)}
                     {@const rowSignal = getRowSignal(tx)}
                     {@const merchantStats = getMerchantStats(tx)}
                     {@const hasMerchantTrend = merchantStats.recent.length > 0 && merchantStats.months.some(m => m.total > 0)}
@@ -1264,12 +1301,9 @@
                         <div class="tx-zone-amount">
                             <div>
                                 <p class="folio-amount-compact"
-                                    style="color: {amount >= 0 ? 'var(--positive)' : 'var(--text-primary)'}">
+                                    style="color: {amount >= 0 ? 'var(--positive)' : txns.length === 1 ? 'var(--negative)' : 'var(--text-primary)'}">
                                     {amount >= 0 ? '+' : ''}{formatCurrency(amount, 2)}
                                 </p>
-                                {#if monthShare}
-                                    <small>{monthShare.toFixed(1)}% of month</small>
-                                {/if}
                             </div>
                         </div>
                     </div>
@@ -1277,23 +1311,35 @@
                     {#if isSelected}
                         <div class="tx-detail-drawer fade-in" role="presentation" on:click|stopPropagation>
                             <div class="tx-detail-pane">
-                                <h4>Details</h4>
-                                <dl class="tx-detail-kv">
-                                    <dt>Merchant</dt>
-                                    <dd>{merchantTitle}</dd>
-                                    <dt>Raw descriptor</dt>
-                                    <dd>{rawDescriptor || '—'}</dd>
-                                    <dt>Posted</dt>
-                                    <dd>{formatDate(tx.date)}</dd>
-                                    <dt>Account</dt>
-                                    <dd>{tx.account_name || 'Account'}{#if getAccountSuffix(tx)} · ••{getAccountSuffix(tx)}{/if}</dd>
-                                    <dt>Category</dt>
-                                    <dd class="tx-detail-category">
-                                        <span style="background: {CATEGORY_COLORS[tx.category] || '#627d98'}"></span>
-                                        {tx.category || 'Uncategorized'}
-                                        {#if sourceInfo}<em>{sourceInfo.label}</em>{/if}
-                                    </dd>
-                                </dl>
+                                <h4>Merchant pattern</h4>
+                                <div class="tx-merchant-intel">
+                                    <div>
+                                        <span>{merchantStats.looksMonthly ? 'Likely recurring' : 'Seen in history'}</span>
+                                        <strong>
+                                            {merchantStats.looksMonthly ? `Monthly · ${formatCurrency(merchantStats.average, 2)}` : `${merchantStats.visits} visit${merchantStats.visits === 1 ? '' : 's'}`}
+                                        </strong>
+                                    </div>
+                                    <div>
+                                        <span>Typical amount</span>
+                                        <strong>{merchantStats.average > 0 ? formatCurrency(merchantStats.average, 2) : formatCurrency(Math.abs(amount), 2)}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Category pattern</span>
+                                        <strong>{merchantStats.dominantCategory} · {merchantStats.dominantCategoryCount}/{merchantStats.visits}</strong>
+                                    </div>
+                                    {#if merchantStats.firstSeen}
+                                        <div>
+                                            <span>First seen</span>
+                                            <strong>{formatDate(merchantStats.firstSeen)}</strong>
+                                        </div>
+                                    {/if}
+                                </div>
+                                {#if rawDescriptor && rawDescriptor.toUpperCase() !== merchantTitle.toUpperCase()}
+                                    <details class="tx-raw-disclosure">
+                                        <summary>Bank statement text</summary>
+                                        <p>{rawDescriptor}</p>
+                                    </details>
+                                {/if}
                             </div>
                             <div class="tx-detail-pane">
                                 <h4>Recent at this merchant</h4>
@@ -1306,7 +1352,7 @@
                                             </div>
                                         {/each}
                                     {:else}
-                                        <p>No earlier matching transactions in this view.</p>
+                                        <p>No earlier matching transactions in your loaded history.</p>
                                     {/if}
                                     {#if hasMerchantTrend}
                                         <div class="tx-history-bars" aria-label="Merchant spending trend">
@@ -1318,7 +1364,7 @@
                                         </div>
                                     {/if}
                                     <p>
-                                        {merchantStats.visits} visit{merchantStats.visits === 1 ? '' : 's'} in the loaded view{#if merchantStats.average > 0}, average <strong>{formatCurrency(merchantStats.average, 2)}</strong>{/if}{#if merchantStats.visits > 1 && merchantStats.average > 0} — this ran <strong class={merchantStats.delta >= 0 ? 'tx-above-average' : 'tx-below-average'}>{merchantStats.delta >= 0 ? '+' : ''}{merchantStats.delta.toFixed(1)}%</strong> vs usual{/if}.
+                                        {merchantStats.visits} visit{merchantStats.visits === 1 ? '' : 's'} in history{#if merchantStats.average > 0}, average <strong>{formatCurrency(merchantStats.average, 2)}</strong>{/if}{#if merchantStats.visits > 1 && merchantStats.average > 0} · this ran <strong class={merchantStats.delta >= 0 ? 'tx-above-average' : 'tx-below-average'}>{merchantStats.delta >= 0 ? '+' : ''}{merchantStats.delta.toFixed(1)}%</strong> vs usual{/if}.
                                     </p>
                                 </div>
                             </div>

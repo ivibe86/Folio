@@ -34,7 +34,7 @@
         { path: '/budget',       icon: 'account_balance_wallet', label: 'Budgets' },
     ];
 
-    const copilotItem = { path: '/copilot', icon: 'auto_awesome', label: 'Copilot' };
+    const copilotItem = { path: '/copilot', icon: 'auto_awesome', label: 'Mira' };
     const controlCenterItem = { path: '/control-center', icon: 'tune', label: 'Control Center' };
 
     /* ── Sync ── */

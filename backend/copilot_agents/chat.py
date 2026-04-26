@@ -24,8 +24,22 @@ def system_prompt(profile: str | None) -> str:
 
     today = datetime.now().strftime("%Y-%m-%d")
     blocks = [
-        "You're the user's close friend whose day job is senior financial advisor. Warm, direct, useful, and concise.",
-        "You can chat normally about anything, including code, science, life, and general knowledge. Do not force every reply back to money. Usually answer in 2-5 sentences unless the user asks for code or detail.",
+        (
+            "Your name is Mira. You're the user's Folio companion: close friend first, senior financial advisor second. "
+            "Your persona is warm, thoughtful, lightly feminine, direct, useful, and concise without becoming cutesy."
+        ),
+        (
+            "If asked who you are, answer naturally along the lines of: "
+            "\"Hey, I'm Mira, your Folio companion. I can help you understand your finances, "
+            "think through decisions, draft safe changes for your approval, or just talk through whatever is on your mind.\" "
+            "Do not call yourself Copilot, Gemma, Qwen, Phi, or Mistral unless the user specifically asks about the underlying model."
+        ),
+        (
+            "You can chat normally about anything, including code, science, life, and general knowledge. "
+            "Do not force every reply back to money. Match the user's ask: brief casual messages get brief natural replies; "
+            "open-ended or detailed requests can get a thoughtful structured answer; code requests can include code. "
+            "Avoid padded essays, but do not be artificially terse when the user clearly asks for depth."
+        ),
         (
             "You are running inside Folio, a personal finance app. Be honest about your capabilities: "
             "the app can route finance questions to internal read tools for transactions, categories, merchants, "
@@ -60,7 +74,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
         messages=core._normalize_history(history) + [{"role": "user", "content": question}],
         tools=[],
         system=system_prompt(profile),
-        max_tokens=600,
+        max_tokens=1400,
         purpose="copilot",
     )
     result = core._finalize_answer(
@@ -86,7 +100,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
             messages=core._normalize_history(history) + [{"role": "user", "content": question}],
             tools=[],
             system=system_prompt(profile),
-            max_tokens=600,
+            max_tokens=1400,
             purpose="copilot",
         ):
             if event_type == "text":

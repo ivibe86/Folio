@@ -904,6 +904,34 @@
 }
 
 /* ── Fixed vs Variable (migrated from Analytics) ── */
+.analytics-fv-card {
+    padding: 1rem 1.5rem 1.25rem;
+}
+
+.analytics-fv-card-header {
+    display: flex;
+    justify-content: flex-end;
+    min-height: 1.25rem;
+    margin-bottom: 0.35rem;
+}
+
+.analytics-fv-reclassify-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text-muted);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.analytics-fv-reclassify-hint .material-symbols-outlined {
+    color: var(--accent);
+    font-size: 0.875rem;
+    line-height: 1;
+}
+
 .analytics-fv-split {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
@@ -918,6 +946,12 @@
     .analytics-fv-divider {
         width: 100% !important;
         height: 1px !important;
+    }
+    .analytics-fv-card-header {
+        justify-content: flex-start;
+    }
+    .analytics-fv-row-action {
+        display: none;
     }
 }
 
@@ -940,8 +974,17 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.375rem 0;
+    gap: 0.75rem;
+    min-height: 2.375rem;
+    padding: 0.375rem 0.25rem;
     border-bottom: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    transition: background var(--duration-fast) ease;
+}
+
+.analytics-fv-row:hover,
+.analytics-fv-row:focus-within {
+    background: var(--surface-100);
 }
 
 .analytics-fv-row:last-child {
@@ -961,21 +1004,64 @@
 .analytics-fv-cat-btn {
     background: none;
     border: none;
-    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0.25rem 0;
     margin: 0;
     cursor: pointer;
     text-align: left;
-    transition: opacity var(--duration-fast) ease;
-    border-bottom: 1px dashed transparent;
+    transition: color var(--duration-fast) ease;
 }
 
 .analytics-fv-cat-btn:hover {
-    opacity: 0.7;
-    border-bottom-color: var(--text-muted);
+    color: var(--text-primary);
 }
 
-.analytics-fv-cat-btn:hover span {
-    color: var(--text-primary) !important;
+.analytics-fv-cat-btn:focus-visible {
+    border-radius: 6px;
+    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 2px;
+}
+
+.analytics-fv-cat-label {
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color var(--duration-fast) ease;
+}
+
+.analytics-fv-row:hover .analytics-fv-cat-label,
+.analytics-fv-row:focus-within .analytics-fv-cat-label {
+    color: var(--text-primary);
+}
+
+.analytics-fv-row-action {
+    margin-left: auto;
+    padding: 0.1875rem 0.4375rem;
+    border-radius: 999px;
+    background: var(--surface-200);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
+    opacity: 0;
+    transform: translateX(-0.25rem);
+    transition:
+        opacity var(--duration-fast) ease,
+        transform var(--duration-fast) ease,
+        color var(--duration-fast) ease;
+    white-space: nowrap;
+}
+
+.analytics-fv-row:hover .analytics-fv-row-action,
+.analytics-fv-row:focus-within .analytics-fv-row-action {
+    opacity: 1;
+    transform: translateX(0);
+    color: var(--text-secondary);
 }
 
 .analytics-fv-toggle-controls {

@@ -48,7 +48,7 @@
     let messages = [
         {
             role: 'assistant',
-            content: "Copilot is your language layer. Ask it to rename merchants, recategorize transactions, explain categorization, or preview a change before you confirm it.",
+            content: "Mira helps you understand your finances, notice what matters, draft safe changes for your approval, and talk through anything on your mind.",
             operation: null,
             data: null,
             sql: null,
@@ -113,6 +113,21 @@
         ? localLlmCatalog.tiers.flatMap((tier) => tier.models.filter((model) => model.task_fit?.includes('copilot')))
         : [];
     $: selectedCopilotModelMeta = copilotModelOptions.find((model) => model.id === copilotModel) || null;
+    function modelFamilyName(modelId, modelMeta) {
+        const raw = `${modelMeta?.label || ''} ${modelId || ''}`.trim();
+        const lower = raw.toLowerCase();
+        if (lower.includes('gemma')) return 'Gemma';
+        if (lower.includes('qwen')) return 'Qwen';
+        if (lower.includes('phi')) return 'Phi';
+        if (lower.includes('mistral')) return 'Mistral';
+        if (lower.includes('llama')) return 'Llama';
+        if (lower.includes('deepseek')) return 'DeepSeek';
+        const first = (modelMeta?.label || modelId || 'your selected model')
+            .split(/[\s:\/_-]+/)
+            .find(Boolean);
+        return first ? first.charAt(0).toUpperCase() + first.slice(1) : 'your selected model';
+    }
+    $: copilotModelFamily = modelFamilyName(copilotModel, selectedCopilotModelMeta);
 
     onMount(async () => {
         const prompt = $page.url.searchParams.get('prompt');
@@ -148,7 +163,7 @@
 
     async function clearHistory() {
         if (sidebarLoading) return;
-        const ok = window.confirm('Clear all recent Copilot activity for this view? This only removes the activity log; it does not delete transactions or memory.');
+        const ok = window.confirm('Clear all recent Mira activity for this view? This only removes the activity log; it does not delete transactions or memory.');
         if (!ok) return;
         sidebarLoading = true;
         try {
@@ -156,7 +171,7 @@
             historyItems = [];
             showSqlForHistory = {};
         } catch (error) {
-            setNotice(error?.message || 'Failed to clear Copilot history.');
+            setNotice(error?.message || 'Failed to clear Mira history.');
         } finally {
             sidebarLoading = false;
         }
@@ -164,7 +179,7 @@
 
     async function deleteHistoryItem(item) {
         if (!item?.id) return;
-        const ok = window.confirm('Remove this Copilot activity item? This only removes it from history.');
+        const ok = window.confirm('Remove this Mira activity item? This only removes it from history.');
         if (!ok) return;
         try {
             await api.deleteCopilotHistoryItem(item.id, activeProfileId);
@@ -173,7 +188,7 @@
             delete nextSqlState[item.id];
             showSqlForHistory = nextSqlState;
         } catch (error) {
-            setNotice(error?.message || 'Failed to remove Copilot history item.');
+            setNotice(error?.message || 'Failed to remove Mira history item.');
         }
     }
 
@@ -268,10 +283,10 @@
             } else {
                 copilotModel = nextModel;
             }
-            setNotice(`Copilot model switched to ${nextModel}.`);
+            setNotice(`Mira model switched to ${nextModel}.`);
         } catch (error) {
             copilotModel = localLlmStatus?.selectedCopilotModel || '';
-            setNotice(error?.message || 'Failed to switch Copilot model.');
+            setNotice(error?.message || 'Failed to switch Mira model.');
         } finally {
             copilotModelSaving = false;
         }
@@ -332,7 +347,7 @@
         }
         if (/\b(open|show)\b/.test(lower) && /\bhistory\b/.test(lower)) {
             openHistory();
-            return "Opened recent Copilot activity.";
+            return "Opened recent Mira activity.";
         }
         if (/\b(sync|refresh)\b/.test(lower) && !/\bhistory\b/.test(lower)) {
             const result = await runSync();
@@ -789,8 +804,8 @@
                 <span class="material-symbols-outlined text-white text-[18px]">auto_awesome</span>
             </div>
             <div>
-                <h2 class="folio-page-title" style="font-size: clamp(1.25rem, 0.8vw + 1rem, 1.7rem)">Copilot</h2>
-                <p class="folio-page-subtitle">Chat-first assistant for explanations, proposed edits, and confirmation-backed mutations.</p>
+                <h2 class="folio-page-title" style="font-size: clamp(1.25rem, 0.8vw + 1rem, 1.7rem)">Mira</h2>
+                <p class="folio-page-subtitle">Your Folio companion, powered by {copilotModelFamily}.</p>
             </div>
         </div>
         <div class="copilot-header-actions">
@@ -1000,9 +1015,9 @@
                         </div>
                         <div class="card" style="padding: 0.75rem 1rem">
                             <div class="flex items-center gap-1.5">
-                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 0ms"></div>
-                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 150ms"></div>
-                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--accent); opacity: 0.4; animation-delay: 300ms"></div>
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--copilot-typing-dot); opacity: 0.65; animation-delay: 0ms"></div>
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--copilot-typing-dot); opacity: 0.65; animation-delay: 150ms"></div>
+                                <div class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--copilot-typing-dot); opacity: 0.65; animation-delay: 300ms"></div>
                             </div>
                         </div>
                     </div>
@@ -1066,7 +1081,7 @@
                 <div class="flex items-end gap-2.5">
                     <div class="flex-1 relative">
                         <textarea bind:value={input} on:keydown={handleKeydown}
-                            placeholder="Ask Copilot to explain or change something in your app data…"
+                            placeholder="Ask Mira about your money, code, ideas, or changes to your app data…"
                             rows="1"
                             class="w-full px-4 py-3 rounded-2xl text-[13px] resize-none focus:ring-2 focus:ring-accent/50 transition-all copilot-composer-textarea"
                             style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border); min-height: 48px; max-height: 120px; box-shadow: var(--card-shadow)"></textarea>
@@ -1116,7 +1131,7 @@
                     {/if}
                 </div>
                 <p class="text-[9px] text-center mt-2" style="color: var(--text-muted)">
-                    Copilot can explain decisions, prepare edits, and ask for confirmation before changes are executed.
+                    Mira can explain decisions, draft safe changes for your approval, and keep the conversation private.
                 </p>
             </div>
         </section>
@@ -1130,11 +1145,11 @@
                 aria-label="Close history"
                 on:click={closeHistory}></button>
 
-            <aside class="copilot-history-drawer" role="dialog" aria-modal="true" aria-label="Recent Copilot Activity">
+            <aside class="copilot-history-drawer" role="dialog" aria-modal="true" aria-label="Recent Mira Activity">
                 <div class="copilot-history-drawer-header">
                     <div class="copilot-panel-header">
                         <div>
-                            <h3>Recent Copilot Activity</h3>
+                            <h3>Recent Mira Activity</h3>
                             <p>Reuse a recent prompt or inspect the generated SQL.</p>
                         </div>
                         {#if recentHistory.length > 0}
@@ -1150,7 +1165,7 @@
                     {#if sidebarLoading}
                         <div class="copilot-empty-state">Loading recent activity…</div>
                     {:else if recentHistory.length === 0}
-                        <div class="copilot-empty-state">No recent Copilot history yet.</div>
+                        <div class="copilot-empty-state">No recent Mira history yet.</div>
                     {:else}
                         <div class="copilot-history-list">
                             {#each recentHistory as item}

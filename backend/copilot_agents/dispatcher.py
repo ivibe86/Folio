@@ -40,6 +40,12 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
     if route.get("intent") == "legacy":
         return None
 
+    def _with_route(events):
+        for event in events:
+            if event.get("type") == "done":
+                event = {**event, "route": route, "intent": route.get("intent")}
+            yield event
+
     def _events():
         intent = route["intent"]
         yield {
@@ -52,16 +58,16 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
             "tool_schema_tokens_est": route.get("tool_schema_tokens_est"),
         }
         if intent == "overview":
-            yield from overview.stream(question, profile, history)
+            yield from _with_route(overview.stream(question, profile, history))
         elif intent == "chart":
-            yield from chart.stream(question, profile, history)
+            yield from _with_route(chart.stream(question, profile, history))
         elif intent == "chat":
-            yield from chat.stream(question, profile, history)
+            yield from _with_route(chat.stream(question, profile, history))
         elif intent == "drilldown":
-            yield from drilldown.stream(question, profile, history)
+            yield from _with_route(drilldown.stream(question, profile, history))
         elif intent == "write":
-            yield from write.stream(question, profile, history)
+            yield from _with_route(write.stream(question, profile, history))
         elif intent == "sql":
-            yield from sql.stream(question, profile, history)
+            yield from _with_route(sql.stream(question, profile, history))
 
     return _events()

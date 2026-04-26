@@ -604,7 +604,7 @@
 
 .tx-day-group {
     display: grid;
-    grid-template-columns: 148px minmax(0, 1fr);
+    grid-template-columns: 126px minmax(0, 1fr);
     align-items: stretch;
 }
 
@@ -618,7 +618,7 @@
     flex-direction: column;
     justify-content: flex-start;
     gap: 0;
-    padding: 0.78rem 1rem 0.7rem 1.05rem;
+    padding: 0.78rem 0.86rem 0.7rem 0.96rem;
     border-right: 1px solid color-mix(in srgb, var(--card-border) 56%, transparent);
     background: color-mix(in srgb, var(--body-bg) 36%, transparent);
 }
@@ -633,12 +633,12 @@
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     align-items: start;
-    column-gap: 0.6rem;
+    column-gap: 0.48rem;
 }
 
 .tx-day-rail-date strong {
     font-family: var(--font-financial);
-    font-size: 1.86rem;
+    font-size: 1.66rem;
     font-weight: 400;
     line-height: 0.95;
     letter-spacing: 0;
@@ -651,7 +651,7 @@
 .tx-day-rail-date small {
     display: block;
     color: var(--text-muted);
-    font-size: 0.64rem;
+    font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.07em;
     line-height: 1.25;
@@ -669,12 +669,11 @@
 .tx-day-summary-strip {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    min-height: 34px;
-    padding: 0.38rem 1.25rem;
-    background: color-mix(in srgb, var(--body-bg) 60%, var(--card-bg));
-    border-bottom: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent);
+    justify-content: flex-end;
+    min-height: 30px;
+    padding: 0.3rem 1.25rem 0.26rem;
+    background: color-mix(in srgb, var(--body-bg) 32%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--card-border) 42%, transparent);
 }
 
 .tx-day-summary-strip > div {
@@ -687,7 +686,7 @@
 }
 
 .tx-day-summary-strip em {
-    padding: 0.12rem 0.48rem;
+    padding: 0.1rem 0.42rem;
     border-radius: 999px;
     background: var(--surface-100);
     color: var(--text-muted);
@@ -808,8 +807,8 @@
 }
 
 .dark .tx-day-summary-strip {
-    background: rgba(32, 32, 36, 1);
-    border-bottom-color: rgba(78, 88, 108, 0.18);
+    background: rgba(37, 37, 41, 0.48);
+    border-bottom-color: rgba(78, 88, 108, 0.14);
 }
 
 .dark .tx-day-body {
@@ -1037,7 +1036,7 @@
 
 .tx-detail-drawer {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.88fr);
+    grid-template-columns: minmax(260px, 0.82fr) minmax(320px, 1fr);
     gap: 1.1rem;
     padding: 0.9rem 1.25rem 1.05rem;
     border-bottom: 1px solid color-mix(in srgb, var(--card-border) 48%, transparent);
@@ -1098,6 +1097,66 @@
     font-style: normal;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+
+.tx-merchant-intel {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+}
+
+.tx-merchant-intel > div {
+    min-width: 0;
+    padding: 0.68rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--card-border) 62%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--card-bg) 66%, transparent);
+}
+
+.tx-merchant-intel span {
+    display: block;
+    margin-bottom: 0.28rem;
+    color: var(--text-muted);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tx-merchant-intel strong {
+    display: block;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    font-weight: 500;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.tx-raw-disclosure {
+    margin-top: 0.72rem;
+    padding: 0.62rem 0.75rem;
+    border: 1px dashed color-mix(in srgb, var(--card-border) 70%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--body-bg) 26%, transparent);
+}
+
+.tx-raw-disclosure summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tx-raw-disclosure p {
+    margin: 0.5rem 0 0;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
 }
 
 .tx-merchant-history {
@@ -1298,6 +1357,10 @@
         grid-template-columns: 1fr;
         gap: 1rem;
         padding: 1rem;
+    }
+
+    .tx-merchant-intel {
+        grid-template-columns: 1fr;
     }
 
     .tx-column-headers {

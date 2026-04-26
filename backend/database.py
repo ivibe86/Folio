@@ -7,6 +7,7 @@ import sqlite3
 import os
 import threading
 import re
+import time
 from pathlib import Path
 from contextlib import contextmanager
 try:
@@ -30,6 +31,10 @@ else:
     DB_PATH = Path(__file__).parent / DB_FILE
 
 _local = threading.local()
+_wal_lock = threading.Lock()
+_wal_initialized = False
+_SQLITE_CONNECT_RETRIES = int(os.getenv("SQLITE_CONNECT_RETRIES", "3"))
+_SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
 
 
 def _sqlite_regexp(pattern, value) -> int:
@@ -43,11 +48,68 @@ def _sqlite_regexp(pattern, value) -> int:
         return 0
 
 
+def _is_transient_sqlite_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "disk i/o error" in message or "database is locked" in message or "database is busy" in message
+
+
+def _open_connection() -> sqlite3.Connection:
+    """Open SQLite with a short retry for transient Docker/macOS bind-mount I/O hiccups."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    delay = 0.05
+    last_error: Exception | None = None
+    for attempt in range(max(1, _SQLITE_CONNECT_RETRIES)):
+        try:
+            return sqlite3.connect(
+                str(DB_PATH),
+                check_same_thread=False,
+                timeout=max(1.0, _SQLITE_BUSY_TIMEOUT_MS / 1000),
+            )
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            if not _is_transient_sqlite_error(exc) or attempt >= _SQLITE_CONNECT_RETRIES - 1:
+                raise
+            logger.warning("SQLite open failed transiently (%s); retrying in %.2fs", exc, delay)
+            time.sleep(delay)
+            delay *= 2
+    raise last_error or sqlite3.OperationalError("failed to open SQLite database")
+
+
+def _ensure_wal_mode() -> None:
+    """Set WAL once per process instead of on every request-scoped connection."""
+    global _wal_initialized
+    if _wal_initialized:
+        return
+    with _wal_lock:
+        if _wal_initialized:
+            return
+        delay = 0.05
+        for attempt in range(max(1, _SQLITE_CONNECT_RETRIES)):
+            conn = None
+            try:
+                conn = _open_connection()
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+                conn.close()
+                _wal_initialized = True
+                return
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                if not _is_transient_sqlite_error(exc) or attempt >= _SQLITE_CONNECT_RETRIES - 1:
+                    raise
+                logger.warning("SQLite WAL setup failed transiently (%s); retrying in %.2fs", exc, delay)
+                time.sleep(delay)
+                delay *= 2
+
+
 def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     conn.create_function("REGEXP", 2, _sqlite_regexp)
     return conn
 
@@ -62,8 +124,9 @@ def get_connection() -> sqlite3.Connection:
     background tasks (e.g., sync) and module-level code paths that cannot
     use FastAPI dependency injection.
     """
+    _ensure_wal_mode()
     if not hasattr(_local, "connection") or _local.connection is None:
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn = _open_connection()
         _local.connection = _configure_connection(conn)
     else:
         _configure_connection(_local.connection)
@@ -93,7 +156,8 @@ def get_db_session():
             rows = db.execute("SELECT ...").fetchall()
             return rows
     """
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    _ensure_wal_mode()
+    conn = _open_connection()
     conn = _configure_connection(conn)
     try:
         yield conn

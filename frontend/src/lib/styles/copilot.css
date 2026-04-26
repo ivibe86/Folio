@@ -4,6 +4,28 @@
    Folio — COPILOT/CHAT ROUTE STYLES
    ═══════════════════════════════════════════════════════ */
 
+:root {
+    --copilot-user-bg: #3f7fc0;
+    --copilot-user-bg-2: #2f68a7;
+    --copilot-user-text: #ffffff;
+    --copilot-user-shadow: rgba(47, 104, 167, 0.24);
+    --copilot-user-highlight: rgba(255, 255, 255, 0.16);
+    --copilot-focus: rgba(63, 127, 192, 0.26);
+    --copilot-cursor: #356fae;
+    --copilot-typing-dot: #8ca7d4;
+}
+
+.dark {
+    --copilot-user-bg: #4f95c7;
+    --copilot-user-bg-2: #3979ad;
+    --copilot-user-text: #f8fbff;
+    --copilot-user-shadow: rgba(79, 149, 199, 0.24);
+    --copilot-user-highlight: rgba(255, 255, 255, 0.12);
+    --copilot-focus: rgba(79, 149, 199, 0.30);
+    --copilot-cursor: #7db5dc;
+    --copilot-typing-dot: #88bce2;
+}
+
 /* ── Message container ── */
 .copilot-msg-container {
     display: flex;
@@ -603,9 +625,11 @@
 }
 
 .copilot-user-bubble {
-    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-    color: #ffffff;
-    box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25);
+    background: linear-gradient(135deg, var(--copilot-user-bg), var(--copilot-user-bg-2));
+    color: var(--copilot-user-text);
+    box-shadow:
+        inset 0 1px 0 var(--copilot-user-highlight),
+        0 12px 30px var(--copilot-user-shadow);
 }
 
 .copilot-suggestion-btn {
@@ -677,8 +701,18 @@
 }
 
 .copilot-send-btn {
-    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-    box-shadow: 0 2px 12px rgba(74, 144, 217, 0.25);
+    background: linear-gradient(135deg, var(--copilot-user-bg), var(--copilot-user-bg-2));
+    box-shadow:
+        inset 0 1px 0 var(--copilot-user-highlight),
+        0 10px 24px var(--copilot-user-shadow);
+}
+
+.copilot-composer-textarea:focus {
+    border-color: color-mix(in srgb, var(--copilot-user-bg) 45%, var(--card-border)) !important;
+    box-shadow:
+        0 0 0 3px var(--copilot-focus),
+        var(--card-shadow) !important;
+    outline: none;
 }
 
 .copilot-chat-layout {
@@ -881,7 +915,7 @@
 .copilot-cursor {
     display: inline-block;
     margin-left: 1px;
-    color: var(--accent);
+    color: var(--copilot-cursor);
     animation: copilot-cursor-blink 1s step-end infinite;
 }
 

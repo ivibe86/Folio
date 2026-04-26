@@ -21,6 +21,12 @@ logger = get_logger(__name__)
 
 _lock = threading.Lock()
 
+_COPILOT_HISTORY_CHAT_PREVIEW_CHARS = int(os.getenv("COPILOT_HISTORY_CHAT_PREVIEW_CHARS", "1000"))
+_COPILOT_HISTORY_FINANCE_PREVIEW_CHARS = int(os.getenv("COPILOT_HISTORY_FINANCE_PREVIEW_CHARS", "4000"))
+_COPILOT_HISTORY_RESULT_CHARS = int(os.getenv("COPILOT_HISTORY_RESULT_CHARS", "8000"))
+_COPILOT_HISTORY_SQL_CHARS = int(os.getenv("COPILOT_HISTORY_SQL_CHARS", "8000"))
+_COPILOT_HISTORY_MAX_ROWS = int(os.getenv("COPILOT_HISTORY_MAX_ROWS", "500"))
+
 
 def _set_sync_phase(sync_job_id: str | None, phase: str, detail: str | None = None):
     if not sync_job_id:
@@ -2658,6 +2664,47 @@ def update_category_rule(
         return _update(c)
 
 
+def _clip_text(value, limit: int) -> str:
+    text = "" if value is None else str(value)
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def prepare_copilot_history_record(
+    *,
+    profile: str | None,
+    question: str,
+    generated_sql: str = "",
+    result: str = "",
+    answer: str = "",
+    operation: str = "read",
+    rows_affected: int = 0,
+    route: dict | None = None,
+) -> dict:
+    """Build a bounded history row.
+
+    Copilot may produce long creative/code/general answers, but the activity
+    drawer only needs a prompt, short answer preview, and compact audit data.
+    The full answer has already been streamed to the user and should not make
+    SQLite the transcript archive.
+    """
+    route = route or {}
+    intent = str(route.get("intent") or "").strip().lower()
+    operation_key = operation or intent or "read"
+    is_chat = intent == "chat" or operation_key == "chat"
+    answer_limit = _COPILOT_HISTORY_CHAT_PREVIEW_CHARS if is_chat else _COPILOT_HISTORY_FINANCE_PREVIEW_CHARS
+    return {
+        "profile": profile,
+        "question": _clip_text(question, 4000),
+        "sql": _clip_text(generated_sql, _COPILOT_HISTORY_SQL_CHARS),
+        "result": _clip_text(result, _COPILOT_HISTORY_RESULT_CHARS),
+        "answer": _clip_text(answer, answer_limit),
+        "operation": operation_key,
+        "rows_affected": rows_affected or 0,
+    }
+
+
 def get_copilot_conversations(limit: int = 50, profile: str | None = None, conn=None) -> list[dict]:
     """Return recent Copilot conversations for the given profile."""
     def _query(c):
@@ -2706,7 +2753,7 @@ def log_copilot_conversation(
                (profile_id, user_message, generated_sql, query_result,
                 assistant_response, operation_type, rows_affected)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (profile, question, sql or "", (result or "")[:5000], answer or "", operation or "read", rows_affected or 0),
+            (profile, question, sql or "", result or "", answer or "", operation or "read", rows_affected or 0),
         )
 
     if conn is not None:
@@ -2714,6 +2761,43 @@ def log_copilot_conversation(
         return
     with get_db() as c:
         _insert(c)
+
+
+def prune_copilot_conversations(profile: str | None = None, keep: int | None = None, conn=None) -> int:
+    """Keep recent Copilot activity bounded so SQLite does not grow forever."""
+    keep = keep if keep is not None else _COPILOT_HISTORY_MAX_ROWS
+    if keep <= 0:
+        return clear_copilot_conversations(profile=profile, conn=conn)
+
+    def _prune(c):
+        if profile and profile != "household":
+            cur = c.execute(
+                """DELETE FROM copilot_conversations
+                   WHERE profile_id = ?
+                     AND id NOT IN (
+                       SELECT id FROM copilot_conversations
+                       WHERE profile_id = ?
+                       ORDER BY created_at DESC, id DESC
+                       LIMIT ?
+                     )""",
+                (profile, profile, keep),
+            )
+        else:
+            cur = c.execute(
+                """DELETE FROM copilot_conversations
+                   WHERE id NOT IN (
+                     SELECT id FROM copilot_conversations
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?
+                   )""",
+                (keep,),
+            )
+        return cur.rowcount or 0
+
+    if conn is not None:
+        return _prune(conn)
+    with get_db() as c:
+        return _prune(c)
 
 
 def clear_copilot_conversations(profile: str | None = None, conn=None) -> int:

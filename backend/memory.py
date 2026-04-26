@@ -12,6 +12,7 @@ Two distinct operations:
 
 from __future__ import annotations
 
+import re as _re
 import sqlite3
 from typing import Iterable
 
@@ -92,6 +93,34 @@ def insert_entry(
         (profile, section, body, confidence, evidence.strip(), theme, expires_at),
     )
     return cursor.lastrowid
+
+
+def find_active_entry_id(
+    *,
+    profile: str | None,
+    section: str,
+    body: str,
+    conn: sqlite3.Connection,
+) -> int | None:
+    """Return an active entry id with the same normalized body/section, if one exists."""
+    key = _re.sub(r"\s+", " ", (body or "").strip().lower())
+    if not key:
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, body
+        FROM memory_entries
+        WHERE (? IS NULL OR profile_id = ? OR profile_id IS NULL)
+          AND section = ?
+          AND superseded_at IS NULL
+        """,
+        (profile, profile, section),
+    ).fetchall()
+    for row in rows:
+        row_key = _re.sub(r"\s+", " ", (row["body"] or "").strip().lower())
+        if row_key == key:
+            return int(row["id"])
+    return None
 
 
 def supersede_entry(
@@ -358,6 +387,65 @@ def maybe_promote_observation(
 
 _PROPOSAL_SOURCES = {"agent", "observation_threshold", "consolidation", "save_to_memory"}
 
+_DURABLE_USER_PATTERNS = [
+    r"\buser\s+(?:prefers|likes|dislikes|hates|wants|needs|is trying|is working|does(?:n't| not) want)\b",
+    r"\b(?:prefers|likes|dislikes|hates|wants|needs|trying to|working on|goal is|commit(?:ted)? to)\b",
+    r"\b(?:remember that|remember this|save this|call me|my preference|i prefer|i like|i dislike|i hate|i want|i need|i'm trying|i am trying)\b",
+    r"\b(?:tone|style|non[- ]judgmental|direct|concise|detailed|friend|best friend|judge|judgment)\b",
+]
+
+_TRANSIENT_OR_DERIVABLE_PATTERNS = [
+    r"\bhow much\b",
+    r"\b(?:spent|spend|paid|charges?|transactions?|categorized|categorised|category|merchant|net worth|balance|chart|graph|plot)\b",
+    r"\b(?:move all|recategorize|reclassify|rename|create rule|preview|confirm to|write preview)\b",
+    r"\b(?:explained|ready to|need .*to write|spool lineage|python script|bfs script|casual conversation)\b",
+    r"\b(?:transaction data|account balances|spending categories|merchant details|saved insights)\b",
+    r"\$[\d,]+(?:\.\d{2})?",
+    r"\b\d+\s+(?:transactions?|months?|days?)\b",
+]
+
+
+def _looks_like_durable_user_memory(section: str, body: str, evidence: str = "", source: str = "agent") -> bool:
+    """
+    Gate memory proposals before they enter the review queue.
+
+    Memory is for durable user context: preferences, tone, goals, commitments,
+    identity, recurring concerns, and open questions about the user. It is not a
+    transcript, not a task log, and not a place for facts we can re-query from
+    Folio's database.
+    """
+    section = (section or "").strip().lower()
+    body = (body or "").strip()
+    if not body or section not in _SECTION_KEYS:
+        return False
+
+    text = f"{body} {evidence or ''}".lower()
+    durable = any(_re.search(pattern, text) for pattern in _DURABLE_USER_PATTERNS)
+    transient = any(_re.search(pattern, text) for pattern in _TRANSIENT_OR_DERIVABLE_PATTERNS)
+
+    if section == "identity":
+        return durable and not transient
+    if section == "preferences":
+        if transient and not _re.search(r"\b(?:tone|style|direct|concise|detailed|non[- ]judgmental|judge|judgment|talked to|answers?|responses?)\b", text):
+            return False
+        return durable
+    if section == "goals":
+        return durable
+    if section == "concerns":
+        # Concerns must be emotional/behavioral or recurring, not just "spent $X".
+        if transient and not _re.search(r"\b(?:worried|concerned|anxious|trying|wants|goal|cap|limit|avoid|cut back|reduce)\b", text):
+            return False
+        return durable
+    if section == "open_questions":
+        # Avoid saving ordinary task blockers like "need data structure to write a script".
+        return durable and not transient
+    return False
+
+
+def _proposal_duplicate_key(row: dict) -> tuple[str, str]:
+    body = _re.sub(r"\s+", " ", (row.get("body") or "").strip().lower())
+    return ((row.get("section") or "").strip().lower(), body)
+
 
 def create_proposal(
     *,
@@ -381,6 +469,8 @@ def create_proposal(
     body = body.strip()
     if not body:
         raise ValueError("body is required")
+    if source != "consolidation" and not _looks_like_durable_user_memory(section, body, evidence, source):
+        raise ValueError("proposal is not durable user memory")
 
     cursor = conn.execute(
         """
@@ -406,7 +496,23 @@ def list_pending_proposals(profile: str | None, conn: sqlite3.Connection, limit:
         """,
         (profile, profile, limit),
     ).fetchall()
-    return [dict(r) for r in rows]
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        item = dict(row)
+        if item.get("source") != "consolidation" and not _looks_like_durable_user_memory(
+            item.get("section") or "",
+            item.get("body") or "",
+            item.get("evidence") or "",
+            item.get("source") or "agent",
+        ):
+            continue
+        key = _proposal_duplicate_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(item)
+    return items
 
 
 def get_proposal(proposal_id: int, conn: sqlite3.Connection) -> dict | None:
@@ -452,16 +558,20 @@ def accept_proposal(
             conn=conn,
         )
     else:
-        new_id = insert_entry(
-            profile=profile,
-            section=section,
-            body=body,
-            confidence=confidence,
-            evidence=proposal.get("evidence") or "",
-            theme=proposal.get("theme"),
-            expires_at=expires_at,
-            conn=conn,
-        )
+        existing_id = find_active_entry_id(profile=profile, section=section, body=body, conn=conn)
+        if existing_id:
+            new_id = existing_id
+        else:
+            new_id = insert_entry(
+                profile=profile,
+                section=section,
+                body=body,
+                confidence=confidence,
+                evidence=proposal.get("evidence") or "",
+                theme=proposal.get("theme"),
+                expires_at=expires_at,
+                conn=conn,
+            )
 
     conn.execute(
         "UPDATE memory_proposals SET status = 'accepted', resolved_at = datetime('now') WHERE id = ?",
@@ -629,6 +739,9 @@ A good takeaway is:
 - One short line (under 120 characters)
 - Still useful months later
 - Not just a number or fact you could re-derive from the database
+- Not a task log of what the assistant did
+- Not a one-off coding/general-knowledge question
+- Not a write preview, chart result, transaction total, category total, merchant total, balance, or capability explanation
 
 Allowed sections:
 - identity            — who they are (job, family role, life stage)
@@ -656,10 +769,15 @@ Save a signal ONLY if the USER (not the assistant) did one of these in this turn
 - Stated a COMMITMENT or goal: "I'm trying to X", "I want to Y", "going to Z by next month"
 - Stated a PREFERENCE about how they want to be talked to or what they like/dislike
 - Shared an ENDURING FACT about themselves not derivable from bank data: job, family, life situation, health, plans
+- Explicitly asked you to remember something about them
 - Asserted something that CONTRADICTS what the file already says about them (you don't see the file here — flag it conservatively)
 
 Do NOT save:
 - Lookups ("how much did I spend on X")
+- Any transaction/category/merchant/balance/net-worth numbers
+- Write previews or categorization actions ("move Netflix to Entertainment", "create a rule")
+- Assistant capabilities or schema/tool explanations
+- Coding/general-knowledge tasks unless the user states an enduring preference or identity
 - One-off questions that don't reveal anything new about the user
 - The assistant's framings or analyses (those are derivable; only what the USER asserted matters)
 - Vague reactions ("interesting", "ok", "thanks")
@@ -723,6 +841,8 @@ def detect_memory_signals(question: str, answer: str) -> list[dict]:
         confidence = (item.get("confidence") or "stated").strip().lower()
         if confidence not in _CONFIDENCE_VALUES:
             confidence = "stated"
+        if not _looks_like_durable_user_memory(section, body, item.get("evidence") or "", source="agent"):
+            continue
         cleaned.append({
             "section": section,
             "body": body,
@@ -770,10 +890,13 @@ def extract_takeaway(question: str, answer: str) -> dict | None:
     body = (parsed.get("body") or "").strip()
     if not body:
         return None
+    evidence = (parsed.get("evidence") or "").strip()
+    if not _looks_like_durable_user_memory(section, body, evidence, source="save_to_memory"):
+        return None
     return {
         "section": section,
         "body": body,
-        "evidence": (parsed.get("evidence") or "").strip(),
+        "evidence": evidence,
     }
 
 
@@ -822,11 +945,14 @@ def parse_agent_memory_tags(answer: str) -> tuple[str, list[dict], list[dict]]:
         confidence = (attrs.get("confidence") or "stated").strip().lower()
         if confidence not in _CONFIDENCE_VALUES:
             confidence = "stated"
+        evidence = (attrs.get("evidence") or "").strip()
+        if not _looks_like_durable_user_memory(section, body, evidence, source="agent"):
+            continue
         proposals.append({
             "section": section,
             "body": body,
             "confidence": confidence,
-            "evidence": (attrs.get("evidence") or "").strip(),
+            "evidence": evidence,
             "theme": (attrs.get("theme") or "").strip().lower() or None,
         })
 

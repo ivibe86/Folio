@@ -1522,9 +1522,19 @@ def _log_conversation(
     rows_affected: int = 0,
 ):
     try:
-        from data_manager import log_copilot_conversation
+        from data_manager import log_copilot_conversation, prepare_copilot_history_record, prune_copilot_conversations
 
-        log_copilot_conversation(profile, question, sql, result, answer, operation, rows_affected)
+        record = prepare_copilot_history_record(
+            profile=profile,
+            question=question,
+            generated_sql=sql,
+            result=result,
+            answer=answer,
+            operation=operation,
+            rows_affected=rows_affected,
+        )
+        log_copilot_conversation(**record)
+        prune_copilot_conversations(profile=profile)
     except Exception:
         logger.debug("Failed to log copilot conversation", exc_info=True)
 

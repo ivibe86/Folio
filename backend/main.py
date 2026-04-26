@@ -36,7 +36,7 @@ from data_manager import (
     get_net_worth_series_data, get_dashboard_bundle_data,
     update_category_parent, update_category_rule,
     get_copilot_conversations, clear_copilot_conversations, delete_copilot_conversation, get_data_browser_rows,
-    log_copilot_conversation,
+    log_copilot_conversation, prepare_copilot_history_record, prune_copilot_conversations,
     get_category_budgets, update_category_budget,
     get_merchant_directory, update_merchant_directory_entry,
     update_transaction_excluded, get_transactions_for_merchant,
@@ -996,22 +996,30 @@ async def copilot_ask_stream(body: CopilotRequest, profile: str | None = Query(N
                     final_event = event
                 yield f"data: {_json.dumps(event, default=str)}\n\n"
             if final_event:
-                tool_trace = final_event.get("tool_trace") or []
-                pending_write = final_event.get("pending_write") or {}
-                operation = "write_preview" if pending_write else "read"
-                generated_sql = pending_write.get("sql") or ""
-                rows_affected = final_event.get("rows_affected")
-                if rows_affected is None:
-                    rows_affected = len(final_event.get("data") or []) if isinstance(final_event.get("data"), list) else 0
-                log_copilot_conversation(
-                    validated_profile,
-                    body.question,
-                    generated_sql,
-                    _json.dumps({"tool_trace": tool_trace}, default=str),
-                    final_event.get("answer") or "",
-                    operation,
-                    rows_affected,
-                )
+                try:
+                    tool_trace = final_event.get("tool_trace") or []
+                    pending_write = final_event.get("pending_write") or {}
+                    route = final_event.get("route") or {}
+                    route_intent = route.get("intent") or final_event.get("intent")
+                    operation = "write_preview" if pending_write else (route_intent or "read")
+                    generated_sql = pending_write.get("sql") or ""
+                    rows_affected = final_event.get("rows_affected")
+                    if rows_affected is None:
+                        rows_affected = len(final_event.get("data") or []) if isinstance(final_event.get("data"), list) else 0
+                    record = prepare_copilot_history_record(
+                        profile=validated_profile,
+                        question=body.question,
+                        generated_sql=generated_sql,
+                        result=_json.dumps({"route": route, "tool_trace": tool_trace}, default=str),
+                        answer=final_event.get("answer") or "",
+                        operation=operation,
+                        rows_affected=rows_affected,
+                        route=route,
+                    )
+                    log_copilot_conversation(**record)
+                    prune_copilot_conversations(profile=validated_profile)
+                except Exception:
+                    logger.exception("Failed to persist Copilot conversation history")
         except Exception as e:
             yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 

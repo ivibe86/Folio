@@ -2486,7 +2486,14 @@
                 <h3 class="folio-section-title">Fixed vs Variable</h3>
             </div>
 
-            <div class="card" style="padding: 1.25rem 1.5rem">
+            <div class="card analytics-fv-card">
+                <div class="analytics-fv-card-header">
+                    <span class="analytics-fv-reclassify-hint">
+                        <span class="material-symbols-outlined">swap_horiz</span>
+                        Click any category to reclassify
+                    </span>
+                </div>
+
                 <!-- Stacked bar -->
                 <div class="flex items-center gap-4 mb-4">
                     <div class="flex-1">
@@ -2509,20 +2516,26 @@
                             <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.fixedPct)}</span>
                         </div>
                         {#each fixedVsVariable.fixedCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row" on:click|stopPropagation>
+                            <div class="analytics-fv-row">
                                 {#if editingExpenseType === cat.category}
                                     <div class="analytics-fv-toggle-controls">
                                         <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
                                         <div class="analytics-fv-toggle-btns">
-                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                            <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
                                                 on:click|stopPropagation={() => cancelEditingExpenseType()}>Fixed</button>
-                                            <button class="analytics-fv-toggle-btn"
+                                            <button type="button" class="analytics-fv-toggle-btn"
                                                 on:click|stopPropagation={() => toggleExpenseType(cat.category, 'variable')}>Variable</button>
                                         </div>
                                     </div>
                                 {:else}
-                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
+                                    <button
+                                        type="button"
+                                        class="analytics-fv-cat-btn"
+                                        aria-label="Reclassify {cat.category} as variable"
+                                        title="Click to reclassify"
+                                        on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                        <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
+                                        <span class="analytics-fv-row-action">Move to Variable</span>
                                     </button>
                                     <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
                                 {/if}
@@ -2547,20 +2560,26 @@
                             <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.variablePct)}</span>
                         </div>
                         {#each fixedVsVariable.variableCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row" on:click|stopPropagation>
+                            <div class="analytics-fv-row">
                                 {#if editingExpenseType === cat.category}
                                     <div class="analytics-fv-toggle-controls">
                                         <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
                                         <div class="analytics-fv-toggle-btns">
-                                            <button class="analytics-fv-toggle-btn"
+                                            <button type="button" class="analytics-fv-toggle-btn"
                                                 on:click|stopPropagation={() => toggleExpenseType(cat.category, 'fixed')}>Fixed</button>
-                                            <button class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                            <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
                                                 on:click|stopPropagation={() => cancelEditingExpenseType()}>Variable</button>
                                         </div>
                                     </div>
                                 {:else}
-                                    <button class="analytics-fv-cat-btn" on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="text-[11px]" style="color: var(--text-secondary)">{cat.category}</span>
+                                    <button
+                                        type="button"
+                                        class="analytics-fv-cat-btn"
+                                        aria-label="Reclassify {cat.category} as fixed"
+                                        title="Click to reclassify"
+                                        on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                        <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
+                                        <span class="analytics-fv-row-action">Move to Fixed</span>
                                     </button>
                                     <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
                                 {/if}
