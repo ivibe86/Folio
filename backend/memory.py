@@ -832,6 +832,8 @@ def parse_agent_memory_tags(answer: str) -> tuple[str, list[dict], list[dict]]:
 
     cleaned = _OBS_RE.sub("", answer)
     cleaned = _PROP_RE.sub("", cleaned)
+    cleaned = _re.sub(r"<observation\b[^>]*/>", "", cleaned, flags=_re.IGNORECASE | _re.DOTALL)
+    cleaned = _re.sub(r"<memory_proposal\b[^>]*/>", "", cleaned, flags=_re.IGNORECASE | _re.DOTALL)
     # Some models emit literal '/n' (slash n) instead of '\n' when trying to write
     # newlines. Treat them as the newlines they meant.
     cleaned = cleaned.replace("/n", "\n")

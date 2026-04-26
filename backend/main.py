@@ -35,7 +35,8 @@ from data_manager import (
     get_category_analytics_data, get_merchant_insights_data,
     get_net_worth_series_data, get_dashboard_bundle_data,
     update_category_parent, update_category_rule,
-    get_copilot_conversations, get_data_browser_rows,
+    get_copilot_conversations, clear_copilot_conversations, delete_copilot_conversation, get_data_browser_rows,
+    log_copilot_conversation,
     get_category_budgets, update_category_budget,
     get_merchant_directory, update_merchant_directory_entry,
     update_transaction_excluded, get_transactions_for_merchant,
@@ -167,6 +168,14 @@ def _canonicalize_profile_id(value: str | None) -> str:
 def _titleize_profile_name(value: str | None) -> str:
     normalized = _normalize_profile_whitespace(value)
     return normalized.title() if normalized else ""
+
+
+def _invalidate_copilot_cache() -> None:
+    try:
+        import copilot_cache
+        copilot_cache.invalidate_all()
+    except Exception:
+        logger.debug("Copilot cache invalidation skipped", exc_info=True)
 
 
 def _display_name_from_profile_id(profile_id: str) -> str:
@@ -503,6 +512,7 @@ def update_category(tx_id: str, body: CategoryUpdate):
     result = update_transaction_category(tx_id, body.category, one_off=body.one_off)
     if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    _invalidate_copilot_cache()
 
     response = {"status": "updated", "tx_id": tx_id, "category": body.category}
 
@@ -523,6 +533,7 @@ def update_transaction_exclusion(tx_id: str, body: TransactionExcludeUpdate, db=
     result = update_transaction_excluded(tx_id=tx_id, is_excluded=body.is_excluded, conn=db)
     if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    _invalidate_copilot_cache()
     return {"status": "updated", "transaction": result}
 
 
@@ -543,6 +554,7 @@ def create_category(body: NewCategory):
     success = add_category(body.name.strip())
     if not success:
         raise HTTPException(status_code=409, detail="Category already exists.")
+    _invalidate_copilot_cache()
     return {"status": "created", "category": body.name.strip()}
 
 
@@ -578,6 +590,7 @@ def update_expense_type(category_name: str, body: ExpenseTypeUpdate, db=Depends(
         "UPDATE categories SET expense_type = ?, expense_type_source = 'user' WHERE name = ?",
         (body.expense_type, category_name),
     )
+    _invalidate_copilot_cache()
     return {
         "status": "updated",
         "category": category_name,
@@ -599,6 +612,7 @@ def update_category_parent_endpoint(category_name: str, body: CategoryParentUpda
 
     if not result:
         raise HTTPException(status_code=404, detail="Category not found.")
+    _invalidate_copilot_cache()
 
     return {"status": "updated", "category": result}
 
@@ -631,6 +645,7 @@ def update_category_rule_endpoint(rule_id: int, body: CategoryRuleUpdate, db=Dep
     if not result:
         raise HTTPException(status_code=404, detail="Rule not found.")
 
+    _invalidate_copilot_cache()
     return {"status": "updated", "rule": result}
 
 
@@ -929,6 +944,7 @@ def sync(profile: str | None = Query(None)):
     try:
         data = fetch_fresh_data(sync_job_id=job_id)
         finish_sync(job_id, status="completed")
+        _invalidate_copilot_cache()
         return {
             "status": "synced",
             "accounts": len(data["accounts"]),
@@ -969,13 +985,33 @@ async def copilot_ask_stream(body: CopilotRequest, profile: str | None = Query(N
     validated_profile = validate_profile(profile)
 
     def event_stream():
+        final_event: dict | None = None
         try:
             for event in run_agent_stream(
                 question=body.question,
                 profile=validated_profile,
                 history=body.history,
             ):
+                if event.get("type") == "done":
+                    final_event = event
                 yield f"data: {_json.dumps(event, default=str)}\n\n"
+            if final_event:
+                tool_trace = final_event.get("tool_trace") or []
+                pending_write = final_event.get("pending_write") or {}
+                operation = "write_preview" if pending_write else "read"
+                generated_sql = pending_write.get("sql") or ""
+                rows_affected = final_event.get("rows_affected")
+                if rows_affected is None:
+                    rows_affected = len(final_event.get("data") or []) if isinstance(final_event.get("data"), list) else 0
+                log_copilot_conversation(
+                    validated_profile,
+                    body.question,
+                    generated_sql,
+                    _json.dumps({"tool_trace": tool_trace}, default=str),
+                    final_event.get("answer") or "",
+                    operation,
+                    rows_affected,
+                )
         except Exception as e:
             yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
@@ -1012,6 +1048,7 @@ async def copilot_confirm(body: CopilotConfirm, profile: str | None = Query(None
         confirm_write=True,
         pending_sql=pending["sql"],
     )
+    _invalidate_copilot_cache()
     return result
 
 
@@ -1022,6 +1059,27 @@ def copilot_history(
     db=Depends(get_db_session),
 ):
     return {"items": get_copilot_conversations(limit=limit, profile=profile, conn=db)}
+
+
+@app.delete("/api/copilot/history")
+def clear_copilot_history(
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    deleted = clear_copilot_conversations(profile=profile, conn=db)
+    return {"cleared": deleted}
+
+
+@app.delete("/api/copilot/history/{conversation_id}")
+def delete_copilot_history_item(
+    conversation_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    deleted = delete_copilot_conversation(conversation_id, profile=profile, conn=db)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Copilot history item not found.")
+    return {"deleted": deleted}
 
 
 @app.post("/api/copilot/insights")
@@ -1063,6 +1121,7 @@ def save_insight(
         "FROM memory_entries WHERE id = ?",
         (new_id,),
     ).fetchone()
+    _invalidate_copilot_cache()
     return {"saved": True, "entry": dict(row)}
 
 
@@ -1124,6 +1183,7 @@ def memory_create_entry(
         "FROM memory_entries WHERE id = ?",
         (new_id,),
     ).fetchone()
+    _invalidate_copilot_cache()
     return dict(row)
 
 
@@ -1151,6 +1211,7 @@ def memory_update_entry(
         "FROM memory_entries WHERE id = ?",
         (new_id,),
     ).fetchone()
+    _invalidate_copilot_cache()
     return dict(row)
 
 
@@ -1165,6 +1226,7 @@ def memory_delete_entry(
     if not removed:
         raise HTTPException(status_code=404, detail="entry not found")
     db.commit()
+    _invalidate_copilot_cache()
     return {"deleted": True, "id": entry_id}
 
 
@@ -1220,6 +1282,7 @@ def memory_accept_proposal(
         "FROM memory_entries WHERE id = ?",
         (new_id,),
     ).fetchone()
+    _invalidate_copilot_cache()
     return {"accepted": True, "entry": dict(row)}
 
 
@@ -1234,6 +1297,7 @@ def memory_reject_proposal(
     if not rejected:
         raise HTTPException(status_code=404, detail="proposal not found or already resolved")
     db.commit()
+    _invalidate_copilot_cache()
     return {"rejected": True, "id": proposal_id}
 
 
@@ -1246,6 +1310,7 @@ def memory_consolidate(
     import memory as _mem
     proposals = _mem.run_consolidation(profile=profile, conn=db)
     db.commit()
+    _invalidate_copilot_cache()
     return {"proposals_created": len(proposals), "items": proposals}
 
 
@@ -1966,6 +2031,7 @@ def simplefin_sync():
     try:
         data = fetch_simplefin_data(sync_job_id=job_id)
         finish_sync(job_id, status="completed")
+        _invalidate_copilot_cache()
         return {
             "status": "synced",
             "accounts": len(data.get("accounts", [])),

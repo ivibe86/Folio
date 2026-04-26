@@ -8,7 +8,7 @@ tool-use and Ollama's OpenAI-style tool-use format).
 Time windows use a `range` token:
   current_month | last_month | prior_month | YYYY-MM
   this_week    | last_week
-  last_7d | last_30d | last_90d | last_180d | last_365d
+  last_7d | last_30d | last_90d | last_180d | last_365d | last_N_months
   ytd | last_year | all
 """
 
@@ -99,6 +99,13 @@ def _resolve_range(token: str | None) -> tuple[str | None, str | None, str]:
         start_dt = now - timedelta(days=days)
         return start_dt.strftime("%Y-%m-%d"), today, f"last_{days}d"
 
+    m = re.match(r"^last_(\d{1,2})_?months?$", token)
+    if m:
+        months = max(1, min(int(m.group(1)), 36))
+        y, mon = _shift_month(now.year, now.month, -(months - 1))
+        start, _ = _month_bounds(y, mon)
+        return start, today, f"last_{months}_months"
+
     if token == "ytd":
         return f"{now.year:04d}-01-01", today, "ytd"
 
@@ -123,8 +130,10 @@ _RANGE_ENUM = [
 ]
 _RANGE_DESC = (
     "Time window. One of: current_month (default), last_month, this_week, last_week, "
-    "last_7d, last_30d, last_90d, last_180d, last_365d, ytd, last_year, all, or a specific YYYY-MM."
+    "last_7d, last_30d, last_90d, last_180d, last_365d, ytd, last_year, all, "
+    "last_N_months such as last_13_months, or a specific YYYY-MM."
 )
+_NON_SPENDING_CATEGORIES = ("Savings Transfer", "Personal Transfer", "Credit Card Payment", "Income")
 
 
 def _profile_filter(profile: str | None) -> tuple[str, list]:
@@ -255,21 +264,69 @@ def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
     needle = merchant.lower()
     matched = [m for m in all_merchants if needle in (m.get("name") or "").lower()]
 
-    # Recent transactions matching the merchant fragment (via description search)
-    tx_page = get_transactions_paginated(
-        month=month, search=merchant, profile=profile, conn=conn,
-        start_date=start, end_date=end, limit=10, offset=0,
-    ) or {}
+    search = f"%{merchant.upper()}%"
+    params: list[Any] = list(_NON_SPENDING_CATEGORIES)
+    where = [
+        "amount < 0",
+        f"category NOT IN ({','.join('?' for _ in _NON_SPENDING_CATEGORIES)})",
+        "(expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))",
+        """(
+            UPPER(COALESCE(description, '')) LIKE ?
+            OR UPPER(COALESCE(raw_description, '')) LIKE ?
+            OR UPPER(COALESCE(merchant_name, '')) LIKE ?
+            OR UPPER(COALESCE(category, '')) LIKE ?
+        )""",
+    ]
+    params.extend([search, search, search, search])
+    if profile and profile != "household":
+        where.append("profile_id = ?")
+        params.append(profile)
+    if month:
+        where.append("date LIKE ?")
+        params.append(month + "%")
+    else:
+        if start:
+            where.append("date >= ?")
+            params.append(start)
+        if end:
+            where.append("date <= ?")
+            params.append(end)
+    where_sql = " AND ".join(where)
+    total_row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(ABS(amount)), 0) AS total, COUNT(*) AS count
+        FROM transactions_visible
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    recent_rows = conn.execute(
+        f"""
+        SELECT id as original_id, profile_id as profile, date, description, raw_description,
+               amount, category, original_category, categorization_source, confidence,
+               transaction_type as type, account_name, account_type, merchant_name,
+               enriched, is_excluded, expense_type
+        FROM transactions_visible
+        WHERE {where_sql}
+        ORDER BY date DESC
+        LIMIT 10
+        """,
+        params,
+    ).fetchall()
+    recent = [dict(row) for row in recent_rows]
+    for tx in recent:
+        tx["enriched"] = bool(tx.get("enriched", 0))
+        tx["is_excluded"] = bool(tx.get("is_excluded", 0))
 
     return {
         "merchant_query": merchant,
         "range": label,
         "start": start, "end": end,
         "matched_merchants": matched[:5],
-        "total": _fmt_money(sum(float(m.get("total_spent") or 0) for m in matched)),
-        "txn_count": sum(int(m.get("transaction_count") or 0) for m in matched),
-        "recent": tx_page.get("data") or [],
-        "total_matching_transactions": tx_page.get("total_count", 0),
+        "total": _fmt_money(total_row[0] if total_row else 0),
+        "txn_count": int(total_row[1] if total_row else 0),
+        "recent": recent,
+        "total_matching_transactions": int(total_row[1] if total_row else 0),
     }
 
 
@@ -592,6 +649,15 @@ def _t_plot_chart(args: dict, profile: str | None, conn) -> Any:
     Types: 'line' (trends over time), 'bar' (comparisons, top-N),
            'donut' (category share / composition).
     """
+    # Be defensive for LLM fallback calls. The deterministic chart path already
+    # sends the canonical shape, but models sometimes use common charting aliases
+    # like chart_type + data.labels/data.values.
+    if "type" not in args and "chart_type" in args:
+        args = {**args, "type": args.get("chart_type")}
+    nested_data = args.get("data")
+    if isinstance(nested_data, dict):
+        args = {**nested_data, **args}
+
     chart_type = (args.get("type") or "").strip().lower()
     if chart_type not in ("line", "bar", "donut"):
         return {"error": "type must be one of: line, bar, donut"}
@@ -906,12 +972,19 @@ def execute_tool(name: str, args: dict, profile: str | None, cache: dict | None 
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
+    def _execute_uncached():
+        try:
+            with get_db() as conn:
+                return spec["fn"](args or {}, profile, conn)
+        except Exception as e:
+            logger.exception("tool %s failed", name)
+            return {"error": f"tool execution failed: {e}"}
+
     try:
-        with get_db() as conn:
-            result = spec["fn"](args or {}, profile, conn)
-    except Exception as e:
-        logger.exception("tool %s failed", name)
-        return {"error": f"tool execution failed: {e}"}
+        import copilot_cache
+        result = copilot_cache.get_hot_tool_result(name, args or {}, profile, _execute_uncached)
+    except Exception:
+        result = _execute_uncached()
 
     if cache is not None:
         cache[cache_key] = result

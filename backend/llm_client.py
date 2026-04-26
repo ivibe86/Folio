@@ -35,6 +35,10 @@ OLLAMA_MODEL_COPILOT = os.getenv("OLLAMA_MODEL_COPILOT", "gemma4:26b")
 # Increase further via env if your hardware is particularly slow.
 _OLLAMA_TIMEOUT_CATEGORIZE = float(os.getenv("OLLAMA_TIMEOUT_CATEGORIZE", "600"))  # 10 min
 _OLLAMA_TIMEOUT_COPILOT = float(os.getenv("OLLAMA_TIMEOUT_COPILOT", "240"))        # 4 min
+_OLLAMA_COPILOT_KEEP_ALIVE = os.getenv(
+    "OLLAMA_COPILOT_KEEP_ALIVE",
+    os.getenv("OLLAMA_PREWARM_KEEP_ALIVE", "15m"),
+).strip() or "15m"
 
 
 def is_available() -> bool:
@@ -267,6 +271,8 @@ def _chat_with_tools_ollama(
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
+    if purpose == "copilot":
+        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
     if ollama_tools:
         payload["tools"] = ollama_tools
 
@@ -460,6 +466,8 @@ def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
+    if purpose == "copilot":
+        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
     if ollama_tools:
         payload["tools"] = ollama_tools
 
@@ -507,6 +515,8 @@ def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
         "stream": False,
         "options": {"num_predict": max_tokens},
     }
+    if purpose == "copilot":
+        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
 
     if purpose in {"categorize", "copilot"}:
         # Merchant enrichment, categorization, and SQL generation are

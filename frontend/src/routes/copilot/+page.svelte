@@ -35,6 +35,8 @@
         if (!text) return text;
         let out = text.replace(/<observation\b[^>]*>[\s\S]*?<\/observation>/gi, '');
         out = out.replace(/<memory_proposal\b[^>]*>[\s\S]*?<\/memory_proposal>/gi, '');
+        out = out.replace(/<observation\b[^>]*\/>/gi, '');
+        out = out.replace(/<memory_proposal\b[^>]*\/>/gi, '');
         // Mid-stream: hide the open tag onward until close arrives, so we don't flicker XML
         const openIdx = out.search(/<(observation|memory_proposal)\b/i);
         if (openIdx >= 0) out = out.slice(0, openIdx);
@@ -144,6 +146,37 @@
         historyOpen = false;
     }
 
+    async function clearHistory() {
+        if (sidebarLoading) return;
+        const ok = window.confirm('Clear all recent Copilot activity for this view? This only removes the activity log; it does not delete transactions or memory.');
+        if (!ok) return;
+        sidebarLoading = true;
+        try {
+            await api.clearCopilotHistory(activeProfileId);
+            historyItems = [];
+            showSqlForHistory = {};
+        } catch (error) {
+            setNotice(error?.message || 'Failed to clear Copilot history.');
+        } finally {
+            sidebarLoading = false;
+        }
+    }
+
+    async function deleteHistoryItem(item) {
+        if (!item?.id) return;
+        const ok = window.confirm('Remove this Copilot activity item? This only removes it from history.');
+        if (!ok) return;
+        try {
+            await api.deleteCopilotHistoryItem(item.id, activeProfileId);
+            historyItems = historyItems.filter((entry) => entry.id !== item.id);
+            const nextSqlState = { ...showSqlForHistory };
+            delete nextSqlState[item.id];
+            showSqlForHistory = nextSqlState;
+        } catch (error) {
+            setNotice(error?.message || 'Failed to remove Copilot history item.');
+        }
+    }
+
     function formatDateTime(value) {
         if (!value) return '—';
         const normalized = String(value).includes('T') ? value : String(value).replace(' ', 'T');
@@ -200,7 +233,7 @@
         try {
             const [recurringResult, historyResult] = await Promise.all([
                 api.getRecurring().catch(() => null),
-                api.getCopilotHistory(20).catch(() => ({ items: [] })),
+                api.getCopilotHistory(20, activeProfileId).catch(() => ({ items: [] })),
             ]);
             recurringData = recurringResult;
             historyItems = historyResult?.items || [];
@@ -418,7 +451,9 @@
                     msg.content = (ev.answer || currentContent || '').trim();
                     msg.data = ev.data || null;
                     msg.data_source = ev.data_source || null;
-                    msg.tool_trace = ev.tool_trace || msg.tool_trace || [];
+                    msg.tool_trace = (ev.tool_trace && ev.tool_trace.length > 0)
+                        ? ev.tool_trace
+                        : (msg.tool_trace || []);
                     msg.active_tool = null;
                     msg.memory_proposals = ev.memory_proposals || [];
                     if (ev.chart) msg.chart = ev.chart;
@@ -435,6 +470,7 @@
                     }
                     loading = false;
                     cancelStream = null;
+                    refreshSidebar();
                     break;
                 case 'memory_update':
                     // Late-arriving proposals from the post-turn detector. Append to
@@ -1101,6 +1137,9 @@
                             <h3>Recent Copilot Activity</h3>
                             <p>Reuse a recent prompt or inspect the generated SQL.</p>
                         </div>
+                        {#if recentHistory.length > 0}
+                            <button type="button" class="copilot-inline-btn" on:click={clearHistory} disabled={sidebarLoading}>Clear</button>
+                        {/if}
                     </div>
                     <button type="button" class="copilot-history-close" on:click={closeHistory} aria-label="Close history">
                         <span class="material-symbols-outlined text-[18px]">close</span>
@@ -1121,7 +1160,12 @@
                                             <p class="copilot-row-title">{item.user_message}</p>
                                             <p class="copilot-row-subtitle">{item.operation_type} · {formatDateTime(item.created_at)}</p>
                                         </div>
-                                        <button class="copilot-inline-btn" type="button" on:click={() => reuseHistoryPrompt(item)}>Reuse</button>
+                                        <div class="copilot-history-actions">
+                                            <button class="copilot-inline-btn" type="button" on:click={() => reuseHistoryPrompt(item)}>Reuse</button>
+                                            <button class="copilot-history-delete" type="button" on:click={() => deleteHistoryItem(item)} aria-label="Remove history item">
+                                                <span class="material-symbols-outlined text-[14px]">close</span>
+                                            </button>
+                                        </div>
                                     </div>
                                     {#if item.generated_sql}
                                         <button class="copilot-sql-toggle" on:click={() => toggleHistorySql(item.id)}>

@@ -1522,14 +1522,9 @@ def _log_conversation(
     rows_affected: int = 0,
 ):
     try:
-        with get_db() as conn:
-            conn.execute(
-                """INSERT INTO copilot_conversations
-                   (profile_id, user_message, generated_sql, query_result,
-                    assistant_response, operation_type, rows_affected)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (profile, question, sql, result[:5000], answer, operation, rows_affected),
-            )
+        from data_manager import log_copilot_conversation
+
+        log_copilot_conversation(profile, question, sql, result, answer, operation, rows_affected)
     except Exception:
         logger.debug("Failed to log copilot conversation", exc_info=True)
 

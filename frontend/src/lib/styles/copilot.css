@@ -524,6 +524,33 @@
     line-height: 1.55;
 }
 
+.copilot-history-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+}
+
+.copilot-history-delete {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid var(--card-border);
+    background: transparent;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.copilot-history-delete:hover {
+    color: var(--danger, #ef4444);
+    border-color: color-mix(in srgb, var(--danger, #ef4444) 35%, var(--card-border));
+    background: color-mix(in srgb, var(--danger, #ef4444) 8%, transparent);
+}
+
 .copilot-data-help {
     margin: -4px 0 0;
     font-size: 0.6875rem;

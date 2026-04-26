@@ -2689,6 +2689,66 @@ def get_copilot_conversations(limit: int = 50, profile: str | None = None, conn=
         return _query(c)
 
 
+def log_copilot_conversation(
+    profile: str | None,
+    question: str,
+    sql: str = "",
+    result: str = "",
+    answer: str = "",
+    operation: str = "read",
+    rows_affected: int = 0,
+    conn=None,
+) -> None:
+    """Persist a Copilot turn for the Recent Copilot Activity drawer."""
+    def _insert(c):
+        c.execute(
+            """INSERT INTO copilot_conversations
+               (profile_id, user_message, generated_sql, query_result,
+                assistant_response, operation_type, rows_affected)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (profile, question, sql or "", (result or "")[:5000], answer or "", operation or "read", rows_affected or 0),
+        )
+
+    if conn is not None:
+        _insert(conn)
+        return
+    with get_db() as c:
+        _insert(c)
+
+
+def clear_copilot_conversations(profile: str | None = None, conn=None) -> int:
+    """Delete Copilot activity rows. A concrete profile clears only that profile; household clears all."""
+    def _delete(c):
+        if profile and profile != "household":
+            cur = c.execute("DELETE FROM copilot_conversations WHERE profile_id = ?", (profile,))
+        else:
+            cur = c.execute("DELETE FROM copilot_conversations")
+        return cur.rowcount or 0
+
+    if conn is not None:
+        return _delete(conn)
+    with get_db() as c:
+        return _delete(c)
+
+
+def delete_copilot_conversation(conversation_id: int, profile: str | None = None, conn=None) -> int:
+    """Delete one Copilot activity row, scoped to profile unless viewing household/all."""
+    def _delete(c):
+        if profile and profile != "household":
+            cur = c.execute(
+                "DELETE FROM copilot_conversations WHERE id = ? AND profile_id = ?",
+                (conversation_id, profile),
+            )
+        else:
+            cur = c.execute("DELETE FROM copilot_conversations WHERE id = ?", (conversation_id,))
+        return cur.rowcount or 0
+
+    if conn is not None:
+        return _delete(conn)
+    with get_db() as c:
+        return _delete(c)
+
+
 def get_data_browser_rows(
     table: str,
     profile: str | None = None,

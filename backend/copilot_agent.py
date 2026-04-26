@@ -54,42 +54,6 @@ TREND_CHART_TOOLS = (
     "get_top_merchants",
     "plot_chart",
 )
-ADVANCED_TOOLS = (
-    "get_month_summary",
-    "get_top_categories",
-    "get_top_merchants",
-    "get_category_spend",
-    "get_merchant_spend",
-    "get_recurring_summary",
-    "get_monthly_spending_trend",
-    "get_net_worth_trend",
-    "get_transactions_for_merchant",
-    "get_summary",
-    "get_account_balances",
-    "get_transactions",
-    "get_category_breakdown",
-    "get_dashboard_bundle",
-    "get_net_worth_delta",
-    "get_category_rules",
-    "search_saved_insights",
-    "plot_chart",
-    "run_sql",
-)
-
-TOOL_CAPABILITY_MANIFEST = """Available Copilot capabilities:
-- monthly summaries and top spending: get_month_summary, get_top_categories, get_top_merchants, get_summary
-- specific category/merchant/transaction answers: get_category_spend, get_merchant_spend, get_transactions, get_transactions_for_merchant
-- recurring/subscriptions: get_recurring_summary
-- account balances and cash: get_account_balances
-- net worth history/charts: get_net_worth_trend, get_net_worth_delta
-- monthly spending/category spending charts: get_monthly_spending_trend
-- dashboard-wide context: get_dashboard_bundle, get_category_breakdown
-- category rules and saved insights: get_category_rules, search_saved_insights
-- write previews: preview_bulk_recategorize, preview_create_rule, preview_rename_merchant
-- chart rendering: plot_chart
-- advanced read-only SQL fallback: run_sql
-"""
-
 SQL_SCHEMA_ON_DEMAND = """SQL schema notes for run_sql:
 - Prefer specialized tools first. Use run_sql only when no specific tool fits.
 - Read transactions through transactions_visible. Spending filter: amount < 0, category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income'), and expense_type not internal/household transfer.
@@ -162,6 +126,35 @@ def _history_text(history: list[dict] | None, limit: int = 4) -> str:
 
 
 def _extract_month_count(question: str, history: list[dict] | None = None) -> int:
+    current = (question or "").lower()
+    if "half year" in current:
+        return 6
+    since_match = re.search(
+        r"\bsince\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(20\d{2}))?\b",
+        current,
+    )
+    if since_match:
+        month_lookup = {
+            "jan": 1, "january": 1,
+            "feb": 2, "february": 2,
+            "mar": 3, "march": 3,
+            "apr": 4, "april": 4,
+            "may": 5,
+            "jun": 6, "june": 6,
+            "jul": 7, "july": 7,
+            "aug": 8, "august": 8,
+            "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10,
+            "nov": 11, "november": 11,
+            "dec": 12, "december": 12,
+        }
+        now = datetime.now()
+        month = month_lookup[since_match.group(1)]
+        year = int(since_match.group(2) or now.year)
+        if not since_match.group(2) and month > now.month:
+            year -= 1
+        months = (now.year - year) * 12 + now.month - month + 1
+        return max(1, min(months, 36))
     context = f"{_history_text(history)}\n{question}".lower()
     match = re.search(r"(?:last|past)\s+(\d{1,2})\s+months?", context)
     if match:
@@ -198,112 +191,57 @@ def _extract_spending_category(question: str, history: list[dict] | None = None)
     for needle, category in category_aliases.items():
         if re.search(rf"\b{re.escape(needle)}\b", context):
             return category
+    known = _extract_known_category_from_text(context)
+    if known:
+        return known
     return None
 
 
-def _valid_tool_names(names: Any) -> list[str]:
-    if not isinstance(names, list):
-        return []
-    valid = set(TOOL_REGISTRY)
-    cleaned: list[str] = []
-    for name in names:
-        if isinstance(name, str) and name in valid and name not in cleaned:
-            cleaned.append(name)
-    return cleaned
+def _normalize_subject_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
 
 
-def _route_tools_with_llm(question: str, history: list[dict] | None = None) -> list[str] | None:
-    if not llm_client.is_available():
+def _extract_known_category_from_text(text: str) -> str | None:
+    normalized = f" {_normalize_subject_text(text)} "
+    if not normalized.strip():
         return None
-
-    recent = _history_text(history, limit=4)
-    prompt = f"""Choose the minimum tool set for the user's latest request.
-
-{TOOL_CAPABILITY_MANIFEST}
-
-Rules:
-- Return ONLY JSON: {{"tools":["tool_name"],"reason":"short"}}
-- Choose [] for normal non-finance/general chat.
-- For any chart request, include plot_chart plus the data tool needed to produce values.
-- For net worth/networth charts, choose get_net_worth_trend and plot_chart.
-- For spending/category spending over months, choose get_monthly_spending_trend and plot_chart.
-- For ambiguous finance questions, choose a safe small bundle rather than no tools.
-
-Recent context:
-{recent or "(none)"}
-
-Latest user request:
-{question}
-
-JSON:"""
     try:
-        raw = llm_client.complete(prompt, max_tokens=180, purpose="copilot")
+        with get_db() as conn:
+            rows = conn.execute("SELECT name FROM categories WHERE COALESCE(name, '') != ''").fetchall()
     except Exception:
-        logger.debug("tool router LLM failed", exc_info=True)
         return None
-    raw = (raw or "").strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"```[a-z]*\n?", "", raw).strip("`\n ")
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        logger.debug("tool router returned non-JSON: %r", raw[:200])
+    candidates: list[str] = []
+    for row in rows:
+        name = row["name"] if hasattr(row, "keys") else row[0]
+        if not name:
+            continue
+        norm_name = _normalize_subject_text(str(name))
+        if norm_name and f" {norm_name} " in normalized:
+            candidates.append(str(name))
+    if not candidates:
         return None
-    tools = _valid_tool_names(parsed.get("tools") if isinstance(parsed, dict) else parsed)
-    return tools
+    return max(candidates, key=len)
 
 
-def _select_tools(question: str, history: list[dict] | None = None) -> list[str]:
-    routed = _route_tools_with_llm(question, history)
-    if routed is not None:
-        return routed
-
-    context = f"{_history_text(history)}\n{question}".lower()
-    if not _looks_financial(context):
-        return []
-
-    if any(w in context for w in ("recategorize", "categorize", "create rule", "always categorize", "rename", "move all", "change all")):
-        return list(WRITE_TOOLS)
-
-    groups: list[tuple[str, ...]] = []
-    if any(w in context for w in ("chart", "graph", "plot", "visual", "trend", "over the months", "monthly")):
-        groups.append(TREND_CHART_TOOLS)
-    if any(w in context for w in ("transaction", "merchant", "category", "costco", "amazon", "where did", "show me", "list", "grocery", "groceries")):
-        groups.append(DRILLDOWN_TOOLS)
-    if any(w in context for w in ("balance", "cash", "account", "net worth", "runway")):
-        groups.append(("get_account_balances", "get_net_worth_trend", "get_net_worth_delta", "get_summary"))
-    if any(w in context for w in ("sql", "query", "rule", "policy", "why is", "debug", "reconcile")):
-        groups.append(ADVANCED_TOOLS)
-    if not groups:
-        groups.append(SUMMARY_TOOLS)
-
-    return _uniq_tools(*groups)
+def _extract_chart_spending_category(question: str, history: list[dict] | None = None) -> str | None:
+    q = (question or "").lower()
+    if re.search(r"\b(all categories|all spending|overall|total spending|total expenses?|financial expenses?)\b", q):
+        return None
+    current_category = _extract_spending_category(question, None)
+    if current_category:
+        return current_category
+    if history and re.search(r"\b(that|those|same|every month|monthly|chart|graph|plot|trend)\b", q):
+        return _extract_spending_category(_history_text(history, limit=6), None)
+    return None
 
 
 def _extra_prompt_for_tools(tool_names: list[str]) -> str:
-    parts = [TOOL_CAPABILITY_MANIFEST]
+    parts = []
     if "run_sql" in tool_names:
         parts.append(SQL_SCHEMA_ON_DEMAND)
     if "plot_chart" in tool_names:
         parts.append(CHART_RECIPE_ON_DEMAND)
     return "\n".join(parts)
-
-
-def _claims_missing_capability(answer: str) -> bool:
-    text = (answer or "").lower()
-    return any(
-        phrase in text
-        for phrase in (
-            "i don't have access",
-            "i do not have access",
-            "i don't have the tool",
-            "i do not have the tool",
-            "i don't have a tool",
-            "i do not have a tool",
-            "can't access your",
-            "cannot access your",
-        )
-    )
 
 
 def _fast_watch_system(profile: str | None) -> str:
@@ -347,7 +285,7 @@ def _execute_fast_watch_tools(profile: str | None, cache: dict) -> tuple[dict[st
 def _build_monthly_spending_chart(question: str, profile: str | None, history: list[dict] | None = None, cache: dict | None = None) -> tuple[str, dict, list[dict], dict]:
     cache = cache if cache is not None else {}
     months = _extract_month_count(question, history)
-    category = _extract_spending_category(question, history)
+    category = _extract_chart_spending_category(question, history)
     trend_args = {"months": months}
     if category:
         trend_args["category"] = category
@@ -532,6 +470,7 @@ PERSONA
 
 TOOL DISCIPLINE
 - If you need a tool, emit no visible prose before the tool call.
+- Treat the latest user message as authoritative. Use prior turns only for pronouns or explicit follow-ups, never to reuse a previous merchant/category/chart type when the latest message names a new one.
 - The orientation block is only a truncated preview. For any specific time period, merchant, category, account balance, transaction list, write, or chart, call an appropriate tool.
 - Time windows: current_month, last_month, this_week, last_week, last_7d/30d/90d/180d/365d, ytd, last_year, all, or YYYY-MM. Never reuse old turn numbers for a changed time window.
 - Prefer specialized tools over run_sql. Use run_sql only when no specific tool fits.
@@ -712,12 +651,19 @@ def _truncate_for_model(payload: Any) -> str:
 
 
 def _build_system_prompt(profile: str | None, tool_names: list[str] | None = None) -> str:
+    def _build_orientation() -> str:
+        try:
+            with get_db() as conn:
+                return build_copilot_context(profile, conn)
+        except Exception:
+            logger.exception("Failed to build orientation block")
+            return ""
+
     try:
-        with get_db() as conn:
-            orientation = build_copilot_context(profile, conn)
+        import copilot_cache
+        orientation = copilot_cache.get_or_set("orientation", copilot_cache.make_key(profile), _build_orientation)
     except Exception:
-        logger.exception("Failed to build orientation block")
-        orientation = ""
+        orientation = _build_orientation()
 
     now = datetime.now().strftime("%Y-%m-%d")
     header = f"Today is {now}. Active profile: {profile or 'household'}."
@@ -741,146 +687,42 @@ def _normalize_history(history: list[dict] | None) -> list[dict]:
     return cleaned
 
 
-def run_agent(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
-    if _is_watch_question(question):
-        cache: dict = {}
-        payload, trace = _execute_fast_watch_tools(profile, cache)
-        prompt = (
-            "User asked: " + question + "\n\n"
-            "Live tool results:\n" + json.dumps(payload, ensure_ascii=True, default=str)
-        )
-        try:
-            response = llm_client.chat_with_tools(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                system=_fast_watch_system(profile),
-                max_tokens=420,
-                purpose="copilot",
-            )
-            final_answer = (response.get("content") or "").strip()
-        except Exception as e:
-            logger.exception("fast watch summary failed")
-            return {
-                "answer": f"Copilot hit an error while summarizing: {e}",
-                "tool_trace": trace,
-                "iterations": 0,
-                "error": str(e),
-            }
-        return _finalize_answer(
-            question=question,
-            profile=profile,
-            raw_answer=final_answer,
-            trace=trace,
-            cache=cache,
-            iterations=0,
-            run_detector=True,
-        )
+def _dispatcher_enabled() -> bool:
+    from copilot_agents.classifier import dispatcher_enabled
 
-    messages: list[dict] = _normalize_history(history)
-    messages.append({"role": "user", "content": question})
-    cache: dict = {}
-    trace: list[dict] = []
-    final_answer = ""
-    selected_tools = _select_tools(question, history)
-    chart_plan = _can_execute_chart_plan(selected_tools)
-    if chart_plan:
-        answer, trend, plan_trace, chart = _execute_chart_plan(chart_plan, question, profile, history, cache)
-        result = _finalize_answer(
-            question=question,
-            profile=profile,
-            raw_answer=answer,
-            trace=plan_trace,
-            cache=cache,
-            iterations=0,
-            run_detector=True,
-        )
-        if chart.get("_chart"):
-            result["chart"] = chart
-        result["data"] = trend.get("series") or result.get("data")
-        result["data_source"] = plan_trace[0]["name"] if plan_trace else result.get("data_source")
-        return result
-
-    system = _build_system_prompt(profile, selected_tools)
-    retried_with_expanded_tools = False
-
-    for iteration in range(MAX_ITERATIONS + 1):
-        force_final = iteration == MAX_ITERATIONS
-        if force_final:
-            messages.append({
-                "role": "user",
-                "content": "Iteration cap reached. Provide your best final answer now using what you already know. Do not call any more tools.",
-            })
-
-        try:
-            response = llm_client.chat_with_tools(
-                messages=messages,
-                tools=selected_tools,
-                system=system,
-                max_tokens=1400,
-                purpose="copilot",
-            )
-        except Exception as e:
-            logger.exception("agent chat failed at iteration %d", iteration)
-            return {
-                "answer": f"Copilot hit an error while reasoning: {e}",
-                "tool_trace": trace,
-                "iterations": iteration,
-                "error": str(e),
-            }
-
-        content = response.get("content") or ""
-        tool_calls = response.get("tool_calls") or []
-
-        if not tool_calls or force_final:
-            final_answer = content.strip() if content and content.strip() else ""
-            if (
-                final_answer
-                and _claims_missing_capability(final_answer)
-                and selected_tools != list(ADVANCED_TOOLS)
-                and not retried_with_expanded_tools
-            ):
-                retried_with_expanded_tools = True
-                selected_tools = list(ADVANCED_TOOLS)
-                system = _build_system_prompt(profile, selected_tools)
-                messages = _normalize_history(history)
-                messages.append({"role": "user", "content": question})
-                final_answer = ""
-                continue
-            break
-
-        messages.append({
-            "role": "assistant",
-            "content": content,
-            "tool_calls": tool_calls,
-        })
-
-        for call in tool_calls:
-            start = datetime.now()
-            result = execute_tool(call["name"], call.get("args") or {}, profile, cache=cache)
-            duration_ms = int((datetime.now() - start).total_seconds() * 1000)
-            trace.append({
-                "name": call["name"],
-                "args": call.get("args") or {},
-                "duration_ms": duration_ms,
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": _truncate_for_model(result),
-            })
-
-    return _finalize_answer(
-        question=question,
-        profile=profile,
-        raw_answer=final_answer,
-        trace=trace,
-        cache=cache,
-        iterations=iteration,
-        run_detector=True,
-    )
+    return dispatcher_enabled()
 
 
-def run_agent_stream(question: str, profile: str | None, history: list[dict] | None = None):
+def _selected_schema_tokens(tool_names: list[str] | tuple[str, ...]) -> int:
+    from copilot_agents.classifier import selected_schema_tokens
+
+    return selected_schema_tokens(tool_names)
+
+
+def _planned_tools_for_route(route: dict) -> list[str]:
+    from copilot_agents.classifier import planned_tools_for_route
+
+    return planned_tools_for_route(route)
+
+
+def route_question(question: str, history: list[dict] | None = None, forced_intent: str | None = None) -> dict:
+    from copilot_agents.classifier import route_question as classify_route
+
+    return classify_route(question, history, forced_intent=forced_intent)
+
+
+def run_agent(question: str, profile: str | None, history: list[dict] | None = None, forced_intent: str | None = None) -> dict:
+    if _dispatcher_enabled() or forced_intent:
+        from copilot_agents.dispatcher import run_agent as run_dispatcher_agent
+
+        dispatched = run_dispatcher_agent(question, profile, history, forced_intent=forced_intent)
+        if dispatched is not None:
+            return dispatched
+
+    return _run_legacy_escape_hatch(question, profile, history)
+
+
+def run_agent_stream(question: str, profile: str | None, history: list[dict] | None = None, forced_intent: str | None = None):
     """
     Streaming variant of run_agent. Yields event dicts suitable for SSE:
       {type: 'status', message: str}
@@ -891,266 +733,67 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
       {type: 'done', answer, data, data_source, tool_trace, iterations}
       {type: 'error', message}
     """
-    if _is_watch_question(question):
-        cache: dict = {}
-        trace: list[dict] = []
-        payload: dict[str, Any] = {}
-        yield {"type": "reset_text"}
-        calls = [
-            ("get_recurring_summary", {"limit": 5}, "recurring", "items"),
-            ("get_top_merchants", {"range": "current_month", "limit": 5}, "top_merchants", "merchants"),
-            ("get_top_categories", {"range": "current_month", "limit": 5}, "top_categories", "categories"),
-        ]
-        for name, args, payload_key, list_key in calls:
-            yield {"type": "tool_call", "name": name, "args": args}
-            start = datetime.now()
-            result = execute_tool(name, args, profile, cache=cache)
-            duration_ms = int((datetime.now() - start).total_seconds() * 1000)
-            trace.append({"name": name, "args": args, "duration_ms": duration_ms})
-            payload[payload_key] = _summarize_tool_payload(result, key=list_key)
-            yield {"type": "tool_result", "name": name, "duration_ms": duration_ms}
+    if _dispatcher_enabled() or forced_intent:
+        from copilot_agents.dispatcher import run_agent_stream as run_dispatcher_stream
 
-        prompt = (
-            "User asked: " + question + "\n\n"
-            "Live tool results:\n" + json.dumps(payload, ensure_ascii=True, default=str)
-        )
-        final_parts: list[str] = []
-        try:
-            for event_type, payload_part in llm_client.chat_with_tools_stream(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                system=_fast_watch_system(profile),
-                max_tokens=420,
-                purpose="copilot",
-            ):
-                if event_type == "text":
-                    final_parts.append(payload_part)
-                    yield {"type": "token", "text": payload_part}
-        except Exception as e:
-            logger.exception("fast watch stream failed")
-            yield {"type": "error", "message": f"Copilot hit an error: {e}"}
+        dispatched = run_dispatcher_stream(question, profile, history, forced_intent=forced_intent)
+        if dispatched is not None:
+            yield from dispatched
             return
 
-        final_answer = "".join(final_parts).strip() or "I couldn't land on a confident answer from the available data."
-        display_rows, display_source = _extract_display_data(trace, cache, profile)
-        cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
-            raw_answer=final_answer, profile=profile,
-        )
-        answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
-        yield {
-            "type": "done",
-            "answer": answer_text,
-            "data": display_rows,
-            "data_source": display_source,
-            "tool_trace": trace,
-            "iterations": 0,
-            "memory_proposals": proposals_created,
-            "memory_observations": observations_logged,
-        }
-        detector_props = _persist_detector_signals(
-            user_question=question,
-            cleaned_answer=cleaned_answer or final_answer,
-            profile=profile,
-            agent_proposals_raw=agent_props_raw,
-        )
-        if detector_props:
-            yield {"type": "memory_update", "memory_proposals": detector_props}
-        return
+    yield from _run_legacy_escape_hatch_stream(question, profile, history)
 
-    messages: list[dict] = _normalize_history(history)
-    messages.append({"role": "user", "content": question})
-    cache: dict = {}
-    trace: list[dict] = []
-    final_answer_parts: list[str] = []
-    pending_write: dict | None = None
-    pending_chart: dict | None = None
-    selected_tools = _select_tools(question, history)
-    chart_plan = _can_execute_chart_plan(selected_tools)
-    if chart_plan:
-        cache: dict = {}
-        yield {"type": "reset_text"}
-        if chart_plan == "net_worth":
-            first_tool = "get_net_worth_trend"
-            answer, trend, plan_trace, chart = _build_net_worth_chart(profile, cache)
-        else:
-            first_tool = "get_monthly_spending_trend"
-            answer, trend, plan_trace, chart = _build_monthly_spending_chart(question, profile, history, cache)
-        for call in plan_trace:
-            yield {"type": "tool_call", "name": call["name"], "args": call.get("args") or {}}
-            yield {"type": "tool_result", "name": call["name"], "duration_ms": call.get("duration_ms", 0)}
-        if chart.get("_chart"):
-            yield {"type": "chart", "chart": chart}
-        cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
-            raw_answer=answer, profile=profile,
-        )
-        answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
-        yield {
-            "type": "done",
-            "answer": answer_text,
-            "data": trend.get("series"),
-            "data_source": first_tool,
-            "tool_trace": plan_trace,
-            "iterations": 0,
-            "memory_proposals": proposals_created,
-            "memory_observations": observations_logged,
-            "chart": chart if chart.get("_chart") else None,
-        }
-        detector_props = _persist_detector_signals(
-            user_question=question,
-            cleaned_answer=cleaned_answer or answer,
-            profile=profile,
-            agent_proposals_raw=agent_props_raw,
-        )
-        if detector_props:
-            yield {"type": "memory_update", "memory_proposals": detector_props}
-        return
 
-    system = _build_system_prompt(profile, selected_tools)
-    retried_with_expanded_tools = False
-
-    for iteration in range(MAX_ITERATIONS + 1):
-        force_final = iteration == MAX_ITERATIONS
-        if force_final:
-            messages.append({
-                "role": "user",
-                "content": "Iteration cap reached. Provide your best final answer now using what you already know. Do not call any more tools.",
-            })
-
-        pending_tool_calls: list[dict] = []
-        text_buffer: list[str] = []
-        # If this turn ends up having tool calls, text is just reasoning; clear any prior partial.
-        yield {"type": "reset_text"}
-
-        try:
-            for event_type, payload in llm_client.chat_with_tools_stream(
-                messages=messages, tools=selected_tools, system=system, max_tokens=1400, purpose="copilot",
-            ):
-                if event_type == "text":
-                    text_buffer.append(payload)
-                    yield {"type": "token", "text": payload}
-                elif event_type == "tool_call":
-                    pending_tool_calls.append(payload)
-                # 'stop' events are informational; loop naturally ends when iter_lines closes
-        except Exception as e:
-            logger.exception("agent stream failed at iteration %d", iteration)
-            yield {"type": "error", "message": f"Copilot hit an error: {e}"}
-            return
-
-        content = "".join(text_buffer)
-
-        if not pending_tool_calls or force_final:
-            candidate_answer = content.strip() if content else ""
-            if (
-                candidate_answer
-                and _claims_missing_capability(candidate_answer)
-                and selected_tools != list(ADVANCED_TOOLS)
-                and not retried_with_expanded_tools
-            ):
-                retried_with_expanded_tools = True
-                selected_tools = list(ADVANCED_TOOLS)
-                system = _build_system_prompt(profile, selected_tools)
-                messages = _normalize_history(history)
-                messages.append({"role": "user", "content": question})
-                final_answer_parts = []
-                yield {"type": "reset_text"}
-                continue
-            final_answer_parts.append(content)
-            break
-
-        # Any text emitted before the tool call was just reasoning — tell client to discard
-        yield {"type": "reset_text"}
-
-        messages.append({
-            "role": "assistant",
-            "content": content,
-            "tool_calls": pending_tool_calls,
-        })
-
-        for call in pending_tool_calls:
-            yield {"type": "tool_call", "name": call["name"], "args": call.get("args") or {}}
-            start = datetime.now()
-            result = execute_tool(call["name"], call.get("args") or {}, profile, cache=cache)
-            duration_ms = int((datetime.now() - start).total_seconds() * 1000)
-            trace.append({
-                "name": call["name"],
-                "args": call.get("args") or {},
-                "duration_ms": duration_ms,
-            })
-            yield {"type": "tool_result", "name": call["name"], "duration_ms": duration_ms}
-
-            # Capture write-preview payloads so the UI can render Confirm/Cancel
-            if isinstance(result, dict) and result.get("_write_preview"):
-                pending_write = {
-                    "confirmation_id": result.get("confirmation_id"),
-                    "sql": result.get("sql"),
-                    "rows_affected": result.get("rows_affected"),
-                    "samples": result.get("samples", []),
-                    "preview_changes": result.get("preview_changes", []),
-                    "summary": result.get("summary"),
-                }
-
-            # Capture chart specs — most recent wins if multiple are emitted
-            if isinstance(result, dict) and result.get("_chart"):
-                pending_chart = {
-                    "type": result.get("type"),
-                    "title": result.get("title"),
-                    "series_name": result.get("series_name"),
-                    "labels": result.get("labels", []),
-                    "values": result.get("values", []),
-                    "unit": result.get("unit", "currency"),
-                }
-                yield {"type": "chart", "chart": pending_chart}
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": _truncate_for_model(result),
-            })
-
-    _raw_answer = "".join(final_answer_parts).strip()
-    if _raw_answer:
-        final_answer = _raw_answer
-    elif pending_chart:
-        title = pending_chart.get("title") or "chart"
-        final_answer = f"Done — here's the {title}."
-    else:
-        final_answer = "I couldn't land on a confident answer from the available data."
-    display_rows, display_source = _extract_display_data(trace, cache, profile)
-
-    # FAST phase — runs in critical path. Just XML parsing + threshold check.
-    cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
-        raw_answer=final_answer, profile=profile,
+def _legacy_tool_names() -> list[str]:
+    preferred = _uniq_tools(
+        SUMMARY_TOOLS,
+        DRILLDOWN_TOOLS,
+        TREND_CHART_TOOLS,
+        WRITE_TOOLS,
+        ("get_category_breakdown", "get_dashboard_bundle", "get_net_worth_delta", "get_category_rules", "search_saved_insights", "run_sql"),
     )
-    answer_text = _fallback_when_empty(cleaned_answer, bool(proposals_created))
+    return [name for name in preferred if name in TOOL_REGISTRY]
 
-    done_event = {
-        "type": "done",
-        "answer": answer_text,
-        "data": display_rows,
-        "data_source": display_source,
-        "tool_trace": trace,
-        "iterations": iteration,
-        "memory_proposals": proposals_created,
-        "memory_observations": observations_logged,
-    }
-    if pending_write:
-        done_event["pending_write"] = pending_write
-        # Prefer showing the preview samples inline over any other list data
-        if pending_write.get("samples"):
-            done_event["data"] = pending_write["samples"]
-            done_event["data_source"] = "write_preview"
-    if pending_chart:
-        done_event["chart"] = pending_chart
-    yield done_event
 
-    # SLOW phase — runs after the user has already seen the answer. Catches turns
-    # the conversational agent forgot to tag. Streams the late-arriving proposals
-    # back as a separate event so the UI can append them inline.
-    detector_props = _persist_detector_signals(
-        user_question=question,
-        cleaned_answer=cleaned_answer or final_answer,
+def _run_legacy_escape_hatch(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
+    from copilot_agents.base import tool_loop_result
+
+    tools = _legacy_tool_names()
+    result = tool_loop_result(
+        question=question,
         profile=profile,
-        agent_proposals_raw=agent_props_raw,
+        history=history,
+        selected_tools=tools,
+        system=_build_system_prompt(profile, tools),
+        max_iterations=MAX_ITERATIONS,
     )
-    if detector_props:
-        yield {"type": "memory_update", "memory_proposals": detector_props}
+    result["route"] = {
+        "intent": "legacy",
+        "shortcut": "env_escape_hatch",
+        "selected_tools": tools,
+        "tool_schema_tokens_est": _selected_schema_tokens(tools),
+    }
+    return result
+
+
+def _run_legacy_escape_hatch_stream(question: str, profile: str | None, history: list[dict] | None = None):
+    from copilot_agents.base import tool_loop_stream
+
+    tools = _legacy_tool_names()
+    yield {
+        "type": "route",
+        "intent": "legacy",
+        "shortcut": "env_escape_hatch",
+        "route_ms": 0,
+        "classifier_ms": 0,
+        "selected_tools": tools,
+        "tool_schema_tokens_est": _selected_schema_tokens(tools),
+    }
+    yield from tool_loop_stream(
+        question=question,
+        profile=profile,
+        history=history,
+        selected_tools=tools,
+        system=_build_system_prompt(profile, tools),
+        max_iterations=MAX_ITERATIONS,
+    )

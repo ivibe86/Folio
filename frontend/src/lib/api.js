@@ -438,10 +438,23 @@ export function createApi(fetchFn = fetch) {
             return request(`/memory/consolidate${qs ? '?' + qs : ''}`, { method: 'POST' });
         },
 
-        getCopilotHistory: (limit = 40) => {
+        getCopilotHistory: (limit = 40, profile = null) => {
             const params = new URLSearchParams();
             params.set('limit', String(limit));
+            if (profile && profile !== 'household') params.set('profile', profile);
             return request(`/copilot/history?${params.toString()}`);
+        },
+        clearCopilotHistory: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/history${qs ? '?' + qs : ''}`, { method: 'DELETE' });
+        },
+        deleteCopilotHistoryItem: (id, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/copilot/history/${id}${qs ? '?' + qs : ''}`, { method: 'DELETE' });
         },
 
         getCopilotDataBrowser: (table, search = '', limit = 100) => {
