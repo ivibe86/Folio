@@ -214,6 +214,205 @@
     color: var(--text-muted);
 }
 
+.tx-review-toggle {
+    display: inline-grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-height: 2.35rem;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--card-border) 86%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--body-bg) 52%, var(--card-bg));
+}
+
+.tx-review-toggle button {
+    border: 0;
+    border-right: 1px solid color-mix(in srgb, var(--card-border) 70%, transparent);
+    padding: 0 0.7rem;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.73rem;
+    font-weight: 750;
+}
+
+.tx-review-toggle button:last-child {
+    border-right: 0;
+}
+
+.tx-review-toggle button.active {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+}
+
+.tx-export-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 2.35rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--card-border));
+    border-radius: 10px;
+    padding: 0 0.78rem;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--accent);
+    font-size: 0.74rem;
+    font-weight: 800;
+}
+
+.tx-export-btn .material-symbols-outlined {
+    font-size: 16px;
+}
+
+.tx-export-btn:disabled {
+    opacity: 0.6;
+}
+
+.tx-detail-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.tx-detail-splits {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+
+.tx-split-header,
+.tx-split-total {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.tx-split-header button {
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--card-border));
+    border-radius: 8px;
+    padding: 0.35rem 0.55rem;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.tx-split-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.tx-split-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) 92px 30px;
+    gap: 0.45rem;
+}
+
+.tx-split-row select,
+.tx-split-row input {
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--card-border) 82%, transparent);
+    border-radius: 8px;
+    padding: 0.45rem 0.55rem;
+    background: color-mix(in srgb, var(--body-bg) 54%, var(--card-bg));
+    color: var(--text-primary);
+    font-size: 0.76rem;
+}
+
+.tx-split-row .tx-split-note {
+    grid-column: 1 / -1;
+}
+
+.tx-split-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--card-border) 82%, transparent);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+}
+
+.tx-split-remove:disabled {
+    opacity: 0.35;
+}
+
+.tx-split-remove .material-symbols-outlined {
+    font-size: 15px;
+}
+
+.tx-split-total {
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+    background: color-mix(in srgb, var(--positive) 8%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.tx-split-total strong {
+    color: var(--positive);
+    font-size: 0.72rem;
+}
+
+.tx-split-total-off {
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.tx-split-total-off strong {
+    color: var(--warning);
+}
+
+.tx-split-muted {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+}
+
+.tx-detail-notes textarea,
+.tx-detail-notes input[type="text"],
+.tx-detail-notes input:not([type]) {
+    width: 100%;
+    min-height: 2.35rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--card-border);
+    border-radius: 0.75rem;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    outline: none;
+}
+
+.tx-detail-notes textarea {
+    min-height: 5rem;
+    resize: vertical;
+}
+
+.tx-meta-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    font-weight: 700;
+}
+
+.tx-meta-save {
+    align-self: flex-start;
+    min-height: 2.25rem;
+    padding: 0 0.85rem;
+    border: 0;
+    border-radius: 0.7rem;
+    background: var(--accent);
+    color: white;
+    font-size: 0.74rem;
+    font-weight: 750;
+    cursor: pointer;
+}
+
+.tx-meta-save:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .tx-command-search kbd {
     display: inline-flex;
     align-items: center;

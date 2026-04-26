@@ -12,6 +12,7 @@
 
     const allTabs = [
         { key: 'connections', label: 'Connections' },
+        { key: 'accounts',    label: 'Accounts' },
         { key: 'merchants',   label: 'Merchants' },
         { key: 'rules',       label: 'Rules' },
         { key: 'categories',  label: 'Categories' },
@@ -70,6 +71,12 @@
     let tellerEnrollments = [];
     let simplefinConnections = [];
     let connectionsLoading = false;
+    let accountsLoading = false;
+    let accountItems = [];
+    let manualAccountDraft = { name: '', account_type: 'investment', account_subtype: 'manual', balance: '', notes: '' };
+    let manualAccountSaving = false;
+    let manualAccountEdits = {};
+    let manualAccountSavingId = null;
     let simplefinRef;
     let migrationRef;
     let tellerConfig = null;
@@ -321,6 +328,7 @@
         try {
             await Promise.all([
                 loadConnections(),
+                loadAccounts(),
                 loadMerchants(),
                 loadRules(),
                 loadCategories(),
@@ -366,6 +374,90 @@
             connectionsLoading = false;
             localLlmLoading = false;
         }
+    }
+
+    async function loadAccounts() {
+        accountsLoading = true;
+        try {
+            accountItems = await api.getAccounts().catch(() => []);
+            manualAccountEdits = {};
+        } finally {
+            accountsLoading = false;
+        }
+    }
+
+    async function saveManualAccount() {
+        if (!manualAccountDraft.name.trim() || manualAccountSaving) return;
+        manualAccountSaving = true;
+        try {
+            await api.createManualAccount({
+                name: manualAccountDraft.name.trim(),
+                account_type: manualAccountDraft.account_type,
+                account_subtype: manualAccountDraft.account_subtype || 'manual',
+                balance: Number(manualAccountDraft.balance || 0),
+                notes: manualAccountDraft.notes || ''
+            }, scopedProfile);
+            manualAccountDraft = { name: '', account_type: 'investment', account_subtype: 'manual', balance: '', notes: '' };
+            invalidateCache();
+            await loadAccounts();
+            setNotice('Manual account added.');
+        } catch (e) {
+            setNotice(e?.message || 'Failed to add manual account.');
+        } finally {
+            manualAccountSaving = false;
+        }
+    }
+
+    async function removeManualAccount(id) {
+        try {
+            await api.deleteManualAccount(id, scopedProfile);
+            invalidateCache();
+            await loadAccounts();
+            setNotice('Manual account removed.');
+        } catch (e) {
+            setNotice(e?.message || 'Failed to remove manual account.');
+        }
+    }
+
+    function startManualAccountEdit(account) {
+        manualAccountEdits = {
+            ...manualAccountEdits,
+            [account.id]: {
+                name: account.name || '',
+                account_type: account.account_type || (account.is_credit ? 'loan' : 'investment'),
+                account_subtype: account.type || 'manual',
+                balance: Math.abs(Number(account.balance || 0)).toString(),
+                notes: account.manual_notes || ''
+            }
+        };
+    }
+
+    async function saveManualAccountEdit(account) {
+        const draft = manualAccountEdits[account.id];
+        if (!draft || manualAccountSavingId) return;
+        manualAccountSavingId = account.id;
+        try {
+            await api.updateManualAccount(account.id, {
+                name: draft.name.trim() || account.name,
+                account_type: draft.account_type,
+                account_subtype: draft.account_subtype || 'manual',
+                balance: Number(draft.balance || 0),
+                notes: draft.notes || ''
+            }, scopedProfile);
+            invalidateCache();
+            await loadAccounts();
+            setNotice('Manual balance updated.');
+        } catch (e) {
+            setNotice(e?.message || 'Failed to update manual account.');
+        } finally {
+            manualAccountSavingId = null;
+        }
+    }
+
+    function cancelManualAccountEdit(id) {
+        const next = { ...manualAccountEdits };
+        delete next[id];
+        manualAccountEdits = next;
     }
 
     function syncLocalLlmForm(status) {
@@ -1049,6 +1141,151 @@
 
         <SimpleFINConnect bind:this={simplefinRef} on:connected={handleSimpleFINConnected} />
         <MigrationWizard bind:this={migrationRef} on:done={loadConnections} />
+
+    {:else if activeTab === 'accounts'}
+        <section class="cc-pane cc-pane-primary fade-in-up" style="max-width: 860px; margin: 0 auto;">
+            <div class="cc-pane-header">
+                <div class="cc-pane-title">
+                    <h3>Accounts</h3>
+                    <p>Synced accounts plus manual assets and liabilities that fill out net worth before deeper wealth integrations exist.</p>
+                </div>
+            </div>
+
+            <div class="cc-insights">
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Synced</span>
+                    <strong>{accountItems.filter(a => a.provider !== 'manual').length}</strong>
+                    <small>From Teller or SimpleFIN</small>
+                </div>
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Manual</span>
+                    <strong>{accountItems.filter(a => a.provider === 'manual').length}</strong>
+                    <small>Assets and liabilities</small>
+                </div>
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Manual Net</span>
+                    <strong>{formatCurrency(accountItems.filter(a => a.provider === 'manual').reduce((sum, a) => sum + (a.is_credit ? -Math.abs(Number(a.balance || 0)) : Number(a.balance || 0)), 0), 2)}</strong>
+                    <small>Included in dashboard net worth</small>
+                </div>
+            </div>
+
+            <div class="cc-conn-section">
+                <div class="cc-conn-section-header">
+                    <div class="cc-conn-section-title">
+                        <span class="cc-provider-badge cc-provider-local-ai">Manual Account</span>
+                        <span class="cc-conn-count">{activeProfileId === 'household' ? 'Household' : activeProfileId}</span>
+                    </div>
+                </div>
+                <div class="cc-form-grid">
+                    <div class="cc-field">
+                        <span>Name</span>
+                        <input class="cc-input" bind:value={manualAccountDraft.name} placeholder="Roth IRA, Home value, Car loan" />
+                    </div>
+                    <div class="cc-field">
+                        <span>Type</span>
+                        <select class="cc-select" bind:value={manualAccountDraft.account_type}>
+                            <option value="depository">Cash asset</option>
+                            <option value="investment">Investment / property asset</option>
+                            <option value="credit">Credit liability</option>
+                            <option value="loan">Loan / mortgage liability</option>
+                        </select>
+                    </div>
+                    <div class="cc-field">
+                        <span>Subtype</span>
+                        <input class="cc-input" bind:value={manualAccountDraft.account_subtype} placeholder="retirement, property, mortgage" />
+                    </div>
+                    <div class="cc-field">
+                        <span>Balance</span>
+                        <input class="cc-input" type="number" step="0.01" bind:value={manualAccountDraft.balance} placeholder="0.00" />
+                    </div>
+                    <div class="cc-field cc-field-full">
+                        <span>Notes</span>
+                        <input class="cc-input" bind:value={manualAccountDraft.notes} placeholder="Optional context" />
+                    </div>
+                </div>
+                <div class="cc-actions">
+                    <button class="cc-primary-btn" disabled={manualAccountSaving || !manualAccountDraft.name.trim()} on:click={saveManualAccount}>
+                        {manualAccountSaving ? 'Saving...' : 'Add Manual Account'}
+                    </button>
+                </div>
+            </div>
+
+            <div class="cc-list-wrap">
+                {#if accountsLoading}
+                    <div class="cc-empty">Loading accounts...</div>
+                {:else if accountItems.length === 0}
+                    <div class="cc-empty">No accounts yet.</div>
+                {:else}
+                    <div class="cc-table">
+                        <div class="cc-table-header" style="--cc-cols: 1.4fr 0.7fr 0.8fr 0.8fr 0.6fr;">
+                            <div>Account</div>
+                            <div>Type</div>
+                            <div>Balance</div>
+                            <div>Provider</div>
+                            <div></div>
+                        </div>
+                        {#each accountItems as account}
+                            <div class="cc-table-row" style="--cc-cols: 1.4fr 0.7fr 0.8fr 0.8fr 0.6fr;">
+                                <div class="cc-cell-primary">
+                                    <div class="cc-cell-title">{account.name}</div>
+                                    <div class="cc-cell-subtitle">{account.profile || 'household'}{account.manual_updated_at ? ` · updated ${formatDate(account.manual_updated_at)}` : ''}{account.manual_is_stale ? ' · stale' : ''}</div>
+                                </div>
+                                <div class="cc-cell-subtitle">{account.account_type || account.type}</div>
+                                <div class="cc-cell-subtitle">{formatCurrency(Math.abs(Number(account.balance || 0)), 2)}</div>
+                                <div class="cc-cell-subtitle">{account.provider || 'synced'}</div>
+                                <div>
+                                    {#if account.provider === 'manual'}
+                                        <button class="cc-conn-remove" on:click={() => startManualAccountEdit(account)} title="Edit manual account">
+                                            <span class="material-symbols-outlined text-[16px]">edit</span>
+                                        </button>
+                                        <button class="cc-conn-remove" on:click={() => removeManualAccount(account.id)} title="Remove manual account">
+                                            <span class="material-symbols-outlined text-[16px]">close</span>
+                                        </button>
+                                    {/if}
+                                </div>
+                            </div>
+                            {#if manualAccountEdits[account.id]}
+                                <div class="cc-table-row" style="--cc-cols: 1fr;">
+                                    <div class="cc-form-grid">
+                                        <div class="cc-field">
+                                            <span>Name</span>
+                                            <input class="cc-input" bind:value={manualAccountEdits[account.id].name} />
+                                        </div>
+                                        <div class="cc-field">
+                                            <span>Type</span>
+                                            <select class="cc-select" bind:value={manualAccountEdits[account.id].account_type}>
+                                                <option value="depository">Cash asset</option>
+                                                <option value="investment">Investment / property asset</option>
+                                                <option value="credit">Credit liability</option>
+                                                <option value="loan">Loan / mortgage liability</option>
+                                            </select>
+                                        </div>
+                                        <div class="cc-field">
+                                            <span>Balance</span>
+                                            <input class="cc-input" type="number" step="0.01" bind:value={manualAccountEdits[account.id].balance} />
+                                        </div>
+                                        <div class="cc-field">
+                                            <span>Subtype</span>
+                                            <input class="cc-input" bind:value={manualAccountEdits[account.id].account_subtype} />
+                                        </div>
+                                        <div class="cc-field cc-field-full">
+                                            <span>Notes</span>
+                                            <input class="cc-input" bind:value={manualAccountEdits[account.id].notes} />
+                                        </div>
+                                        <div class="cc-actions">
+                                            <button class="cc-primary-btn" disabled={manualAccountSavingId === account.id} on:click={() => saveManualAccountEdit(account)}>
+                                                {manualAccountSavingId === account.id ? 'Saving...' : 'Save Balance'}
+                                            </button>
+                                            <button class="cc-secondary-btn" on:click={() => cancelManualAccountEdit(account.id)}>Cancel</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            {/if}
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        </section>
 
     {:else if activeTab === 'merchants'}
         <!-- ── MERCHANTS ─────────────────────────────────────────── -->

@@ -195,10 +195,24 @@ export function createApi(fetchFn = fetch) {
             if (params.category) query.set('category', params.category);
             if (params.account) query.set('account', params.account);
             if (params.search) query.set('search', params.search);
+            if (params.reviewed != null) query.set('reviewed', params.reviewed);
             if (params.limit != null) query.set('limit', params.limit);
             if (params.offset != null) query.set('offset', params.offset);
             const qs = query.toString();
             return request(`/transactions${qs ? '?' + qs : ''}`);
+        },
+
+        getReviewQueue: () => request('/transactions/review-queue'),
+
+        exportTransactions: (params = {}) => {
+            const query = new URLSearchParams();
+            if (params.month) query.set('month', params.month);
+            if (params.category) query.set('category', params.category);
+            if (params.account) query.set('account', params.account);
+            if (params.search) query.set('search', params.search);
+            if (params.reviewed != null) query.set('reviewed', params.reviewed);
+            const qs = query.toString();
+            return request(`/transactions/export${qs ? '?' + qs : ''}`);
         },
 
         updateCategory: (txId, category, oneOff = false) =>
@@ -211,6 +225,20 @@ export function createApi(fetchFn = fetch) {
             request(`/transactions/${txId}/exclude`, {
                 method: 'PATCH',
                 body: JSON.stringify({ is_excluded: isExcluded })
+            }),
+
+        updateTransactionMetadata: (txId, payload) =>
+            request(`/transactions/${txId}/metadata`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            }),
+
+        getTransactionSplits: (txId) => request(`/transactions/${txId}/splits`),
+
+        updateTransactionSplits: (txId, splits) =>
+            request(`/transactions/${txId}/splits`, {
+                method: 'PATCH',
+                body: JSON.stringify({ splits })
             }),
 
         getCategories: () => request('/categories'),
@@ -636,8 +664,59 @@ export function createApi(fetchFn = fetch) {
             const qs = params.toString();
             return request(`/budgets/${encodeURIComponent(categoryName)}${qs ? '?' + qs : ''}`, {
                 method: 'PATCH',
-                body: JSON.stringify({ amount })
+                body: JSON.stringify(typeof amount === 'object' ? amount : { amount })
             });
+        },
+
+        getGoals: () => request('/goals'),
+        createGoal: (payload, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/goals${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+        },
+        updateGoal: (id, payload, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/goals/${id}${qs ? '?' + qs : ''}`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            });
+        },
+        deleteGoal: (id, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/goals/${id}${qs ? '?' + qs : ''}`, { method: 'DELETE' });
+        },
+
+        createManualAccount: (payload, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/manual-accounts${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+        },
+        updateManualAccount: (id, payload, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/manual-accounts/${encodeURIComponent(id)}${qs ? '?' + qs : ''}`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            });
+        },
+        deleteManualAccount: (id, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/manual-accounts/${encodeURIComponent(id)}${qs ? '?' + qs : ''}`, { method: 'DELETE' });
         },
 
         getMerchantDirectory: (search = '', limit = 50) => {

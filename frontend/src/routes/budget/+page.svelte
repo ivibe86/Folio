@@ -17,7 +17,9 @@
     let categoriesMeta = [];
     let monthCategories = [];
     let budgets = {};
+    let budgetSettings = {};
     let recurringData = null;
+    let goals = [];
     let trailingCategoryStats = {};
 
     let loading = true;
@@ -52,8 +54,13 @@
         overCount: 0,
         projectedOverCount: 0,
         budgetedCount: 0,
-        unsetCount: 0
+        unsetCount: 0,
+        recurringMonthly: 0,
+        goalGap: 0,
+        goalMonthlyNeed: 0
     };
+    let goalDraft = { name: '', goal_type: 'custom', target_amount: '', current_amount: '', target_date: '' };
+    let savingGoal = false;
     let planHealth = { label: 'Ready to plan', tone: 'neutral', icon: 'edit_note', message: 'Start with suggested budgets from your usual categories.' };
 
     $: activeProfileId = $activeProfile || 'household';
@@ -108,18 +115,21 @@
     async function loadBudgetPage() {
         loading = true;
         try {
-            const [m, allCatsResult, metaResult, budgetResult, recurringResult] = await Promise.all([
+            const [m, allCatsResult, metaResult, budgetResult, recurringResult, goalResult] = await Promise.all([
                 api.getMonthlyAnalytics(),
                 api.getCategoryAnalytics(),
                 api.getCategoriesMeta().catch(() => []),
                 api.getBudgets(),
-                api.getRecurring().catch(() => null)
+                api.getRecurring().catch(() => null),
+                api.getGoals().catch(() => ({ items: [] }))
             ]);
             monthly = Array.isArray(m) ? m : [];
             allCategoryAnalytics = normalizeCategoryResult(allCatsResult);
             categoriesMeta = Array.isArray(metaResult) ? metaResult : [];
+            budgetSettings = Object.fromEntries((budgetResult?.items || []).map(item => [item.category, item]));
             budgets = Object.fromEntries((budgetResult?.items || []).map(item => [item.category, Number(item.amount || 0)]));
             recurringData = recurringResult;
+            goals = goalResult?.items || [];
 
             const newestMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
             if (newestMonths.length > 0) {
@@ -258,14 +268,18 @@
             const recurring = getRecurringForCategory(category);
             const spent = Number(monthCat.total || 0);
             const budget = Number(budgets[category] || 0);
+            const setting = budgetSettings[category] || {};
+            const rolloverMode = setting.rollover_mode || 'none';
+            const rolloverBalance = Number(setting.rollover_balance || 0);
+            const available = budget + rolloverBalance;
             const trailing = trailingCategoryStats[category] || { average: 0, max: 0, monthsWithSpend: 0, months: 0 };
             const averageMonthly = trailing.average || (Number(allTimeCat.total || 0) / totalMonths);
             const projected = selectedMonthIsCurrent && monthProgress.elapsedDays > 0
                 ? (spent / monthProgress.elapsedDays) * monthProgress.totalDays
                 : spent;
-            const remaining = budget - spent;
-            const budgetPercent = budget > 0 ? (spent / budget) * 100 : 0;
-            const projectedPercent = budget > 0 ? (projected / budget) * 100 : 0;
+            const remaining = available - spent;
+            const budgetPercent = available > 0 ? (spent / available) * 100 : 0;
+            const projectedPercent = available > 0 ? (projected / available) * 100 : 0;
             const recurringTotal = recurring.reduce((sum, item) => sum + Number(item.amount || item.monthly_amount || 0), 0);
             const suggestedBudget = getSuggestedBudget(averageMonthly, recurringTotal, spent);
             const status = getCategoryStatus({ budget, spent, projected, averageMonthly, recurringTotal, budgetPercent, projectedPercent });
@@ -274,6 +288,9 @@
             return {
                 category,
                 budget,
+                available,
+                rolloverMode,
+                rolloverBalance,
                 spent,
                 remaining,
                 budgetPercent,
@@ -348,7 +365,8 @@
         const budgetedSpent = budgetedItems.reduce((sum, item) => sum + item.spent, 0);
         const projectedSpend = budgetItems.reduce((sum, item) => sum + item.projected, 0);
         const projectedBudgetedSpend = budgetedItems.reduce((sum, item) => sum + item.projected, 0);
-        const totalRemaining = totalBudget - budgetedSpent;
+        const totalAvailable = budgetedItems.reduce((sum, item) => sum + item.available, 0);
+        const totalRemaining = totalAvailable - budgetedSpent;
         const utilization = totalBudget > 0 ? (budgetedSpent / totalBudget) * 100 : 0;
         const projectedUtilization = totalBudget > 0 ? (projectedBudgetedSpend / totalBudget) * 100 : 0;
         const discretionaryRemaining = budgetedItems
@@ -357,6 +375,7 @@
 
         return {
             totalBudget,
+            totalAvailable,
             totalSpent,
             budgetedSpent,
             totalRemaining,
@@ -368,7 +387,10 @@
             overCount: budgetItems.filter(item => item.status === 'over').length,
             projectedOverCount: budgetItems.filter(item => item.status === 'projected-over').length,
             budgetedCount: budgetedItems.length,
-            unsetCount: unsetItems.length
+            unsetCount: unsetItems.length,
+            recurringMonthly: recurringData?.total_monthly || 0,
+            goalGap: goals.reduce((sum, goal) => sum + Math.max(Number(goal.target_amount || 0) - Number(goal.current_amount || 0), 0), 0),
+            goalMonthlyNeed: goals.reduce((sum, goal) => sum + getGoalMonthlyNeed(goal), 0)
         };
     }
 
@@ -419,12 +441,18 @@
         const num = parseFloat(value);
         const amount = !isNaN(num) && num > 0 ? num : null;
         const previous = { ...budgets };
+        const priorSetting = budgetSettings[category] || {};
         budgets = amount ? { ...budgets, [category]: amount } : Object.fromEntries(Object.entries(budgets).filter(([key]) => key !== category));
         savingCategory = category;
 
         const profile = activeProfileId && activeProfileId !== 'household' ? activeProfileId : null;
         try {
-            await api.updateBudget(category, amount, profile);
+            const payload = {
+                amount,
+                rollover_mode: priorSetting.rollover_mode || 'none',
+                rollover_balance: Number(priorSetting.rollover_balance || 0)
+            };
+            await api.updateBudget(category, payload, profile);
             invalidateCache();
         } catch (e) {
             console.error('Failed to save budget:', e);
@@ -445,6 +473,54 @@
         if (mode === 'lean') return Math.ceil((base * 0.9) / 25) * 25;
         if (mode === 'average') return Math.ceil(base);
         return item.suggestedBudget;
+    }
+
+    function monthsUntil(targetDate) {
+        if (!targetDate) return 0;
+        const today = new Date();
+        const target = new Date(targetDate + 'T00:00:00');
+        if (Number.isNaN(target.getTime()) || target <= today) return 0;
+        return Math.max(1, Math.ceil((target - today) / (1000 * 60 * 60 * 24 * 30.4375)));
+    }
+
+    function getGoalMonthlyNeed(goal) {
+        const gap = Math.max(Number(goal.target_amount || 0) - Number(goal.current_amount || 0), 0);
+        const months = monthsUntil(goal.target_date);
+        return months > 0 ? gap / months : 0;
+    }
+
+    async function saveGoal() {
+        if (!goalDraft.name.trim() || savingGoal) return;
+        savingGoal = true;
+        const profile = activeProfileId && activeProfileId !== 'household' ? activeProfileId : null;
+        try {
+            await api.createGoal({
+                name: goalDraft.name.trim(),
+                goal_type: goalDraft.goal_type || 'custom',
+                target_amount: Number(goalDraft.target_amount || 0),
+                current_amount: Number(goalDraft.current_amount || 0),
+                target_date: goalDraft.target_date || null
+            }, profile);
+            const result = await api.getGoals();
+            goals = result?.items || [];
+            goalDraft = { name: '', goal_type: 'custom', target_amount: '', current_amount: '', target_date: '' };
+            invalidateCache();
+        } catch (e) {
+            console.error('Failed to save goal:', e);
+        } finally {
+            savingGoal = false;
+        }
+    }
+
+    async function deleteGoal(id) {
+        const profile = activeProfileId && activeProfileId !== 'household' ? activeProfileId : null;
+        try {
+            await api.deleteGoal(id, profile);
+            goals = goals.filter(goal => goal.id !== id);
+            invalidateCache();
+        } catch (e) {
+            console.error('Failed to delete goal:', e);
+        }
     }
 
     async function loadCategoryTransactions(category) {
@@ -564,6 +640,79 @@
             {/if}
         </section>
     {/if}
+
+    <section class="budget-plan-grid fade-in-up" style="animation-delay: 100ms">
+        <div class="budget-panel card">
+            <div class="budget-section-header">
+                <div>
+                    <h3>Planning Commitments</h3>
+                    <p>Recurring subscriptions and goal funding layered on top of the monthly category plan.</p>
+                </div>
+            </div>
+            <div class="budget-commitment-grid">
+                <div>
+                    <span>Recurring / mo</span>
+                    <strong>{formatCurrency(planStats.recurringMonthly)}</strong>
+                </div>
+                <div>
+                    <span>Goal gap</span>
+                    <strong>{formatCurrency(planStats.goalGap)}</strong>
+                </div>
+                <div>
+                    <span>Monthly goal pace</span>
+                    <strong>{planStats.goalMonthlyNeed > 0 ? formatCurrency(planStats.goalMonthlyNeed) : 'Set target dates'}</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="budget-panel card">
+            <div class="budget-section-header">
+                <div>
+                    <h3>Goals & Sinking Funds</h3>
+                    <p>Track emergency funds, annual bills, trips, and other targets without needing investment integrations.</p>
+                </div>
+            </div>
+            {#if goals.length > 0}
+                <div class="budget-goal-list">
+                    {#each goals as goal}
+                        {@const gap = Math.max(Number(goal.target_amount || 0) - Number(goal.current_amount || 0), 0)}
+                        {@const pct = Number(goal.target_amount || 0) > 0 ? Math.min((Number(goal.current_amount || 0) / Number(goal.target_amount || 1)) * 100, 100) : 0}
+                        <div class="budget-goal-row">
+                            <div>
+                                <strong>{goal.name}</strong>
+                                <span>{goal.goal_type} · {gap > 0 ? `${formatCurrency(gap)} left` : 'funded'}</span>
+                            </div>
+                            <div class="budget-goal-right">
+                                <span>{formatCurrency(goal.current_amount)} / {formatCurrency(goal.target_amount)}</span>
+                                <button on:click={() => deleteGoal(goal.id)} title="Archive goal">
+                                    <span class="material-symbols-outlined">close</span>
+                                </button>
+                            </div>
+                            <div class="budget-progress-track budget-goal-track">
+                                <div class="budget-progress-fill" style="width: {pct}%"></div>
+                            </div>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+            <div class="budget-goal-form">
+                <input bind:value={goalDraft.name} placeholder="Goal name" />
+                <select bind:value={goalDraft.goal_type}>
+                    <option value="emergency_fund">Emergency fund</option>
+                    <option value="travel">Travel</option>
+                    <option value="annual_bill">Annual bill</option>
+                    <option value="debt_payoff">Debt payoff</option>
+                    <option value="custom">Custom</option>
+                </select>
+                <input bind:value={goalDraft.target_amount} type="number" min="0" step="1" placeholder="Target" />
+                <input bind:value={goalDraft.current_amount} type="number" min="0" step="1" placeholder="Saved" />
+                <input bind:value={goalDraft.target_date} type="date" />
+                <button on:click={saveGoal} disabled={savingGoal || !goalDraft.name.trim()}>
+                    {savingGoal ? 'Saving...' : 'Add goal'}
+                </button>
+            </div>
+        </div>
+    </section>
 
     <section class="budget-two-panel fade-in-up" style="animation-delay: 120ms">
         <div class="budget-panel card">
@@ -687,6 +836,12 @@
                             <strong>{item.recurring.length > 0 ? formatCurrency(item.recurringTotal) : 'None'}</strong>
                         </div>
                     </div>
+
+                    {#if item.rolloverBalance !== 0}
+                        <div class="budget-inline-suggest budget-rollover-note">
+                            <span>Rollover {item.rolloverBalance > 0 ? '+' : ''}{formatCurrency(item.rolloverBalance)} · available {formatCurrency(item.available)}</span>
+                        </div>
+                    {/if}
 
                     {#if item.budget > 0}
                         <div class="budget-category-progress">

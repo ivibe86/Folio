@@ -229,6 +229,8 @@
     let bundleCcRepaid = data.ccRepaid || 0;
     let bundleExternalTransfers = data.externalTransfers || 0;
     let monthlyCategoryBreakdown = data.monthlyCategoryBreakdown || [];
+    let planSnapshot = data.planSnapshot || null;
+    let reviewQueue = data.reviewQueue || null;
     {
         allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
         if (allMonths.length > 0) selectedCustomMonth = allMonths[0];
@@ -269,6 +271,8 @@
             bundleCcRepaid = bundle.ccRepaid || 0;
             bundleExternalTransfers = bundle.externalTransfers || 0;
             monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
+            planSnapshot = bundle.planSnapshot || null;
+            reviewQueue = bundle.reviewQueue || null;
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -925,11 +929,13 @@
         // ââ Account totals ââ
         const _cashAccounts = accounts.filter(a => !a.is_credit);
         const _creditAccounts = accounts.filter(a => a.is_credit);
+        const _manualAssetAccounts = _cashAccounts.filter(a => a.provider === 'manual');
+        const _manualLiabilityAccounts = _creditAccounts.filter(a => a.provider === 'manual');
         // Separate investment accounts into assets (already in _cashAccounts via is_credit=false)
         // Note: loan accounts have is_credit=true and will appear in _creditAccounts
 
         const _totalCash = _cashAccounts.reduce((s, a) => s + parseFloat(a.balance || 0), 0);
-        const _totalOwed = _creditAccounts.reduce((s, a) => s + parseFloat(a.balance || 0), 0);
+        const _totalOwed = _creditAccounts.reduce((s, a) => s + Math.abs(parseFloat(a.balance || 0)), 0);
         const _netWorth = _totalCash - _totalOwed;
 
         // ── Month-over-month deltas ──
@@ -978,6 +984,8 @@
             netWorth: _netWorth,
             cashAccounts: _cashAccounts,
             creditAccounts: _creditAccounts,
+            manualAssetAccounts: _manualAssetAccounts,
+            manualLiabilityAccounts: _manualLiabilityAccounts,
             currentMonthData: _currentMonthData,
             prevMonthData: _prevMonthData,
             incomeDelta: _incomeDelta,
@@ -996,6 +1004,8 @@
     $: netWorth = dashboardMetrics.netWorth;
     $: cashAccounts = dashboardMetrics.cashAccounts;
     $: creditAccounts = dashboardMetrics.creditAccounts;
+    $: manualAssetAccounts = dashboardMetrics.manualAssetAccounts;
+    $: manualLiabilityAccounts = dashboardMetrics.manualLiabilityAccounts;
     $: currentMonthData = dashboardMetrics.currentMonthData;
     $: prevMonthData = dashboardMetrics.prevMonthData;
     $: incomeDelta = dashboardMetrics.incomeDelta;
@@ -1192,6 +1202,13 @@
         const limit = card.limit || card.credit_limit || 10000;
         const balance = Math.abs(parseFloat(card.balance || 0));
         return Math.min((balance / limit) * 100, 100);
+    }
+
+    function isManualStale(account) {
+        if (account?.provider !== 'manual' || !account.manual_updated_at) return false;
+        const updated = new Date(String(account.manual_updated_at).replace(' ', 'T'));
+        if (Number.isNaN(updated.getTime())) return false;
+        return (Date.now() - updated.getTime()) / 86400000 > 45;
     }
 
     // Sankey drill-down
@@ -1970,7 +1987,9 @@
                                 <span class="material-symbols-outlined text-[14px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">account_balance</span>
                                 <div class="flex-1 min-w-0">
                                     <p class="text-[11px] font-medium truncate" style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}">{acc.name}</p>
-                                    <p class="text-[9px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">{acc.type.replace('_', ' ')}</p>
+                                    <p class="text-[9px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">
+                                        {acc.type.replace('_', ' ')}{#if acc.provider === 'manual'} · manual{#if isManualStale(acc)} · stale{/if}{/if}
+                                    </p>
                                     <!-- Proportion bar -->
                                     <div class="account-proportion-track">
                                         <div class="account-proportion-fill" style="width: {accPct}%"></div>
@@ -2024,7 +2043,9 @@
                                 <span class="material-symbols-outlined text-[14px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">{liabilityIcon}</span>
                                 <div class="flex-1 min-w-0">
                                     <p class="text-[11px] font-medium truncate" style="color: {$darkMode ? 'var(--text-primary)' : 'var(--island-text-primary)'}">{acc.name}</p>
-                                    <p class="text-[9px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">{acc.type.replace('_', ' ')}</p>
+                                    <p class="text-[9px]" style="color: {$darkMode ? 'var(--text-muted)' : 'var(--island-text-muted)'}">
+                                        {acc.type.replace('_', ' ')}{#if acc.provider === 'manual'} · manual{#if isManualStale(acc)} · stale{/if}{/if}
+                                    </p>
                                     {#if !isLoan}
                                         <div class="utilization-bar-track">
                                             <div class="utilization-bar-fill {util > 70 ? 'high' : ''}" style="width: {util}%"></div>
@@ -2032,8 +2053,8 @@
                                     {/if}
                                 </div>
                             </div>
-                            <p class="folio-amount-compact ml-3" style="color: {parseFloat(acc.balance) > 0 ? ($darkMode ? 'var(--warning)' : 'var(--island-warning)') : ($darkMode ? 'var(--positive)' : 'var(--island-positive)')}">
-                                {(void privacyKey, formatCurrency(acc.balance))}
+                            <p class="folio-amount-compact ml-3" style="color: {$darkMode ? 'var(--warning)' : 'var(--island-warning)'}">
+                                {(void privacyKey, formatCurrency(Math.abs(parseFloat(acc.balance || 0))))}
                             </p>
                         </div>
                     {/each}
@@ -2056,6 +2077,58 @@
     </section>
 
     <!-- ═══════════════════════════════════════════════════════
+         PLAN SNAPSHOT
+         â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+    {#if planSnapshot}
+        <section class="mb-6 fade-in-up" style="animation-delay: 88ms">
+            <div class="dashboard-plan-strip card">
+                <div>
+                    <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--text-muted)">Plan Snapshot</p>
+                    <h3 class="folio-section-title" style="margin:0.15rem 0 0">Budgets, goals, and commitments</h3>
+                </div>
+                <div class="dashboard-plan-metrics">
+                    <div>
+                        <span>Plan remaining</span>
+                        <strong class:text-negative={planSnapshot.remaining < 0}>{(void privacyKey, formatCurrency(planSnapshot.remaining || 0))}</strong>
+                    </div>
+                    <div>
+                        <span>Recurring / mo</span>
+                        <strong>{(void privacyKey, formatCurrency(planSnapshot.recurring_monthly || 0))}</strong>
+                    </div>
+                    <div>
+                        <span>Goals</span>
+                        <strong>{planSnapshot.active_goal_count || 0} active</strong>
+                    </div>
+                    <div>
+                        <span>Goal gap</span>
+                        <strong>{(void privacyKey, formatCurrency(planSnapshot.goal_gap || 0))}</strong>
+                    </div>
+                </div>
+                <a href="/budget" class="dashboard-plan-link">Open plan</a>
+            </div>
+        </section>
+    {/if}
+
+    {#if reviewQueue && reviewQueue.unreviewed_count > 0}
+        <section class="mb-6 fade-in-up" style="animation-delay: 94ms">
+            <div class="dashboard-review-strip card">
+                <div class="dashboard-review-icon">
+                    <span class="material-symbols-outlined">fact_check</span>
+                </div>
+                <div>
+                    <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--text-muted)">Review Queue</p>
+                    <h3 class="folio-section-title" style="margin:0.15rem 0 0">{reviewQueue.unreviewed_count} transaction{reviewQueue.unreviewed_count === 1 ? '' : 's'} to review</h3>
+                </div>
+                <div class="dashboard-review-copy">
+                    <span>New spending</span>
+                    <strong>{(void privacyKey, formatCurrency(reviewQueue.unreviewed_spending || 0))}</strong>
+                </div>
+                <a href="/transactions?review=unreviewed" class="dashboard-plan-link">Review now</a>
+            </div>
+        </section>
+    {/if}
+
+    <!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
          S2: COMPACT METRIC RIBBON
          ═══════════════════════════════════════════════════════ -->
     <section class="mb-6 fade-in-up" style="animation-delay: 100ms">

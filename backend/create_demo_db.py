@@ -116,6 +116,9 @@ def reset_demo_tables(conn: sqlite3.Connection) -> None:
         "enrolled_tokens",
         "simplefin_connections",
         "copilot_conversations",
+        "goals",
+        "transaction_splits",
+        "manual_account_snapshots",
     ):
         conn.execute(f"DELETE FROM {table}")
 
@@ -150,6 +153,46 @@ def add_accounts(conn: sqlite3.Connection) -> None:
             )
             for item in ACCOUNTS
         ],
+    )
+
+    now = NOW
+    manual_rows = [
+        ("manual_roth_joe", "joe", "Manual", "Roth IRA", "investment", "retirement", 12400.00, 12400.00, "USD", now, 1, "manual", now, "Demo manual retirement balance"),
+        ("manual_auto_joe", "joe", "Manual", "Auto Loan", "loan", "auto", -6200.00, -6200.00, "USD", now, 1, "manual", now, "Demo manual liability"),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO accounts (
+            id, profile_id, institution_name, account_name, account_type, account_subtype,
+            current_balance, available_balance, currency, last_synced_at, is_active,
+            provider, manual_updated_at, manual_notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        manual_rows,
+    )
+    conn.executemany(
+        "INSERT INTO manual_account_snapshots (account_id, profile_id, balance, recorded_at) VALUES (?, ?, ?, ?)",
+        [(row[0], row[1], row[6], now) for row in manual_rows],
+    )
+
+
+def add_goals(conn: sqlite3.Connection) -> None:
+    target_emergency = (TODAY.replace(day=1) + timedelta(days=365)).isoformat()
+    target_trip = (TODAY.replace(day=1) + timedelta(days=210)).isoformat()
+    rows = [
+        ("joe", "Emergency Fund", "emergency_fund", 15000.0, 8420.0, target_emergency, None, "demo_sav_joe", 1, NOW, NOW),
+        ("joe", "Japan Trip", "travel", 3000.0, 1250.0, target_trip, "Travel", None, 1, NOW, NOW),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO goals (
+            profile_id, name, goal_type, target_amount, current_amount,
+            target_date, linked_category, linked_account_id, is_active, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
     )
 
 
@@ -411,6 +454,59 @@ def add_transactions(conn: sqlite3.Connection, rows: list[tuple]) -> None:
     )
 
 
+def add_transaction_workflow_examples(conn: sqlite3.Connection) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO categories (name, is_system, expense_type) VALUES (?, 0, 'variable')",
+        [("Household",), ("Home",), ("Gifts",)],
+    )
+    recent = conn.execute(
+        """
+        SELECT id FROM transactions
+        WHERE amount < 0
+        ORDER BY date DESC, id DESC
+        LIMIT 18
+        """
+    ).fetchall()
+    for index, row in enumerate(recent):
+        conn.execute(
+            "UPDATE transactions SET reviewed = ?, notes = ?, tags = ? WHERE id = ?",
+            (
+                0 if index < 10 else 1,
+                "Demo review note" if index in {2, 7, 12} else "",
+                "needs-review,demo" if index < 3 else ("travel" if index == 12 else ""),
+                row[0],
+            ),
+        )
+
+    split_tx = conn.execute(
+        """
+        SELECT id, amount FROM transactions
+        WHERE amount < 0 AND merchant_name IN ('Sunbeam Market', 'Hearth Home', 'Trailhead Goods')
+        ORDER BY date DESC
+        LIMIT 3
+        """
+    ).fetchall()
+    split_categories = [
+        ("Groceries", "Household", "Weekly grocery run with home supplies"),
+        ("Shopping", "Home", "Home purchase split into durable goods"),
+        ("Shopping", "Gifts", "Retail purchase with a small gift portion"),
+    ]
+    for row, (primary, secondary, note) in zip(split_tx, split_categories, strict=False):
+        total = abs(float(row[1] or 0))
+        first = round(total * 0.72, 2)
+        second = round(total - first, 2)
+        conn.executemany(
+            """
+            INSERT INTO transaction_splits (transaction_id, category, amount, notes, tags)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (row[0], primary, first, note, "demo"),
+                (row[0], secondary, second, note, "demo,split"),
+            ],
+        )
+
+
 def add_net_worth_history(conn: sqlite3.Connection, rng: random.Random, months: int) -> None:
     rows = []
     base_primary = 16400
@@ -451,7 +547,9 @@ def main() -> None:
         reset_demo_tables(conn)
         add_profiles(conn)
         add_accounts(conn)
+        add_goals(conn)
         add_transactions(conn, build_transactions(rng, args.months))
+        add_transaction_workflow_examples(conn)
         add_net_worth_history(conn, rng, args.months)
         conn.commit()
     finally:

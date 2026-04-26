@@ -8,6 +8,7 @@ import re
 import os
 import threading
 from datetime import datetime
+from uuid import uuid4
 from dotenv import load_dotenv
 import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
@@ -201,7 +202,8 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
                         CASE WHEN account_type IN ('credit', 'loan') THEN 1 ELSE 0 END as is_credit,
                         account_type,
                         current_balance as balance, currency, profile_id as profile,
-                        COALESCE(provider, 'teller') as provider
+                        COALESCE(provider, 'teller') as provider,
+                        manual_updated_at, manual_notes
                  FROM accounts WHERE is_active = 1"""
         params = []
         if profile and profile != "household":
@@ -211,6 +213,14 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
         accounts = dicts_from_rows(rows)
         for acct in accounts:
             acct["is_credit"] = bool(acct.get("is_credit", 0))
+            acct["is_manual"] = acct.get("provider") == "manual"
+            acct["manual_is_stale"] = False
+            if acct["is_manual"] and acct.get("manual_updated_at"):
+                try:
+                    updated = datetime.fromisoformat(str(acct["manual_updated_at"]).replace("Z", "+00:00"))
+                    acct["manual_is_stale"] = (datetime.now(updated.tzinfo) - updated).days > 45
+                except Exception:
+                    acct["manual_is_stale"] = False
         return accounts
 
     if conn is not None:
@@ -219,11 +229,36 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
         return _query(c)
 
 
+def _account_balance_totals(c, profile: str | None = None) -> tuple[float, float]:
+    """Return (assets, owed) with liabilities normalized to positive owed amounts."""
+    profile_clause = ""
+    params = []
+    if profile and profile != "household":
+        profile_clause = " AND profile_id = ?"
+        params = [profile]
+    total_assets = c.execute(
+        f"""SELECT COALESCE(SUM(current_balance), 0)
+            FROM accounts
+            WHERE account_type IN ('depository', 'investment')
+              AND is_active = 1{profile_clause}""",
+        params,
+    ).fetchone()[0]
+    total_owed = c.execute(
+        f"""SELECT COALESCE(SUM(ABS(current_balance)), 0)
+            FROM accounts
+            WHERE account_type IN ('credit', 'loan')
+              AND is_active = 1{profile_clause}""",
+        params,
+    ).fetchone()[0]
+    return float(total_assets or 0), float(total_owed or 0)
+
+
 def get_transactions_paginated(
     month: str | None = None,
     category: str | None = None,
     account: str | None = None,
     search: str | None = None,
+    reviewed: bool | None = None,
     profile: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -258,11 +293,19 @@ def get_transactions_paginated(
                 where_clauses.append("t.date <= ?")
                 params.append(end_date)
         if category:
-            where_clauses.append("t.category = ?")
-            params.append(category)
+            where_clauses.append(
+                """(t.category = ? OR EXISTS (
+                    SELECT 1 FROM transaction_splits s
+                    WHERE s.transaction_id = t.id AND s.category = ?
+                ))"""
+            )
+            params.extend([category, category])
         if account:
             where_clauses.append("t.account_name = ?")
             params.append(account)
+        if reviewed is not None:
+            where_clauses.append("COALESCE(t.reviewed, 0) = ?")
+            params.append(1 if reviewed else 0)
         if search:
             escaped = _escape_like(search.upper())
             where_clauses.append(
@@ -273,10 +316,12 @@ def get_transactions_paginated(
                     OR UPPER(COALESCE(merchant_alias.display_name, '')) LIKE ? ESCAPE '\\'
                     OR UPPER(COALESCE(merchant_meta.clean_name, '')) LIKE ? ESCAPE '\\'
                     OR UPPER(COALESCE(t.category, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.notes, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.tags, '')) LIKE ? ESCAPE '\\'
                     OR UPPER(COALESCE(t.account_name, '')) LIKE ? ESCAPE '\\'
                 )"""
             )
-            params.extend([f"%{escaped}%"] * 7)
+            params.extend([f"%{escaped}%"] * 9)
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -297,6 +342,9 @@ def get_transactions_paginated(
                               t.merchant_industry, t.merchant_city, t.merchant_state,
                               t.merchant_key, t.merchant_source, t.merchant_confidence, t.merchant_kind,
                               t.enriched, t.is_excluded, t.expense_type, t.updated_at,
+                              COALESCE(t.notes, '') as notes,
+                              COALESCE(t.tags, '') as tags,
+                              COALESCE(t.reviewed, 0) as reviewed,
                               {merchant_key_sql} AS merchant_display_key,
                               COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
                               COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
@@ -312,6 +360,8 @@ def get_transactions_paginated(
         for tx in transactions:
             tx["enriched"] = bool(tx.get("enriched", 0))
             tx["is_excluded"] = bool(tx.get("is_excluded", 0))
+            tx["reviewed"] = bool(tx.get("reviewed", 0))
+            tx["tags"] = [tag.strip() for tag in (tx.get("tags") or "").split(",") if tag.strip()]
 
         return {
             "data": transactions,
@@ -398,15 +448,7 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
             acct_profile_clause = " AND profile_id = ?"
             acct_params = [profile]
 
-        total_assets = c.execute(
-            f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('depository', 'investment') AND is_active = 1{acct_profile_clause}",
-            acct_params,
-        ).fetchone()[0]
-
-        total_owed = c.execute(
-            f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('credit', 'loan') AND is_active = 1{acct_profile_clause}",
-            acct_params,
-        ).fetchone()[0]
+        total_assets, total_owed = _account_balance_totals(c, profile=profile)
 
         # Last updated
         last_row = c.execute("SELECT MAX(last_synced_at) FROM accounts").fetchone()
@@ -556,20 +598,7 @@ def _build_reconstructed_net_worth_state(c, profile: str | None = None) -> dict:
     """
     from datetime import date as dt_date, timedelta
 
-    acct_profile_clause = ""
-    acct_params = []
-    if profile and profile != "household":
-        acct_profile_clause = " AND profile_id = ?"
-        acct_params = [profile]
-
-    total_assets = c.execute(
-        f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('depository', 'investment') AND is_active = 1{acct_profile_clause}",
-        acct_params,
-    ).fetchone()[0]
-    total_owed = c.execute(
-        f"SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('credit', 'loan') AND is_active = 1{acct_profile_clause}",
-        acct_params,
-    ).fetchone()[0]
+    total_assets, total_owed = _account_balance_totals(c, profile=profile)
     current_net_worth = total_assets - total_owed
 
     tx_profile_clause = ""
@@ -657,6 +686,37 @@ def get_net_worth_delta_metrics(profile: str | None = None, conn=None) -> dict:
     from datetime import date as dt_date, timedelta
 
     def _query(c):
+        history_profile = _profile_id(profile)
+        history_rows = c.execute(
+            """SELECT date, net_worth
+               FROM net_worth_history
+               WHERE profile_id = ?
+               ORDER BY date ASC""",
+            (history_profile,),
+        ).fetchall()
+        if history_rows:
+            from datetime import date as dt_date, timedelta
+            current_net_worth = float(history_rows[-1][1] or 0)
+            today = dt_date.today()
+            previous_month_end = today.replace(day=1) - timedelta(days=1)
+            previous_year_end = dt_date(today.year - 1, 12, 31)
+
+            def latest_on_or_before(target):
+                value = None
+                for row in history_rows:
+                    if row[0] <= target.isoformat():
+                        value = float(row[1] or 0)
+                    else:
+                        break
+                return value
+
+            previous_month_net_worth = latest_on_or_before(previous_month_end)
+            previous_year_end_net_worth = latest_on_or_before(previous_year_end)
+            return {
+                "mom": round(current_net_worth - previous_month_net_worth, 2) if previous_month_net_worth is not None else None,
+                "ytd": round(current_net_worth - previous_year_end_net_worth, 2) if previous_year_end_net_worth is not None else None,
+            }
+
         state = _build_reconstructed_net_worth_state(c, profile=profile)
         current_net_worth = state["current_net_worth"]
         if state["first_date"] is None:
@@ -715,6 +775,99 @@ def get_category_analytics_data(
             if end_date:
                 where_clauses.append("date <= ?")
                 params.append(end_date)
+
+        split_count = c.execute("SELECT COUNT(*) FROM transaction_splits").fetchone()[0]
+        if split_count:
+            alloc_where = []
+            alloc_params = []
+            if not is_household:
+                alloc_where.append("t.profile_id = ?")
+                alloc_params.append(profile)
+            if month:
+                alloc_where.append("t.date LIKE ?")
+                alloc_params.append(month + "%")
+            else:
+                if start_date:
+                    alloc_where.append("t.date >= ?")
+                    alloc_params.append(start_date)
+                if end_date:
+                    alloc_where.append("t.date <= ?")
+                    alloc_params.append(end_date)
+            if is_household:
+                alloc_where.append("(t.expense_type IS NULL OR t.expense_type NOT IN ('transfer_internal', 'transfer_household'))")
+            else:
+                alloc_where.append("(t.expense_type IS NULL OR t.expense_type != 'transfer_internal')")
+            alloc_where_sql = (" AND " + " AND ".join(alloc_where)) if alloc_where else ""
+            non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
+            allocation_sql = f"""
+                WITH allocated AS (
+                    SELECT s.category,
+                           CASE WHEN t.amount < 0 THEN -ABS(s.amount) ELSE ABS(s.amount) END AS amount,
+                           t.expense_type
+                    FROM transaction_splits s
+                    JOIN transactions_visible t ON t.id = s.transaction_id
+                    WHERE 1=1{alloc_where_sql}
+                    UNION ALL
+                    SELECT t.category, t.amount, t.expense_type
+                    FROM transactions_visible t
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM transaction_splits s WHERE s.transaction_id = t.id
+                    ){alloc_where_sql}
+                )
+                SELECT category,
+                       COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) THEN ABS(amount) ELSE 0 END), 0) AS gross,
+                       COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' THEN amount ELSE 0 END), 0) AS refunds
+                FROM allocated
+                GROUP BY category
+            """
+            allocation_params = alloc_params + alloc_params + list(NON_SPENDING_CATEGORIES) + list(NON_SPENDING_CATEGORIES)
+            rows = c.execute(allocation_sql, allocation_params).fetchall()
+            expense_type_map = {
+                row[0]: row[1]
+                for row in c.execute("SELECT name, expense_type FROM categories WHERE is_active = 1").fetchall()
+            }
+            net_cat = {}
+            gross_by_cat = {}
+            refund_by_cat = {}
+            for row in rows:
+                cat = row[0]
+                gross = float(row[1] or 0)
+                refunds = float(row[2] or 0)
+                net_val = gross - refunds
+                gross_by_cat[cat] = gross
+                refund_by_cat[cat] = refunds
+                if net_val > 0:
+                    net_cat[cat] = net_val
+            total = sum(net_cat.values())
+            result = []
+            for cat, amt in sorted(net_cat.items(), key=lambda x: -x[1]):
+                result.append({
+                    "category": cat,
+                    "total": round(amt, 2),
+                    "gross": round(gross_by_cat.get(cat, 0), 2),
+                    "refunds": round(refund_by_cat.get(cat, 0), 2),
+                    "percent": round(amt / total * 100, 1) if total > 0 else 0,
+                    "expense_type": expense_type_map.get(cat, "variable"),
+                })
+
+            transfer_where = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+            savings_total = c.execute(
+                f"""SELECT COALESCE(SUM(ABS(amount)), 0)
+                    FROM {tx_source}
+                    WHERE category = 'Savings Transfer' AND amount < 0{transfer_where}""",
+                params,
+            ).fetchone()[0]
+            personal_transfer_total = c.execute(
+                f"""SELECT COALESCE(SUM(ABS(amount)), 0)
+                    FROM {tx_source}
+                    WHERE category = 'Personal Transfer' AND amount < 0{transfer_where}""",
+                params,
+            ).fetchone()[0]
+            return {
+                "categories": result,
+                "savings_transfer_total": round(savings_total, 2),
+                "personal_transfer_total": round(personal_transfer_total, 2),
+            }
 
         # Transfer exclusion
         if is_household:
@@ -799,6 +952,166 @@ def get_category_analytics_data(
         return _query(conn)
     with get_db() as c:
         return _query(c)
+
+
+def get_plan_snapshot_data(profile: str | None = None, conn=None) -> dict:
+    """Return compact planning metrics for the dashboard."""
+    from datetime import date as dt_date
+
+    def _query(c):
+        current_month = dt_date.today().strftime("%Y-%m")
+        categories = get_category_analytics_data(month=current_month, profile=profile, conn=c)["categories"]
+        budgets = get_category_budgets(profile=profile, conn=c)
+        recurring = get_recurring_from_db(profile=profile, conn=c)
+        goals = get_goals(profile=profile, conn=c)
+
+        budget_by_cat = {item["category"]: float(item.get("amount") or 0) for item in budgets}
+        spent_by_cat = {item["category"]: float(item.get("total") or 0) for item in categories}
+        total_budget = sum(v for v in budget_by_cat.values() if v > 0)
+        budgeted_spent = sum(spent_by_cat.get(cat, 0) for cat in budget_by_cat)
+        active_goal_gap = sum(max(float(g["target_amount"] or 0) - float(g["current_amount"] or 0), 0) for g in goals)
+        over_count = sum(1 for cat, amount in budget_by_cat.items() if amount > 0 and spent_by_cat.get(cat, 0) > amount)
+
+        return {
+            "month": current_month,
+            "total_budget": round(total_budget, 2),
+            "budgeted_spent": round(budgeted_spent, 2),
+            "remaining": round(total_budget - budgeted_spent, 2),
+            "recurring_monthly": round(float(recurring.get("total_monthly") or 0), 2),
+            "active_goal_count": len(goals),
+            "goal_gap": round(active_goal_gap, 2),
+            "over_count": over_count,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_review_queue_data(profile: str | None = None, conn=None) -> dict:
+    """Return compact unreviewed transaction metrics for dashboard and exports."""
+    def _query(c):
+        where = ["COALESCE(reviewed, 0) = 0"]
+        params = []
+        if profile and profile != "household":
+            where.append("profile_id = ?")
+            params.append(profile)
+        where_sql = " AND ".join(where)
+        row = c.execute(
+            f"""SELECT COUNT(*) AS count,
+                       COALESCE(SUM(CASE
+                           WHEN amount < 0
+                            AND category NOT IN ({','.join('?' * len(NON_SPENDING_CATEGORIES))})
+                            AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))
+                           THEN ABS(amount)
+                           ELSE 0
+                       END), 0) AS spending
+                FROM transactions_visible
+                WHERE {where_sql}""",
+            list(NON_SPENDING_CATEGORIES) + params,
+        ).fetchone()
+        latest = c.execute(
+            f"""SELECT date FROM transactions_visible
+                WHERE {where_sql}
+                ORDER BY date DESC
+                LIMIT 1""",
+            params,
+        ).fetchone()
+        return {
+            "unreviewed_count": int(row[0] or 0),
+            "unreviewed_spending": round(float(row[1] or 0), 2),
+            "latest_unreviewed_date": latest[0] if latest else None,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def _profile_id(profile: str | None) -> str:
+    return profile if profile and profile != "household" else "household"
+
+
+def get_goals(profile: str | None = None, conn=None) -> list[dict]:
+    profile_id = _profile_id(profile)
+
+    def _query(c):
+        rows = c.execute(
+            """SELECT id, profile_id, name, goal_type, target_amount, current_amount,
+                      target_date, linked_category, linked_account_id, is_active,
+                      created_at, updated_at
+               FROM goals
+               WHERE profile_id = ? AND is_active = 1
+               ORDER BY COALESCE(target_date, '9999-99-99'), updated_at DESC""",
+            (profile_id,),
+        ).fetchall()
+        return dicts_from_rows(rows)
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def upsert_goal(payload: dict, profile: str | None = None, conn=None) -> dict:
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("Goal name is required.")
+        goal_id = payload.get("id")
+        goal_type = (payload.get("goal_type") or "custom").strip() or "custom"
+        target_amount = max(float(payload.get("target_amount") or 0), 0)
+        current_amount = max(float(payload.get("current_amount") or 0), 0)
+        target_date = (payload.get("target_date") or "").strip() or None
+        linked_category = (payload.get("linked_category") or "").strip() or None
+        linked_account_id = (payload.get("linked_account_id") or "").strip() or None
+
+        if goal_id:
+            c.execute(
+                """UPDATE goals
+                   SET name = ?, goal_type = ?, target_amount = ?, current_amount = ?,
+                       target_date = ?, linked_category = ?, linked_account_id = ?,
+                       updated_at = datetime('now')
+                   WHERE id = ? AND profile_id = ?""",
+                (name, goal_type, target_amount, current_amount, target_date, linked_category, linked_account_id, goal_id, profile_id),
+            )
+        else:
+            cur = c.execute(
+                """INSERT INTO goals
+                   (profile_id, name, goal_type, target_amount, current_amount, target_date,
+                    linked_category, linked_account_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (profile_id, name, goal_type, target_amount, current_amount, target_date, linked_category, linked_account_id),
+            )
+            goal_id = cur.lastrowid
+
+        row = c.execute("SELECT * FROM goals WHERE id = ? AND profile_id = ?", (goal_id, profile_id)).fetchone()
+        return dict(row)
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def delete_goal(goal_id: int, profile: str | None = None, conn=None) -> bool:
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        cur = c.execute(
+            "UPDATE goals SET is_active = 0, updated_at = datetime('now') WHERE id = ? AND profile_id = ?",
+            (goal_id, profile_id),
+        )
+        return cur.rowcount > 0
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
     
 def get_monthly_category_breakdown(profile: str | None = None, months: int = 12, conn=None) -> list[dict]:
     """
@@ -828,6 +1141,58 @@ def get_monthly_category_breakdown(profile: str | None = None, months: int = 12,
         where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
 
         non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
+
+        split_count = c.execute("SELECT COUNT(*) FROM transaction_splits").fetchone()[0]
+        if split_count:
+            allocation_sql = f"""
+                WITH allocated AS (
+                    SELECT SUBSTR(t.date, 1, 7) AS month,
+                           s.category,
+                           CASE WHEN t.amount < 0 THEN -ABS(s.amount) ELSE ABS(s.amount) END AS amount
+                    FROM transaction_splits s
+                    JOIN transactions_visible t ON t.id = s.transaction_id
+                    WHERE 1=1{where_sql}
+                    UNION ALL
+                    SELECT SUBSTR(t.date, 1, 7) AS month,
+                           t.category,
+                           t.amount
+                    FROM transactions_visible t
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM transaction_splits s WHERE s.transaction_id = t.id
+                    ){where_sql}
+                )
+                SELECT month,
+                       category,
+                       COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) THEN ABS(amount) ELSE 0 END), 0) AS gross,
+                       COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' THEN amount ELSE 0 END), 0) AS refunds
+                FROM allocated
+                GROUP BY month, category
+                ORDER BY month DESC, gross DESC
+            """
+            rows = c.execute(
+                allocation_sql,
+                params + params + list(NON_SPENDING_CATEGORIES) + list(NON_SPENDING_CATEGORIES),
+            ).fetchall()
+            month_cats = {}
+            for row in rows:
+                m = row[0]
+                cat = row[1]
+                net = float(row[2] or 0) - float(row[3] or 0)
+                if net <= 0:
+                    continue
+                month_cats.setdefault(m, {})[cat] = net
+
+            sorted_months = sorted(month_cats.keys(), reverse=True)[:months]
+            result = []
+            for m in sorted(sorted_months):
+                sorted_cats = sorted(month_cats[m].items(), key=lambda x: -x[1])
+                top_4 = sorted_cats[:4]
+                other_total = sum(v for _, v in sorted_cats[4:])
+                categories = [{"category": cat, "total": round(total, 2)} for cat, total in top_4]
+                if other_total > 0:
+                    categories.append({"category": "Other", "total": round(other_total, 2)})
+                result.append({"month": m, "categories": categories})
+            return result
 
         # Get gross expenses grouped by month + category
         expense_sql = f"""
@@ -992,6 +1357,21 @@ def get_net_worth_series_data(interval: str = "weekly", profile: str | None = No
     from datetime import timedelta
 
     def _query(c):
+        history_profile = _profile_id(profile)
+        history_rows = c.execute(
+            """SELECT date, net_worth
+               FROM net_worth_history
+               WHERE profile_id = ?
+               ORDER BY date ASC""",
+            (history_profile,),
+        ).fetchall()
+        if history_rows:
+            step = 1 if interval == "daily" else 2 if interval == "weekly" else 1
+            sampled = history_rows[::step]
+            if sampled[-1][0] != history_rows[-1][0]:
+                sampled.append(history_rows[-1])
+            return [{"date": row[0], "value": round(float(row[1] or 0), 2)} for row in sampled]
+
         state = _build_reconstructed_net_worth_state(c, profile=profile)
         if state["first_date"] is None or state["last_date"] is None:
             return []
@@ -1038,6 +1418,8 @@ def get_dashboard_bundle_data(
         nw_series = get_net_worth_series_data(interval=nw_interval, profile=profile, conn=c)
         nw_deltas = get_net_worth_delta_metrics(profile=profile, conn=c)
         monthly_cat_breakdown = get_monthly_category_breakdown(profile=profile, months=12, conn=c)
+        plan_snapshot = get_plan_snapshot_data(profile=profile, conn=c)
+        review_queue = get_review_queue_data(profile=profile, conn=c)
 
         return {
             "summary": summary_out,
@@ -1052,6 +1434,8 @@ def get_dashboard_bundle_data(
             "ccRepaid": summary_out.get("cc_repaid", 0),
             "externalTransfers": summary_out.get("external_transfers", 0),
             "monthlyCategoryBreakdown": monthly_cat_breakdown,
+            "planSnapshot": plan_snapshot,
+            "reviewQueue": review_queue,
         }
 
     if conn is not None:
@@ -2065,17 +2449,7 @@ def _snapshot_net_worth(conn, timestamp: str):
     for profile_row in profiles:
         profile_id = profile_row[0]
 
-        assets = conn.execute(
-            """SELECT COALESCE(SUM(current_balance), 0) FROM accounts
-               WHERE profile_id = ? AND account_type IN ('depository', 'investment') AND is_active = 1""",
-            (profile_id,),
-        ).fetchone()[0]
-
-        owed = conn.execute(
-            """SELECT COALESCE(SUM(current_balance), 0) FROM accounts
-               WHERE profile_id = ? AND account_type IN ('credit', 'loan') AND is_active = 1""",
-            (profile_id,),
-        ).fetchone()[0]
+        assets, owed = _account_balance_totals(conn, profile=profile_id)
 
         conn.execute(
             """INSERT OR REPLACE INTO net_worth_history
@@ -2085,12 +2459,7 @@ def _snapshot_net_worth(conn, timestamp: str):
         )
 
     # Household snapshot (all accounts)
-    total_assets = conn.execute(
-        "SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('depository', 'investment') AND is_active = 1"
-    ).fetchone()[0]
-    total_owed = conn.execute(
-        "SELECT COALESCE(SUM(current_balance), 0) FROM accounts WHERE account_type IN ('credit', 'loan') AND is_active = 1"
-    ).fetchone()[0]
+    total_assets, total_owed = _account_balance_totals(conn, profile="household")
 
     conn.execute(
         """INSERT OR REPLACE INTO net_worth_history
@@ -2361,6 +2730,208 @@ def update_transaction_excluded(tx_id: str, is_excluded: bool, conn=None) -> dic
             (tx_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def update_transaction_metadata(
+    tx_id: str,
+    notes: str | None = None,
+    tags: list[str] | None = None,
+    reviewed: bool | None = None,
+    conn=None,
+) -> dict | None:
+    """Update notes, tags, and reviewed state for a transaction."""
+    def _update(c):
+        row = c.execute("SELECT id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not row:
+            return None
+        updates = []
+        params = []
+        if notes is not None:
+            updates.append("notes = ?")
+            params.append(notes.strip())
+        if tags is not None:
+            normalized_tags = ",".join(sorted({str(tag).strip() for tag in tags if str(tag).strip()}))
+            updates.append("tags = ?")
+            params.append(normalized_tags)
+        if reviewed is not None:
+            updates.append("reviewed = ?")
+            params.append(1 if reviewed else 0)
+        if not updates:
+            return {"id": tx_id}
+        updates.append("updated_at = datetime('now')")
+        params.append(tx_id)
+        c.execute(f"UPDATE transactions SET {', '.join(updates)} WHERE id = ?", params)
+        updated = c.execute(
+            "SELECT id, notes, tags, reviewed, updated_at FROM transactions WHERE id = ?",
+            (tx_id,),
+        ).fetchone()
+        result = dict(updated)
+        result["tags"] = [tag for tag in (result.get("tags") or "").split(",") if tag]
+        result["reviewed"] = bool(result.get("reviewed", 0))
+        return result
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def get_transaction_splits(tx_id: str, conn=None) -> list[dict]:
+    def _query(c):
+        rows = c.execute(
+            """SELECT id, transaction_id, category, amount, notes, tags, created_at, updated_at
+               FROM transaction_splits
+               WHERE transaction_id = ?
+               ORDER BY id""",
+            (tx_id,),
+        ).fetchall()
+        items = dicts_from_rows(rows)
+        for item in items:
+            item["tags"] = [tag for tag in (item.get("tags") or "").split(",") if tag]
+        return items
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def replace_transaction_splits(tx_id: str, splits: list[dict], conn=None) -> dict | None:
+    """Replace all split allocations for a transaction."""
+    def _update(c):
+        tx = c.execute("SELECT id, amount FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not tx:
+            return None
+
+        c.execute("DELETE FROM transaction_splits WHERE transaction_id = ?", (tx_id,))
+        total = 0.0
+        for split in splits:
+            category = (split.get("category") or "").strip()
+            amount = abs(float(split.get("amount") or 0))
+            if not category or amount <= 0:
+                continue
+            c.execute("INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)", (category,))
+            tags = ",".join(sorted({str(tag).strip() for tag in (split.get("tags") or []) if str(tag).strip()}))
+            c.execute(
+                """INSERT INTO transaction_splits
+                   (transaction_id, category, amount, notes, tags)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (tx_id, category, amount, (split.get("notes") or "").strip(), tags),
+            )
+            total += amount
+
+        return {"transaction_id": tx_id, "split_total": round(total, 2), "items": get_transaction_splits(tx_id, conn=c)}
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def create_manual_account(payload: dict, profile: str | None = None, conn=None) -> dict:
+    """Create a manual asset or liability account."""
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        name = (payload.get("account_name") or payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("Account name is required.")
+        account_type = (payload.get("account_type") or "depository").strip()
+        if account_type not in {"depository", "investment", "credit", "loan"}:
+            raise ValueError("Unsupported account type.")
+        subtype = (payload.get("account_subtype") or payload.get("type") or "manual").strip()
+        balance = float(payload.get("balance") or 0)
+        account_id = f"manual_{uuid4().hex[:16]}"
+        now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
+        c.execute(
+            """INSERT INTO accounts
+               (id, profile_id, institution_name, account_name, account_type, account_subtype,
+                current_balance, available_balance, currency, last_synced_at, is_active,
+                provider, manual_updated_at, manual_notes)
+               VALUES (?, ?, 'Manual', ?, ?, ?, ?, ?, 'USD', ?, 1, 'manual', ?, ?)""",
+            (
+                account_id,
+                profile_id,
+                name,
+                account_type,
+                subtype,
+                balance,
+                balance,
+                now,
+                now,
+                (payload.get("notes") or "").strip(),
+            ),
+        )
+        c.execute(
+            """INSERT INTO manual_account_snapshots (account_id, profile_id, balance, recorded_at)
+               VALUES (?, ?, ?, ?)""",
+            (account_id, profile_id, balance, now),
+        )
+        _snapshot_net_worth(c, now)
+        return dict(c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone())
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def update_manual_account(account_id: str, payload: dict, profile: str | None = None, conn=None) -> dict | None:
+    """Update a manual account balance/details and write a balance snapshot."""
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        row = c.execute(
+            "SELECT * FROM accounts WHERE id = ? AND provider = 'manual' AND profile_id = ? AND is_active = 1",
+            (account_id, profile_id),
+        ).fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        name = (payload.get("account_name") or payload.get("name") or current.get("account_name") or "").strip()
+        account_type = (payload.get("account_type") or current.get("account_type") or "depository").strip()
+        subtype = (payload.get("account_subtype") or payload.get("type") or current.get("account_subtype") or "manual").strip()
+        balance = float(payload.get("balance") if payload.get("balance") is not None else current.get("current_balance") or 0)
+        notes = (payload.get("notes") if payload.get("notes") is not None else current.get("manual_notes") or "").strip()
+        now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
+        c.execute(
+            """UPDATE accounts
+               SET account_name = ?, account_type = ?, account_subtype = ?,
+                   current_balance = ?, available_balance = ?, last_synced_at = ?,
+                   manual_updated_at = ?, manual_notes = ?
+               WHERE id = ?""",
+            (name, account_type, subtype, balance, balance, now, now, notes, account_id),
+        )
+        c.execute(
+            """INSERT INTO manual_account_snapshots (account_id, profile_id, balance, recorded_at)
+               VALUES (?, ?, ?, ?)""",
+            (account_id, profile_id, balance, now),
+        )
+        _snapshot_net_worth(c, now)
+        return dict(c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone())
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def deactivate_manual_account(account_id: str, profile: str | None = None, conn=None) -> bool:
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        cur = c.execute(
+            "UPDATE accounts SET is_active = 0 WHERE id = ? AND provider = 'manual' AND profile_id = ?",
+            (account_id, profile_id),
+        )
+        if cur.rowcount > 0:
+            _snapshot_net_worth(c, datetime.now().replace(microsecond=0).isoformat(sep=" "))
+        return cur.rowcount > 0
 
     if conn is not None:
         return _update(conn)
@@ -2976,7 +3547,7 @@ def get_category_budgets(profile: str | None = None, conn=None) -> list[dict]:
 
     def _query(c):
         rows = c.execute(
-            """SELECT category, amount, updated_at
+            """SELECT category, amount, rollover_mode, rollover_balance, updated_at
                FROM category_budgets
                WHERE profile_id = ?
                ORDER BY category""",
@@ -2990,7 +3561,14 @@ def get_category_budgets(profile: str | None = None, conn=None) -> list[dict]:
         return _query(c)
 
 
-def update_category_budget(category: str, amount: float | None, profile: str | None = None, conn=None) -> dict:
+def update_category_budget(
+    category: str,
+    amount: float | None,
+    profile: str | None = None,
+    conn=None,
+    rollover_mode: str | None = None,
+    rollover_balance: float | None = None,
+) -> dict:
     """Create/update/delete a durable budget for a category."""
     profile_id = profile or "household"
 
@@ -3002,6 +3580,10 @@ def update_category_budget(category: str, amount: float | None, profile: str | N
         if not category_row:
             raise ValueError("Category not found.")
 
+        allowed_rollovers = {"none", "surplus", "deficit", "both"}
+        mode = rollover_mode if rollover_mode in allowed_rollovers else "none"
+        balance = float(rollover_balance or 0)
+
         if amount is None or amount <= 0:
             c.execute(
                 "DELETE FROM category_budgets WHERE profile_id = ? AND category = ?",
@@ -3010,15 +3592,17 @@ def update_category_budget(category: str, amount: float | None, profile: str | N
             return {"category": category, "amount": None, "profile_id": profile_id}
 
         c.execute(
-            """INSERT INTO category_budgets (profile_id, category, amount)
-               VALUES (?, ?, ?)
+            """INSERT INTO category_budgets (profile_id, category, amount, rollover_mode, rollover_balance)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(profile_id, category) DO UPDATE SET
                    amount = excluded.amount,
+                   rollover_mode = excluded.rollover_mode,
+                   rollover_balance = excluded.rollover_balance,
                    updated_at = datetime('now')""",
-            (profile_id, category, amount),
+            (profile_id, category, amount, mode, balance),
         )
         row = c.execute(
-            """SELECT category, amount, updated_at
+            """SELECT category, amount, rollover_mode, rollover_balance, updated_at
                FROM category_budgets
                WHERE profile_id = ? AND category = ?""",
             (profile_id, category),

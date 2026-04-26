@@ -41,5 +41,7 @@ export async function load({ fetch }) {
         monthlyCategoryBreakdown: Array.isArray(bundle.monthlyCategoryBreakdown) ? bundle.monthlyCategoryBreakdown : [],
         ccRepaid: bundle.ccRepaid || 0,
         externalTransfers: bundle.externalTransfers || 0,
+        planSnapshot: bundle.planSnapshot || null,
+        reviewQueue: bundle.reviewQueue || null,
     };
 }

@@ -1264,3 +1264,113 @@ section:has(.sankey-theater) {
         min-width: 200px;
     }
 }
+.dashboard-plan-strip {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(0, 2.4fr) auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+}
+
+.dashboard-plan-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+.dashboard-plan-metrics div {
+    min-width: 0;
+    padding: 0.75rem;
+    border: 1px solid var(--card-border);
+    border-radius: 0.8rem;
+    background: var(--surface-100);
+}
+
+.dashboard-plan-metrics span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    font-weight: 700;
+}
+
+.dashboard-plan-metrics strong {
+    display: block;
+    margin-top: 0.16rem;
+    color: var(--text-primary);
+    font-family: "DM Mono", ui-monospace, monospace;
+    font-size: 0.92rem;
+    font-weight: 750;
+}
+
+.dashboard-plan-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.45rem;
+    padding: 0 0.9rem;
+    border-radius: 0.75rem;
+    background: var(--accent);
+    color: white;
+    font-size: 0.75rem;
+    font-weight: 750;
+    text-decoration: none;
+}
+
+.dashboard-review-strip {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.1rem;
+}
+
+.dashboard-review-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.35rem;
+    height: 2.35rem;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--warning);
+}
+
+.dashboard-review-copy {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.12rem;
+}
+
+.dashboard-review-copy span {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    font-weight: 750;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.dashboard-review-copy strong {
+    color: var(--text-primary);
+    font-family: "DM Mono", ui-monospace, monospace;
+    font-size: 1rem;
+    font-weight: 750;
+}
+
+@media (max-width: 900px) {
+    .dashboard-plan-strip {
+        grid-template-columns: 1fr;
+    }
+
+    .dashboard-plan-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .dashboard-review-strip {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .dashboard-review-copy {
+        align-items: flex-start;
+    }
+}

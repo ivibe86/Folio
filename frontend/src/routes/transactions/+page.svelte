@@ -23,8 +23,14 @@
     let filterMonth = getCurrentMonth();
     let filterCategory = '';
     let filterAccount = '';
+    let reviewFilter = 'all';
     let editingTxId = null;
     let selectedTxId = null;
+    let metadataDrafts = {};
+    let splitDrafts = {};
+    let savingMetadataFor = null;
+    let savingSplitsFor = null;
+    let exportingCsv = false;
     let months = [];
     let accountNames = [];
 
@@ -164,6 +170,164 @@
         subscriptionPromptFrequency = '';
     }
 
+    function ensureMetadataDraft(tx) {
+        if (!tx?.original_id) return { notes: '', tags: '', reviewed: false };
+        if (!metadataDrafts[tx.original_id]) {
+            metadataDrafts = {
+                ...metadataDrafts,
+                [tx.original_id]: {
+                    notes: tx.notes || '',
+                    tags: Array.isArray(tx.tags) ? tx.tags.join(', ') : (tx.tags || ''),
+                    reviewed: !!tx.reviewed
+                }
+            };
+        }
+        return metadataDrafts[tx.original_id];
+    }
+
+    async function saveTransactionMetadata(tx) {
+        const draft = ensureMetadataDraft(tx);
+        savingMetadataFor = tx.original_id;
+        try {
+            const tags = String(draft.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+            const result = await api.updateTransactionMetadata(tx.original_id, {
+                notes: draft.notes || '',
+                tags,
+                reviewed: !!draft.reviewed
+            });
+            const updated = result.transaction || {};
+            transactions = transactions.map(item => item.original_id === tx.original_id
+                ? { ...item, notes: updated.notes || '', tags: updated.tags || tags, reviewed: !!updated.reviewed }
+                : item);
+            summaryTransactions = summaryTransactions.map(item => item.original_id === tx.original_id
+                ? { ...item, notes: updated.notes || '', tags: updated.tags || tags, reviewed: !!updated.reviewed }
+                : item);
+            updateFeedback = 'Transaction details saved';
+            recentlyUpdatedTxId = tx.original_id;
+            setTimeout(() => { updateFeedback = ''; recentlyUpdatedTxId = null; }, 2500);
+        } catch (e) {
+            console.error('Failed to save transaction metadata:', e);
+            updateFeedback = 'Failed to save transaction details';
+        } finally {
+            savingMetadataFor = null;
+        }
+    }
+
+    function ensureSplitDraft(tx) {
+        if (!tx?.original_id) return { loading: false, rows: [] };
+        if (!splitDrafts[tx.original_id]) {
+            splitDrafts = {
+                ...splitDrafts,
+                [tx.original_id]: {
+                    loading: true,
+                    rows: [{ category: tx.category || 'Uncategorized', amount: Math.abs(parseFloat(tx.amount || 0)).toFixed(2), notes: '' }]
+                }
+            };
+            loadTransactionSplits(tx);
+        }
+        return splitDrafts[tx.original_id];
+    }
+
+    async function loadTransactionSplits(tx) {
+        try {
+            const result = await api.getTransactionSplits(tx.original_id);
+            const rows = (result.items || []).map(item => ({
+                category: item.category || tx.category || 'Uncategorized',
+                amount: Math.abs(parseFloat(item.amount || 0)).toFixed(2),
+                notes: item.notes || ''
+            }));
+            splitDrafts = {
+                ...splitDrafts,
+                [tx.original_id]: {
+                    loading: false,
+                    rows: rows.length > 0
+                        ? rows
+                        : [{ category: tx.category || 'Uncategorized', amount: Math.abs(parseFloat(tx.amount || 0)).toFixed(2), notes: '' }]
+                }
+            };
+        } catch (e) {
+            console.error('Failed to load transaction splits:', e);
+            splitDrafts = {
+                ...splitDrafts,
+                [tx.original_id]: {
+                    ...(splitDrafts[tx.original_id] || {}),
+                    loading: false
+                }
+            };
+        }
+    }
+
+    function updateSplitField(txId, index, field, value) {
+        const draft = splitDrafts[txId];
+        if (!draft) return;
+        const rows = draft.rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row);
+        splitDrafts = { ...splitDrafts, [txId]: { ...draft, rows } };
+    }
+
+    function addSplitRow(tx) {
+        const draft = ensureSplitDraft(tx);
+        splitDrafts = {
+            ...splitDrafts,
+            [tx.original_id]: {
+                ...draft,
+                rows: [...draft.rows, { category: tx.category || 'Uncategorized', amount: '', notes: '' }]
+            }
+        };
+    }
+
+    function removeSplitRow(txId, index) {
+        const draft = splitDrafts[txId];
+        if (!draft || draft.rows.length <= 1) return;
+        splitDrafts = {
+            ...splitDrafts,
+            [txId]: { ...draft, rows: draft.rows.filter((_, rowIndex) => rowIndex !== index) }
+        };
+    }
+
+    function getSplitTotal(txId) {
+        return (splitDrafts[txId]?.rows || []).reduce((sum, row) => sum + Math.abs(parseFloat(row.amount || 0)), 0);
+    }
+
+    function getSplitDelta(tx) {
+        return Math.abs(parseFloat(tx?.amount || 0)) - getSplitTotal(tx.original_id);
+    }
+
+    async function saveTransactionSplits(tx) {
+        const draft = ensureSplitDraft(tx);
+        savingSplitsFor = tx.original_id;
+        try {
+            const rows = draft.rows
+                .map(row => ({
+                    category: row.category || 'Uncategorized',
+                    amount: Math.abs(parseFloat(row.amount || 0)),
+                    notes: row.notes || '',
+                    tags: []
+                }))
+                .filter(row => row.category && row.amount > 0);
+            const result = await api.updateTransactionSplits(tx.original_id, rows);
+            splitDrafts = {
+                ...splitDrafts,
+                [tx.original_id]: {
+                    loading: false,
+                    rows: (result.items || rows).map(item => ({
+                        category: item.category || tx.category || 'Uncategorized',
+                        amount: Math.abs(parseFloat(item.amount || 0)).toFixed(2),
+                        notes: item.notes || ''
+                    }))
+                }
+            };
+            invalidateCache();
+            updateFeedback = 'Transaction split saved';
+            recentlyUpdatedTxId = tx.original_id;
+            setTimeout(() => { updateFeedback = ''; recentlyUpdatedTxId = null; }, 2500);
+        } catch (e) {
+            console.error('Failed to save transaction splits:', e);
+            updateFeedback = 'Failed to save transaction split';
+        } finally {
+            savingSplitsFor = null;
+        }
+    }
+
     async function fetchTransactionHistory() {
         let offset = 0;
         let all = [];
@@ -184,6 +348,11 @@
     }
 
     onMount(async () => {
+        const requestedReview = new URLSearchParams(window.location.search).get('review');
+        if (requestedReview === 'reviewed' || requestedReview === 'unreviewed') {
+            reviewFilter = requestedReview;
+        }
+
         const handleSyncComplete = async (event) => {
             const detail = event?.detail || {};
             if (detail.status && detail.status !== 'completed') return;
@@ -250,6 +419,7 @@
             }
             if (filterCategory) params.category = filterCategory;
             if (filterAccount) params.account = filterAccount;
+            if (reviewFilter !== 'all') params.reviewed = reviewFilter === 'reviewed';
             if (search) params.search = search;
 
             const result = await api.getTransactions(params);
@@ -272,6 +442,7 @@
         if (filterMonth && filterMonth !== '__ytd__') params.month = filterMonth;
         if (filterCategory) params.category = filterCategory;
         if (filterAccount) params.account = filterAccount;
+        if (reviewFilter !== 'all') params.reviewed = reviewFilter === 'reviewed';
         if (search) params.search = search;
         return params;
     }
@@ -336,7 +507,7 @@
 
     $: {
         // Build a key from all filter values to detect changes
-        const filterKey = `${filterMonth}|${filterCategory}|${filterAccount}`;
+        const filterKey = `${filterMonth}|${filterCategory}|${filterAccount}|${reviewFilter}`;
 
         if (!loading && filterKey !== _prevFilterKey) {
             _prevFilterKey = filterKey;
@@ -551,11 +722,38 @@
         selectedCustomMonth = getCurrentMonth();
         filterCategory = '';
         filterAccount = '';
+        reviewFilter = 'all';
         pageOffset = 0;
         // fetchTransactions() will be triggered by the reactive filter block
     }
 
-    $: hasActiveFilters = search || filterCategory || filterAccount || selectedPeriod !== 'this_month';
+    $: hasActiveFilters = search || filterCategory || filterAccount || reviewFilter !== 'all' || selectedPeriod !== 'this_month';
+
+    async function exportCurrentTransactions() {
+        exportingCsv = true;
+        try {
+            const params = buildSummaryParams(0);
+            delete params.limit;
+            delete params.offset;
+            const result = await api.exportTransactions(params);
+            const blob = new Blob([result.csv || ''], { type: 'text/csv;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = result.filename || 'folio-transactions.csv';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            updateFeedback = `Exported ${result.row_count || 0} transaction${result.row_count === 1 ? '' : 's'}`;
+            setTimeout(() => { updateFeedback = ''; }, 2500);
+        } catch (e) {
+            console.error('Failed to export transactions:', e);
+            updateFeedback = 'Failed to export transactions';
+        } finally {
+            exportingCsv = false;
+        }
+    }
 
     function formatDayHeaderFull(dateStr) {
         const base = formatDayHeader(dateStr);
@@ -1036,6 +1234,17 @@
             {/if}
         </div>
 
+        <div class="tx-review-toggle" aria-label="Review filter">
+            <button class:active={reviewFilter === 'all'} on:click={() => reviewFilter = 'all'}>All</button>
+            <button class:active={reviewFilter === 'unreviewed'} on:click={() => reviewFilter = 'unreviewed'}>Unreviewed</button>
+            <button class:active={reviewFilter === 'reviewed'} on:click={() => reviewFilter = 'reviewed'}>Reviewed</button>
+        </div>
+
+        <button class="tx-export-btn" disabled={exportingCsv} on:click={exportCurrentTransactions}>
+            <span class="material-symbols-outlined">download</span>
+            {exportingCsv ? 'Exporting...' : 'Export CSV'}
+        </button>
+
         {#if hasActiveFilters}
             <button on:click={() => { clearFilters(); closeAllFilters(); monthDropdownOpen = false; }}
                 class="tx-command-reset">
@@ -1068,6 +1277,13 @@
             <button class="tx-filter-chip tx-filter-chip-removable" on:click={() => search = ''}>
                 <span class="material-symbols-outlined">search</span>
                 {search}
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        {/if}
+        {#if reviewFilter !== 'all'}
+            <button class="tx-filter-chip tx-filter-chip-removable" on:click={() => reviewFilter = 'all'}>
+                <span class="material-symbols-outlined">fact_check</span>
+                {reviewFilter === 'reviewed' ? 'Reviewed' : 'Unreviewed'}
                 <span class="material-symbols-outlined">close</span>
             </button>
         {/if}
@@ -1126,6 +1342,7 @@
                     {@const rawDescriptor = getRawDescriptor(tx)}
                     {@const rowSignal = getRowSignal(tx)}
                     {@const merchantStats = getMerchantStats(tx)}
+                    {@const metadataDraft = ensureMetadataDraft(tx)}
                     {@const hasMerchantTrend = merchantStats.recent.length > 0 && merchantStats.months.some(m => m.total > 0)}
                     {@const maxMerchantMonth = Math.max(...merchantStats.months.map(m => m.total), Math.abs(amount), 1)}
                     <div class="tx-row-grid group transition-colors tx-row tx-ledger-row"
@@ -1309,6 +1526,8 @@
                     </div>
 
                     {#if isSelected}
+                        {@const splitDraft = ensureSplitDraft(tx)}
+                        {@const splitDelta = getSplitDelta(tx)}
                         <div class="tx-detail-drawer fade-in" role="presentation" on:click|stopPropagation>
                             <div class="tx-detail-pane">
                                 <h4>Merchant pattern</h4>
@@ -1367,6 +1586,89 @@
                                         {merchantStats.visits} visit{merchantStats.visits === 1 ? '' : 's'} in history{#if merchantStats.average > 0}, average <strong>{formatCurrency(merchantStats.average, 2)}</strong>{/if}{#if merchantStats.visits > 1 && merchantStats.average > 0} · this ran <strong class={merchantStats.delta >= 0 ? 'tx-above-average' : 'tx-below-average'}>{merchantStats.delta >= 0 ? '+' : ''}{merchantStats.delta.toFixed(1)}%</strong> vs usual{/if}.
                                     </p>
                                 </div>
+                            </div>
+                            <div class="tx-detail-pane tx-detail-notes">
+                                <h4>Review notes</h4>
+                                <label class="tx-meta-toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={metadataDraft.reviewed}
+                                        on:change={(e) => {
+                                            metadataDrafts[tx.original_id].reviewed = e.currentTarget.checked;
+                                            metadataDrafts = { ...metadataDrafts };
+                                            saveTransactionMetadata(tx);
+                                        }} />
+                                    <span>Reviewed</span>
+                                </label>
+                                <textarea
+                                    value={metadataDraft.notes}
+                                    placeholder="Add a note for future you"
+                                    on:input={(e) => {
+                                        metadataDrafts[tx.original_id].notes = e.currentTarget.value;
+                                        metadataDrafts = { ...metadataDrafts };
+                                    }}></textarea>
+                                <input
+                                    value={metadataDraft.tags}
+                                    placeholder="Tags, comma separated"
+                                    on:input={(e) => {
+                                        metadataDrafts[tx.original_id].tags = e.currentTarget.value;
+                                        metadataDrafts = { ...metadataDrafts };
+                                    }} />
+                                <button class="tx-meta-save" disabled={savingMetadataFor === tx.original_id} on:click={() => saveTransactionMetadata(tx)}>
+                                    {savingMetadataFor === tx.original_id ? 'Saving...' : 'Save details'}
+                                </button>
+                            </div>
+                            <div class="tx-detail-pane tx-detail-splits">
+                                <div class="tx-split-header">
+                                    <h4>Split allocation</h4>
+                                    <button on:click={() => addSplitRow(tx)}>Add line</button>
+                                </div>
+                                {#if splitDraft.loading}
+                                    <p class="tx-split-muted">Loading split details...</p>
+                                {:else}
+                                    <div class="tx-split-rows">
+                                        {#each splitDraft.rows as split, splitIndex}
+                                            <div class="tx-split-row">
+                                                <select
+                                                    value={split.category}
+                                                    on:change={(e) => updateSplitField(tx.original_id, splitIndex, 'category', e.currentTarget.value)}>
+                                                    {#each allCategories as cat}
+                                                        <option value={cat}>{cat}</option>
+                                                    {/each}
+                                                    {#if !allCategories.includes(split.category)}
+                                                        <option value={split.category}>{split.category}</option>
+                                                    {/if}
+                                                </select>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="0.01"
+                                                    value={split.amount}
+                                                    on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'amount', e.currentTarget.value)}
+                                                    aria-label="Split amount" />
+                                                <button
+                                                    class="tx-split-remove"
+                                                    disabled={splitDraft.rows.length <= 1}
+                                                    on:click={() => removeSplitRow(tx.original_id, splitIndex)}
+                                                    aria-label="Remove split line">
+                                                    <span class="material-symbols-outlined">close</span>
+                                                </button>
+                                                <input
+                                                    class="tx-split-note"
+                                                    value={split.notes}
+                                                    placeholder="Optional note"
+                                                    on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'notes', e.currentTarget.value)} />
+                                            </div>
+                                        {/each}
+                                    </div>
+                                    <div class="tx-split-total" class:tx-split-total-off={Math.abs(splitDelta) >= 0.01}>
+                                        <span>Total {formatCurrency(getSplitTotal(tx.original_id), 2)}</span>
+                                        <strong>{Math.abs(splitDelta) < 0.01 ? 'Balanced' : `${splitDelta > 0 ? 'Unassigned' : 'Over'} ${formatCurrency(Math.abs(splitDelta), 2)}`}</strong>
+                                    </div>
+                                    <button class="tx-meta-save" disabled={savingSplitsFor === tx.original_id} on:click={() => saveTransactionSplits(tx)}>
+                                        {savingSplitsFor === tx.original_id ? 'Saving...' : 'Save split'}
+                                    </button>
+                                {/if}
                             </div>
                         </div>
                     {/if}

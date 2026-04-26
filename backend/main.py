@@ -5,6 +5,8 @@ FastAPI backend for Folio personal finance tracker.
 
 from pathlib import Path as FilePath
 from datetime import datetime, timedelta
+import csv
+import io
 
 from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,8 +40,13 @@ from data_manager import (
     get_copilot_conversations, clear_copilot_conversations, delete_copilot_conversation, get_data_browser_rows,
     log_copilot_conversation, prepare_copilot_history_record, prune_copilot_conversations,
     get_category_budgets, update_category_budget,
+    get_goals, upsert_goal, delete_goal,
+    get_review_queue_data,
     get_merchant_directory, update_merchant_directory_entry,
-    update_transaction_excluded, get_transactions_for_merchant,
+    update_transaction_excluded, update_transaction_metadata,
+    get_transaction_splits, replace_transaction_splits,
+    create_manual_account, update_manual_account, deactivate_manual_account,
+    get_transactions_for_merchant,
     get_category_rule_impact,
     explain_category_assignment, find_merchants_missing_category,
     bulk_recategorize_preview, preview_rule_creation,
@@ -148,7 +155,7 @@ app.add_middleware(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_origins],
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
 
@@ -482,6 +489,7 @@ def transactions(
     category: str | None = Query(None),
     account: str | None = Query(None),
     search: str | None = Query(None),
+    reviewed: bool | None = Query(None),
     profile: str | None = Depends(validate_profile),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -492,11 +500,73 @@ def transactions(
         category=category,
         account=account,
         search=search,
+        reviewed=reviewed,
         profile=profile,
         limit=limit,
         offset=offset,
         conn=db,
     )
+
+
+@app.get("/api/transactions/review-queue")
+def transaction_review_queue(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return get_review_queue_data(profile=profile, conn=db)
+
+
+@app.get("/api/transactions/export")
+def export_transactions(
+    month: str | None = Query(None, description="YYYY-MM"),
+    category: str | None = Query(None),
+    account: str | None = Query(None),
+    search: str | None = Query(None),
+    reviewed: bool | None = Query(None),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    rows = []
+    offset = 0
+    total_count = None
+    while True:
+        result = get_transactions_paginated(
+            month=month,
+            category=category,
+            account=account,
+            search=search,
+            reviewed=reviewed,
+            profile=profile,
+            limit=1000,
+            offset=offset,
+            conn=db,
+        )
+        page = result.get("data", [])
+        rows.extend(page)
+        total_count = result.get("total_count", len(rows))
+        if not page or len(rows) >= total_count:
+            break
+        offset += len(page)
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "date", "description", "merchant_display_name", "account_name",
+            "amount", "category", "reviewed", "notes", "tags", "profile",
+        ],
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            **row,
+            "reviewed": "yes" if row.get("reviewed") else "no",
+            "tags": ", ".join(row.get("tags") or []),
+        })
+    suffix = month or datetime.utcnow().strftime("%Y-%m-%d")
+    return {
+        "filename": f"folio-transactions-{suffix}.csv",
+        "csv": output.getvalue(),
+        "row_count": len(rows),
+        "total_count": total_count if total_count is not None else len(rows),
+    }
 
 
 @app.patch("/api/transactions/{tx_id}/category")
@@ -1594,6 +1664,8 @@ def budgets(profile: str | None = Depends(validate_profile), db=Depends(get_db_s
 
 class BudgetUpdate(BaseModel):
     amount: float | None = None
+    rollover_mode: str | None = None
+    rollover_balance: float | None = None
 
 
 @app.patch("/api/budgets/{category_name}")
@@ -1604,10 +1676,143 @@ def update_budget_endpoint(
     db=Depends(get_db_session),
 ):
     try:
-        result = update_category_budget(category=category_name, amount=body.amount, profile=profile, conn=db)
+        result = update_category_budget(
+            category=category_name,
+            amount=body.amount,
+            profile=profile,
+            conn=db,
+            rollover_mode=body.rollover_mode,
+            rollover_balance=body.rollover_balance,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "updated", "budget": result}
+
+
+class GoalPayload(BaseModel):
+    id: int | None = None
+    name: str
+    goal_type: str = "custom"
+    target_amount: float = 0
+    current_amount: float = 0
+    target_date: str | None = None
+    linked_category: str | None = None
+    linked_account_id: str | None = None
+
+
+@app.get("/api/goals")
+def goals(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return {"items": get_goals(profile=profile, conn=db)}
+
+
+@app.post("/api/goals")
+def create_goal(body: GoalPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    try:
+        goal = upsert_goal(body.model_dump(), profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "created", "goal": goal}
+
+
+@app.patch("/api/goals/{goal_id}")
+def update_goal(goal_id: int, body: GoalPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    payload = body.model_dump()
+    payload["id"] = goal_id
+    try:
+        goal = upsert_goal(payload, profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "updated", "goal": goal}
+
+
+@app.delete("/api/goals/{goal_id}")
+def remove_goal(goal_id: int, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    if not delete_goal(goal_id, profile=profile, conn=db):
+        raise HTTPException(status_code=404, detail="Goal not found.")
+    return {"status": "deleted"}
+
+
+class TransactionMetadataUpdate(BaseModel):
+    notes: str | None = None
+    tags: list[str] | None = None
+    reviewed: bool | None = None
+
+
+@app.patch("/api/transactions/{tx_id}/metadata")
+def update_transaction_metadata_endpoint(tx_id: str, body: TransactionMetadataUpdate, db=Depends(get_db_session)):
+    result = update_transaction_metadata(
+        tx_id,
+        notes=body.notes,
+        tags=body.tags,
+        reviewed=body.reviewed,
+        conn=db,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    return {"status": "updated", "transaction": result}
+
+
+class TransactionSplitItem(BaseModel):
+    category: str
+    amount: float
+    notes: str | None = ""
+    tags: list[str] | None = None
+
+
+class TransactionSplitsUpdate(BaseModel):
+    splits: list[TransactionSplitItem]
+
+
+@app.get("/api/transactions/{tx_id}/splits")
+def transaction_splits(tx_id: str, db=Depends(get_db_session)):
+    return {"items": get_transaction_splits(tx_id, conn=db)}
+
+
+@app.patch("/api/transactions/{tx_id}/splits")
+def update_transaction_splits_endpoint(tx_id: str, body: TransactionSplitsUpdate, db=Depends(get_db_session)):
+    result = replace_transaction_splits(
+        tx_id,
+        [item.model_dump() for item in body.splits],
+        conn=db,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    return {"status": "updated", **result}
+
+
+class ManualAccountPayload(BaseModel):
+    name: str
+    account_type: str = "depository"
+    account_subtype: str = "manual"
+    balance: float = 0
+    notes: str | None = ""
+
+
+@app.post("/api/manual-accounts")
+def create_manual_account_endpoint(body: ManualAccountPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    try:
+        account = create_manual_account(body.model_dump(), profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "created", "account": account}
+
+
+@app.patch("/api/manual-accounts/{account_id}")
+def update_manual_account_endpoint(account_id: str, body: ManualAccountPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    try:
+        account = update_manual_account(account_id, body.model_dump(), profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not account:
+        raise HTTPException(status_code=404, detail="Manual account not found.")
+    return {"status": "updated", "account": account}
+
+
+@app.delete("/api/manual-accounts/{account_id}")
+def delete_manual_account_endpoint(account_id: str, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    if not deactivate_manual_account(account_id, profile=profile, conn=db):
+        raise HTTPException(status_code=404, detail="Manual account not found.")
+    return {"status": "deleted"}
 
 
 @app.get("/api/merchant-directory")

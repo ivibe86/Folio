@@ -213,6 +213,7 @@ def init_db():
         _migrate_accounts_provider(conn)
         _migrate_accounts_last_four(conn)
         _migrate_memory_entries_theme(conn)
+        _migrate_public_planning_tables(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)          
@@ -635,6 +636,82 @@ def _migrate_memory_entries_theme(conn: sqlite3.Connection):
         return
     if cols and "theme" not in cols:
         conn.execute("ALTER TABLE memory_entries ADD COLUMN theme TEXT DEFAULT NULL")
+
+
+def _migrate_public_planning_tables(conn: sqlite3.Connection):
+    """Add public-release planning, ledger metadata, split, and manual account support."""
+    tx_cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    tx_additions = {
+        "notes": "TEXT DEFAULT ''",
+        "tags": "TEXT DEFAULT ''",
+        "reviewed": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for col, ddl in tx_additions.items():
+        if col not in tx_cols:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
+
+    budget_cols = [row[1] for row in conn.execute("PRAGMA table_info(category_budgets)").fetchall()]
+    if budget_cols and "rollover_mode" not in budget_cols:
+        conn.execute("ALTER TABLE category_budgets ADD COLUMN rollover_mode TEXT NOT NULL DEFAULT 'none'")
+    if budget_cols and "rollover_balance" not in budget_cols:
+        conn.execute("ALTER TABLE category_budgets ADD COLUMN rollover_balance REAL NOT NULL DEFAULT 0.0")
+
+    account_cols = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if account_cols and "manual_updated_at" not in account_cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN manual_updated_at TEXT DEFAULT NULL")
+    if account_cols and "manual_notes" not in account_cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN manual_notes TEXT DEFAULT ''")
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS goals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id      TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            goal_type       TEXT NOT NULL DEFAULT 'custom',
+            target_amount   REAL NOT NULL DEFAULT 0.0,
+            current_amount  REAL NOT NULL DEFAULT 0.0,
+            target_date     TEXT DEFAULT NULL,
+            linked_category TEXT DEFAULT NULL,
+            linked_account_id TEXT DEFAULT NULL,
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_goals_profile_active
+            ON goals(profile_id, is_active);
+
+        CREATE TABLE IF NOT EXISTS transaction_splits (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id  TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            category        TEXT NOT NULL REFERENCES categories(name),
+            amount          REAL NOT NULL,
+            notes           TEXT DEFAULT '',
+            tags            TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transaction_splits_tx
+            ON transaction_splits(transaction_id);
+        CREATE INDEX IF NOT EXISTS idx_transaction_splits_category
+            ON transaction_splits(category);
+
+        CREATE TABLE IF NOT EXISTS manual_account_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            profile_id  TEXT NOT NULL,
+            balance     REAL NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_manual_snapshots_account_date
+            ON manual_account_snapshots(account_id, recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_manual_snapshots_profile_date
+            ON manual_account_snapshots(profile_id, recorded_at);
+        """
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
