@@ -15,6 +15,7 @@ from enricher import enrich_transactions
 from log_config import get_logger
 from privacy import mask_amount, mask_counterparty
 from database import _extract_merchant_pattern
+from merchant_identity import canonicalize_merchant_key
 import llm_client
 
 load_dotenv()
@@ -360,9 +361,9 @@ def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple
     - otherwise, a dominant non-fallback historical category for the same merchant
     """
     merchant_keys = {
-        (tx.get("profile", ""), (tx.get("merchant_name") or "").upper().strip())
+        (tx.get("profile", ""), canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name") or ""))
         for tx in transactions
-        if (tx.get("merchant_name") or "").strip()
+        if (tx.get("merchant_key") or tx.get("merchant_name") or "").strip()
     }
     if not merchant_keys:
         return {}
@@ -372,7 +373,7 @@ def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple
     rows = conn.execute(
         f"""
         SELECT profile_id,
-               UPPER(TRIM(merchant_name)) AS merchant_key,
+               UPPER(TRIM(COALESCE(NULLIF(merchant_key, ''), merchant_name))) AS merchant_key,
                category,
                COUNT(*) AS tx_count,
                SUM(CASE WHEN categorization_source IN ('user', 'user-rule')
@@ -382,11 +383,11 @@ def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple
                          OR confidence = 'fallback'
                         THEN 1 ELSE 0 END) AS fallback_count
         FROM transactions
-        WHERE merchant_name != ''
+        WHERE COALESCE(NULLIF(merchant_key, ''), merchant_name) != ''
           AND category IS NOT NULL
           AND category != ''
           AND category != 'Other'
-          AND UPPER(TRIM(merchant_name)) IN ({placeholders})
+          AND UPPER(TRIM(COALESCE(NULLIF(merchant_key, ''), merchant_name))) IN ({placeholders})
         GROUP BY profile_id, merchant_key, category
         """,
         merchant_names,
@@ -479,7 +480,11 @@ def categorize_transactions(
         # in the tx dict yet (it's computed and stored only at DB insert time),
         # so we derive it here on the fly using the same function.
         desc_normalized = _extract_merchant_pattern(raw_desc)
-        merchant_pattern = _extract_merchant_pattern(tx.get("merchant_name") or "")
+        merchant_patterns = {
+            canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name") or ""),
+            _extract_merchant_pattern(tx.get("merchant_name") or ""),
+        }
+        merchant_patterns.discard("")
         matched = False
         tx_profile = tx.get("profile") or tx.get("profile_id") or ""
         for rule in db_rules:
@@ -489,7 +494,7 @@ def categorize_transactions(
             if match_type == "contains":
                 if (
                     (desc_normalized and pattern == desc_normalized)
-                    or (merchant_pattern and pattern == merchant_pattern)
+                    or pattern in merchant_patterns
                 ):
                     matched = True
             elif match_type == "regex" and _re.search(pattern, raw_desc, _re.IGNORECASE):
@@ -523,7 +528,7 @@ def categorize_transactions(
             continue
 
         category, confidence = _rule_based_categorize(tx)
-        merchant_key = (tx.get("profile", ""), (tx.get("merchant_name") or "").upper().strip())
+        merchant_key = (tx.get("profile", ""), canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name") or ""))
         memory = merchant_memory.get(merchant_key)
 
         if confidence == "rule-high":

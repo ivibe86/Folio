@@ -427,7 +427,9 @@ TABLE: transactions_visible
   - categorization_source (TEXT) — 'rule-high', 'llm', 'user', 'user-rule', 'fallback'
   - account_name (TEXT)
   - account_type (TEXT) — 'checking', 'savings', 'credit_card', 'credit'
-  - merchant_name (TEXT)
+  - merchant_name (TEXT) — human display label
+  - merchant_key (TEXT) — stable merchant grouping key
+  - merchant_kind (TEXT) — merchant_purchase, personal_transfer, credit_card_payment, income, tax, bank_fee, unknown
   - enriched (INTEGER, 0 or 1)
   - is_excluded (INTEGER, 0 or 1)
 
@@ -493,9 +495,10 @@ DESCRIPTION MATCHING:
 - Do NOT guess full merchant descriptions. Use only the keywords the user provides.
 
 MERCHANT REPORTING:
-- merchant_name can be NULL or blank for transactions that have not been enriched yet.
+- merchant_key and merchant_name can be NULL or blank for transactions that have not been enriched yet.
 - For merchant rankings, "biggest merchant", top merchants, or merchant grouping, never GROUP BY merchant_name alone.
-- Use COALESCE(NULLIF(TRIM(merchant_name), ''), description) AS merchant_name in SELECT and GROUP BY the full COALESCE expression, not the alias.
+- Use COALESCE(NULLIF(TRIM(merchant_key), ''), NULLIF(TRIM(merchant_name), ''), description) for grouping.
+- Use COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(merchant_key), ''), description) for the displayed merchant label.
 - Do NOT use COALESCE(merchant_name, description); it does not handle blank merchant_name values.
 - This prevents all unenriched transactions from being combined into a fake blank merchant.
 - For spending reports, exclude non-spending categories: 'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', and 'Income'.
@@ -810,9 +813,10 @@ def _validate_read_semantics(question: str, sql: str) -> tuple[bool, str]:
     )
     if merchant_report:
         qualified_merchant = r"(?:[A-Z_][A-Z0-9_]*\.)?MERCHANT_NAME"
+        qualified_merchant_key = r"(?:[A-Z_][A-Z0-9_]*\.)?MERCHANT_KEY"
         qualified_description = r"(?:[A-Z_][A-Z0-9_]*\.)?DESCRIPTION"
         merchant_fallback_pattern = (
-            rf"COALESCE\(\s*NULLIF\(\s*TRIM\(\s*{qualified_merchant}\s*\)\s*,\s*''\s*\)\s*,\s*{qualified_description}\s*\)"
+            rf"COALESCE\(\s*NULLIF\(\s*TRIM\(\s*{qualified_merchant_key}\s*\)\s*,\s*''\s*\)\s*,\s*NULLIF\(\s*TRIM\(\s*{qualified_merchant}\s*\)\s*,\s*''\s*\)\s*,\s*{qualified_description}\s*\)"
         )
         weak_merchant_fallback_pattern = (
             rf"COALESCE\(\s*{qualified_merchant}\s*,\s*{qualified_description}\s*\)"
@@ -820,26 +824,26 @@ def _validate_read_semantics(question: str, sql: str) -> tuple[bool, str]:
         if re.search(weak_merchant_fallback_pattern, compact_sql):
             return (
                 False,
-                "Merchant fallback must treat blank merchant names as missing. Use "
-                "COALESCE(NULLIF(TRIM(merchant_name), ''), description), not COALESCE(merchant_name, description).",
+                "Merchant fallback must treat blank merchant names as missing and prefer merchant_key. Use "
+                "COALESCE(NULLIF(TRIM(merchant_key), ''), NULLIF(TRIM(merchant_name), ''), description), not COALESCE(merchant_name, description).",
             )
         if re.search(merchant_fallback_pattern, compact_sql) and re.search(r"\bGROUP BY\s+MERCHANT_NAME\b", compact_sql):
             return (
                 False,
-                "Merchant grouping must GROUP BY the full COALESCE(NULLIF(TRIM(merchant_name), ''), description) "
+                "Merchant grouping must GROUP BY the full COALESCE(NULLIF(TRIM(merchant_key), ''), NULLIF(TRIM(merchant_name), ''), description) "
                 "expression, not GROUP BY merchant_name, because SQLite may bind that to the raw nullable column.",
             )
         if re.search(r"\bGROUP BY\s+MERCHANT_NAME\b", compact_sql):
             return (
                 False,
                 "Merchant grouping must handle blank merchant_name values with "
-                "COALESCE(NULLIF(TRIM(merchant_name), ''), description).",
+                "COALESCE(NULLIF(TRIM(merchant_key), ''), NULLIF(TRIM(merchant_name), ''), description).",
             )
         if not re.search(merchant_fallback_pattern, compact_sql):
             return (
                 False,
                 "Merchant reports must show the transaction description when merchant_name is missing or blank. "
-                "Use COALESCE(NULLIF(TRIM(merchant_name), ''), description).",
+                "Use COALESCE(NULLIF(TRIM(merchant_key), ''), NULLIF(TRIM(merchant_name), ''), description).",
             )
 
     return True, ""

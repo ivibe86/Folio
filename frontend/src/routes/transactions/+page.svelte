@@ -662,7 +662,7 @@
     }
 
     function getMerchantKey(tx) {
-        return getMerchantDisplay(tx)
+        return (tx.merchant_display_key || tx.merchant_key || getMerchantDisplay(tx))
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, ' ')
             .trim();

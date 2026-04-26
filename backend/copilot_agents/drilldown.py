@@ -187,7 +187,8 @@ def _load_merchants(profile: str | None) -> list[str]:
         with get_db() as conn:
             params: list[Any] = []
             where = """
-                merchant_name IS NOT NULL AND merchant_name != ''
+                COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) IS NOT NULL
+                AND COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) != ''
                 AND amount < 0
                 AND is_excluded = 0
                 AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
@@ -198,10 +199,10 @@ def _load_merchants(profile: str | None) -> list[str]:
                 params.append(profile)
             rows = conn.execute(
                 f"""
-                SELECT merchant_name, COUNT(*) AS count
+                SELECT COALESCE(NULLIF(merchant_name, ''), merchant_key) AS merchant_name, COUNT(*) AS count
                 FROM transactions_visible
                 WHERE {where}
-                GROUP BY merchant_name
+                GROUP BY COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''))
                 ORDER BY LENGTH(merchant_name) DESC, count DESC
                 """,
                 params,

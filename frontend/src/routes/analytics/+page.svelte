@@ -846,6 +846,10 @@
         return { totalPotential, annualized, suggestions, currentSR, newSR };
     })();
 
+    $: budgetNudgeHref = actionableNudge?.suggestions?.[0]?.name
+        ? `/budget?category=${encodeURIComponent(actionableNudge.suggestions[0].name)}`
+        : '/budget';
+
 
     /* ---------------------------------------
        DRILL-DOWN
@@ -2136,7 +2140,7 @@
                             Savings rate: {formatPercent(actionableNudge.currentSR)} → <span class="font-bold" style="color: var(--positive)">{formatPercent(actionableNudge.newSR)}</span>
                         </p>
                     </div>
-                    <a href="/budget" class="analytics-nudge-cta">
+                    <a href={budgetNudgeHref} class="analytics-nudge-cta">
                         Set a Budget
                         <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
                     </a>

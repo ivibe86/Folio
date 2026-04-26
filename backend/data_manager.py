@@ -13,6 +13,10 @@ import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
 from categorizer import categorize_transactions, _rule_based_categorize
 from database import get_db, dicts_from_rows, _extract_merchant_pattern
+from merchant_identity import (
+    build_merchant_identity,
+    canonicalize_merchant_key,
+)
 from log_config import get_logger
 
 load_dotenv()
@@ -73,7 +77,7 @@ def _transactions_source(include_excluded: bool = False, alias: str | None = Non
 def _canonical_merchant_key_sql(tx_alias: str = "t") -> str:
     """SQL expression for the canonical merchant key used by UI grouping."""
     return (
-        f"UPPER(TRIM(COALESCE(NULLIF({tx_alias}.merchant_name,''), "
+        f"UPPER(TRIM(COALESCE(NULLIF({tx_alias}.merchant_key,''), NULLIF({tx_alias}.merchant_name,''), "
         f"{tx_alias}.description_normalized, {tx_alias}.description, '')))"
     )
 
@@ -291,6 +295,7 @@ def get_transactions_paginated(
                               t.counterparty_name, t.counterparty_type, t.teller_category,
                               t.account_name, t.account_type, t.merchant_name, t.merchant_domain,
                               t.merchant_industry, t.merchant_city, t.merchant_state,
+                              t.merchant_key, t.merchant_source, t.merchant_confidence, t.merchant_kind,
                               t.enriched, t.is_excluded, t.expense_type, t.updated_at,
                               {merchant_key_sql} AS merchant_display_key,
                               COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
@@ -919,10 +924,10 @@ def get_merchant_insights_data(
         params = []
 
         if include_unenriched:
-            where_clauses.append("COALESCE(NULLIF(merchant_name, ''), description) != ''")
+            where_clauses.append("COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), description) != ''")
         else:
             where_clauses.append("enriched = 1")
-            where_clauses.append("merchant_name != ''")
+            where_clauses.append("COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) != ''")
 
         non_spending_ph = ",".join("?" * len(NON_SPENDING_CATEGORIES))
         where_clauses.append(f"amount < 0 AND category NOT IN ({non_spending_ph})")
@@ -943,18 +948,19 @@ def get_merchant_insights_data(
                 params.append(end_date)
 
         # Use description fallback when include_unenriched, otherwise merchant_name directly
-        name_expr = "COALESCE(NULLIF(merchant_name, ''), description)" if include_unenriched else "merchant_name"
+        name_expr = "COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), description)" if include_unenriched else "COALESCE(NULLIF(merchant_key, ''), merchant_name)"
+        label_expr = "COALESCE(NULLIF(merchant_name, ''), NULLIF(merchant_key, ''), description)"
 
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
         sql = f"""
-            SELECT {name_expr} AS name, merchant_domain, merchant_industry,
+            SELECT {label_expr} AS name, merchant_domain, merchant_industry,
                    merchant_city, merchant_state,
                    SUM(ABS(amount)) as total_spent,
                    COUNT(*) as transaction_count
             FROM {tx_source}
             {where_sql}
-            GROUP BY name
+            GROUP BY {name_expr}
             ORDER BY total_spent DESC
         """
         rows = c.execute(sql, params).fetchall()
@@ -1526,6 +1532,7 @@ def get_data(force_refresh: bool = False) -> dict:
                       counterparty_name, counterparty_type, teller_category,
                       account_name, account_type, merchant_name, merchant_domain,
                       merchant_industry, merchant_city, merchant_state,
+                      merchant_key, merchant_source, merchant_confidence, merchant_kind,
                       enriched, is_excluded, expense_type
                FROM transactions_visible
                ORDER BY date DESC"""
@@ -1778,17 +1785,12 @@ def _post_sync_recurring(all_new_transactions: list[dict]):
     if all_new_transactions:
         try:
             from recurring import RecurringDetector, write_detection_results_to_db
-            from database import _extract_merchant_pattern as _emp
 
             new_merchant_keys = set()
             for tx in all_new_transactions:
-                merchant = (tx.get("merchant_name") or "").upper().strip()
+                merchant = canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name") or "")
                 if merchant:
                     new_merchant_keys.add(merchant)
-                desc = tx.get("description", "")
-                pattern = _emp(desc)
-                if pattern:
-                    new_merchant_keys.add(pattern)
 
             if new_merchant_keys:
                 logger.info(
@@ -1969,6 +1971,7 @@ def _insert_transaction(conn, tx: dict):
             account_id = row[0]
 
     desc_normalized = _extract_merchant_pattern(tx.get("description", ""))
+    merchant_identity = build_merchant_identity(tx)
 
     conn.execute(
         """INSERT OR IGNORE INTO transactions
@@ -1976,9 +1979,10 @@ def _insert_transaction(conn, tx: dict):
             amount, category, categorization_source, transaction_type,
             counterparty_name, counterparty_type, teller_category,
             account_name, account_type, merchant_name, merchant_domain,
-            merchant_industry, merchant_city, merchant_state,
+            merchant_industry, merchant_city, merchant_state, merchant_key,
+            merchant_source, merchant_confidence, merchant_kind,
             enriched, confidence, expense_type, description_normalized)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             tx_id,
             account_id,
@@ -2000,6 +2004,10 @@ def _insert_transaction(conn, tx: dict):
             tx.get("merchant_industry", ""),
             tx.get("merchant_city", ""),
             tx.get("merchant_state", ""),
+            merchant_identity["merchant_key"],
+            merchant_identity["source"],
+            merchant_identity["confidence"],
+            merchant_identity["kind"],
             1 if tx.get("enriched") else 0,
             tx.get("confidence", ""),
             tx.get("expense_type"),
@@ -2116,7 +2124,7 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
     with get_db() as conn:
         # Get the transaction
         row = conn.execute(
-            """SELECT description, category, amount, merchant_name, profile_id
+            """SELECT description, category, amount, merchant_name, profile_id, merchant_key
                FROM transactions
                WHERE id = ?""",
             (tx_id,),
@@ -2130,6 +2138,7 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
         tx_amount = row[2]
         tx_merchant_name = row[3]
         tx_profile_id = row[4]
+        tx_merchant_key = row[5] if len(row) > 5 else ""
 
         # Update the transaction.
         # category_pinned=1 when one-off: guards against future rule overwrites.
@@ -2154,7 +2163,7 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
         if not one_off:
             # "Always" path: create rule, backfill matching transactions, sync merchant.
             pattern = _extract_merchant_pattern(description)
-            merchant_pattern = _extract_merchant_pattern(tx_merchant_name or "")
+            merchant_pattern = canonicalize_merchant_key(tx_merchant_key or tx_merchant_name or "")
             rule_pattern = merchant_pattern or pattern
             if rule_pattern and len(rule_pattern) >= 3:
                 _upsert_user_category_rule(
@@ -2254,11 +2263,11 @@ def _apply_category_rule_to_transactions(
         return 0
 
     where = [
-        "(description_normalized = ? OR UPPER(COALESCE(merchant_name, '')) = ?)",
+        "(description_normalized = ? OR UPPER(COALESCE(merchant_key, '')) = ? OR UPPER(COALESCE(merchant_name, '')) = ?)",
         "categorization_source != 'user'",
         "category_pinned = 0",
     ]
-    params: list = [normalized_category, normalized_pattern, normalized_pattern]
+    params: list = [normalized_category, normalized_pattern, normalized_pattern, normalized_pattern]
 
     if normalized_profile:
         where.append("profile_id = ?")
@@ -2380,20 +2389,19 @@ def get_transactions_for_merchant(
         alias_join_sql = _merchant_alias_join_sql("t", "merchant_alias")
         metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
         merchant_label_sql = _canonical_merchant_label_sql("t")
+        merchant_key_sql = _canonical_merchant_key_sql("t")
         tx_source = _transactions_source(alias="t")
         sql = f"""SELECT t.id as original_id, t.profile_id as profile, t.date, t.description,
                         t.amount, t.category, t.original_category, t.categorization_source,
-                        t.account_name, t.merchant_name, t.is_excluded, t.updated_at,
+                        t.account_name, t.merchant_name, t.merchant_key, t.merchant_source,
+                        t.merchant_confidence, t.merchant_kind, t.is_excluded, t.updated_at,
                         COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
                         COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
                  FROM {tx_source}
                  {alias_join_sql}
                  {metadata_join_sql}
-                 WHERE (
-                    UPPER(COALESCE(t.merchant_name, '')) = ?
-                    OR UPPER(COALESCE(t.description_normalized, '')) = ?
-                 )"""
-        params: list = [normalized_key, normalized_key]
+                 WHERE {merchant_key_sql} = ?"""
+        params: list = [normalized_key]
         if profile_id:
             sql += " AND t.profile_id = ?"
             params.append(profile_id)
@@ -2440,16 +2448,18 @@ def get_category_rule_impact(
                      FROM transactions_visible
                      WHERE (
                         description_normalized = ?
+                        OR UPPER(COALESCE(merchant_key, '')) = ?
                         OR UPPER(COALESCE(merchant_name, '')) = ?
                      )"""
-            params: list = [pattern, pattern]
+            params: list = [pattern, pattern, pattern]
             count_sql = """SELECT COUNT(*)
                            FROM transactions_visible
                            WHERE (
                               description_normalized = ?
+                              OR UPPER(COALESCE(merchant_key, '')) = ?
                               OR UPPER(COALESCE(merchant_name, '')) = ?
                            )"""
-            count_params: list = [pattern, pattern]
+            count_params: list = [pattern, pattern, pattern]
             if scoped_profile:
                 sql += " AND profile_id = ?"
                 count_sql += " AND profile_id = ?"
@@ -3045,7 +3055,7 @@ def get_merchant_directory(
         tx_where = [
             "t.amount < 0",
             "COALESCE(t.category, 'Other') NOT IN (" + spend_placeholders + ")",
-            "TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, '')) != ''",
+            "TRIM(COALESCE(NULLIF(t.merchant_key,''), NULLIF(t.merchant_name,''), t.description_normalized, t.description, '')) != ''",
         ]
         params.extend(NON_SPENDING_CATEGORIES)
         if profile and profile != "household":
@@ -3055,7 +3065,7 @@ def get_merchant_directory(
         base_sql = f"""
             WITH merchant_spend AS (
                 SELECT
-                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
+                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_key,''), NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
                     MAX(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description)) AS clean_name,
                     t.profile_id,
                     SUM(ABS(t.amount)) AS total_spent,
@@ -3063,7 +3073,7 @@ def get_merchant_directory(
                 FROM transactions_visible t
                 WHERE {" AND ".join(tx_where)}
                 GROUP BY
-                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))),
+                    UPPER(TRIM(COALESCE(NULLIF(t.merchant_key,''), NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))),
                     t.profile_id
             ),
             merchant_alias AS (
@@ -3218,7 +3228,7 @@ def _infer_merchant_categories_from_transactions(conn, merchant_items: list[dict
         FROM (
             SELECT
                 t.profile_id,
-                UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
+                UPPER(TRIM(COALESCE(NULLIF(t.merchant_key,''), NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) AS merchant_key,
                 t.category,
                 t.categorization_source,
                 t.confidence
@@ -3226,7 +3236,7 @@ def _infer_merchant_categories_from_transactions(conn, merchant_items: list[dict
             WHERE t.amount < 0
               AND TRIM(COALESCE(t.category, '')) != ''
               AND COALESCE(t.category, 'Other') NOT IN ({spend_placeholders})
-              AND UPPER(TRIM(COALESCE(NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) IN ({key_placeholders})
+              AND UPPER(TRIM(COALESCE(NULLIF(t.merchant_key,''), NULLIF(t.merchant_name,''), t.description_normalized, t.description, ''))) IN ({key_placeholders})
               AND t.profile_id IN ({profile_placeholders})
         ) ranked
         GROUP BY profile_id, merchant_key, category
@@ -3724,12 +3734,13 @@ def explain_category_assignment(
         pattern = _extract_merchant_pattern(merchant_query)
         if not pattern:
             pattern = merchant_query.upper().strip()
+        key_pattern = canonicalize_merchant_key(merchant_query) or pattern
 
         scoped = profile if profile and profile != "household" else None
 
         # Distribution of category + source for matching transactions
-        base_where = "(description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)"
-        dist_params: list = [pattern, pattern]
+        base_where = "(description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)"
+        dist_params: list = [pattern, key_pattern, pattern]
         dist_sql = f"""
             SELECT category, categorization_source, COUNT(*) as cnt
             FROM transactions_visible
@@ -3839,13 +3850,14 @@ def bulk_recategorize_preview(
         pattern = _extract_merchant_pattern(merchant_query)
         if not pattern:
             pattern = merchant_query.upper().strip()
+        key_pattern = canonicalize_merchant_key(merchant_query) or pattern
 
         scoped = profile if profile and profile != "household" else None
 
-        count_params: list = [pattern, pattern]
+        count_params: list = [pattern, key_pattern, pattern]
         count_sql = """
             SELECT COUNT(*) FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
               AND category != ?
         """
         count_params.append(new_category)
@@ -3855,12 +3867,12 @@ def bulk_recategorize_preview(
 
         count = c.execute(count_sql, count_params).fetchone()[0]
 
-        sample_params: list = [pattern, pattern, new_category]
+        sample_params: list = [pattern, key_pattern, pattern, new_category]
         sample_sql = """
             SELECT date, description, amount, category as current_category,
-                   categorization_source, merchant_name
+                   categorization_source, merchant_name, merchant_key
             FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
               AND category != ?
         """
         if scoped:
@@ -3875,6 +3887,7 @@ def bulk_recategorize_preview(
                 f"UPDATE transactions SET category = '{new_category}', "
                 f"categorization_source = 'user-rule', updated_at = datetime('now') "
                 f"WHERE (description_normalized = '{pattern}' "
+                f"OR UPPER(COALESCE(merchant_key,'')) = '{key_pattern}' "
                 f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
                 f"AND profile_id = '{scoped}' "
                 f"AND COALESCE(is_excluded, 0) = 0"
@@ -3884,6 +3897,7 @@ def bulk_recategorize_preview(
                 f"UPDATE transactions SET category = '{new_category}', "
                 f"categorization_source = 'user-rule', updated_at = datetime('now') "
                 f"WHERE (description_normalized = '{pattern}' "
+                f"OR UPPER(COALESCE(merchant_key,'')) = '{key_pattern}' "
                 f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
                 f"AND COALESCE(is_excluded, 0) = 0"
             )
@@ -3917,6 +3931,7 @@ def preview_rule_creation(
         pattern = _extract_merchant_pattern(raw_pattern)
         if not pattern:
             pattern = raw_pattern.upper().strip()
+        key_pattern = canonicalize_merchant_key(raw_pattern) or pattern
 
         scoped = profile if profile and profile != "household" else None
 
@@ -3930,10 +3945,10 @@ def preview_rule_creation(
         ).fetchone()
 
         # Count + sample matching transactions (same logic as get_category_rule_impact contains branch)
-        count_params: list = [pattern, pattern]
+        count_params: list = [pattern, key_pattern, pattern]
         count_sql = """
             SELECT COUNT(*) FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
         """
         if scoped:
             count_sql += " AND profile_id = ?"
@@ -3941,12 +3956,12 @@ def preview_rule_creation(
 
         count = c.execute(count_sql, count_params).fetchone()[0]
 
-        sample_params: list = [pattern, pattern]
+        sample_params: list = [pattern, key_pattern, pattern]
         sample_sql = """
             SELECT date, description, amount, category as current_category,
-                   categorization_source, merchant_name
+                   categorization_source, merchant_name, merchant_key
             FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
         """
         if scoped:
             sample_sql += " AND profile_id = ?"
@@ -3991,13 +4006,14 @@ def rename_merchant_variants(
         pattern = _extract_merchant_pattern(old_pattern)
         if not pattern:
             pattern = old_pattern.upper().strip()
+        key_pattern = canonicalize_merchant_key(old_pattern) or pattern
 
         scoped = profile if profile and profile != "household" else None
 
-        count_params: list = [pattern, pattern]
+        count_params: list = [pattern, key_pattern, pattern]
         count_sql = """
             SELECT COUNT(*) FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
         """
         if scoped:
             count_sql += " AND profile_id = ?"
@@ -4005,11 +4021,11 @@ def rename_merchant_variants(
 
         count = c.execute(count_sql, count_params).fetchone()[0]
 
-        sample_params: list = [pattern, pattern]
+        sample_params: list = [pattern, key_pattern, pattern]
         sample_sql = """
-            SELECT date, description, merchant_name, amount, category
+            SELECT date, description, merchant_name, merchant_key, amount, category
             FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
         """
         if scoped:
             sample_sql += " AND profile_id = ?"
@@ -4018,7 +4034,7 @@ def rename_merchant_variants(
         samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
 
         escaped_new = new_name.replace("'", "''")
-        escaped_pattern = pattern.replace("'", "''")
+        escaped_pattern = key_pattern.replace("'", "''")
         if scoped:
             target_profiles = [scoped]
         else:
@@ -4028,10 +4044,10 @@ def rename_merchant_variants(
                     """
                     SELECT DISTINCT profile_id
                     FROM transactions_visible
-                    WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+                    WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
                     ORDER BY profile_id ASC
                     """,
-                    (pattern, pattern),
+                    (pattern, key_pattern, pattern),
                 ).fetchall()
                 if (row[0] or "").strip()
             ]

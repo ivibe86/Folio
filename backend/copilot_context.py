@@ -96,7 +96,7 @@ def _top_merchants_current_month(profile: str | None, conn) -> str:
         month = _current_month()
         rows = conn.execute(
             """
-            SELECT COALESCE(NULLIF(merchant_name, ''), description) AS name,
+            SELECT COALESCE(NULLIF(merchant_name, ''), NULLIF(merchant_key, ''), description) AS name,
                    SUM(ABS(amount)) AS total
             FROM transactions_visible
             WHERE amount < 0
@@ -104,7 +104,7 @@ def _top_merchants_current_month(profile: str | None, conn) -> str:
               AND category NOT IN ('Savings Transfer','Credit Card Payment','Income','Personal Transfer')
               AND date LIKE ?
               AND (? IS NULL OR profile_id = ?)
-            GROUP BY name
+            GROUP BY COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), description)
             HAVING name IS NOT NULL AND name != ''
             ORDER BY total DESC
             LIMIT ?

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from statistics import mean, stdev, median
 from collections import defaultdict
 from database import _extract_merchant_pattern
+from merchant_identity import canonicalize_merchant_key
 from log_config import get_logger
 
 logger = get_logger(__name__)
@@ -1127,24 +1128,27 @@ class RecurringDetector:
     ) -> tuple[dict[str, list[dict]], dict[str, str]]:
         """
         Group transactions by normalized merchant key.
-        Uses _extract_merchant_pattern for description-based grouping
-        and cleans merchant_name for enriched transactions.
+        Prefers explicit merchant_key and uses legacy description extraction
+        only as a compatibility fallback for unkeyed historical rows.
         """
         merchant_groups: dict[str, list[dict]] = defaultdict(list)
         display_names: dict[str, str] = {}
 
         for t in expense_txns:
             raw_merchant = (t.get("merchant_name") or "").strip()
+            raw_key = canonicalize_merchant_key(t.get("merchant_key") or "")
             raw_desc = (t.get("description") or "").strip()
 
             extracted = _extract_merchant_pattern(raw_desc)
 
-            if raw_merchant:
+            if raw_key:
+                key = raw_key
+            elif raw_merchant:
                 clean = raw_merchant.upper().strip()
                 clean = re.sub(r'\.(COM|NET|ORG|IO|CO|AI|TV|FM|APP|ME|US|UK)(\/\S*)?', '', clean)
                 clean = re.sub(r',?\s*\b(INC\.?|LLC\.?|L\.?L\.?C\.?|LTD\.?|CORP\.?|CO\.?|INCORPORATED|CORPORATION|S\.?A\.?)\b\.?', '', clean)
                 clean = clean.strip(' .,;-')
-                key = clean if clean else (extracted or raw_desc.upper() or "UNKNOWN")
+                key = canonicalize_merchant_key(clean) or (extracted or raw_desc.upper() or "UNKNOWN")
             else:
                 key = extracted if extracted else (raw_desc.upper() or "UNKNOWN")
 
@@ -1156,6 +1160,7 @@ class RecurringDetector:
                 "category":      t.get("category", "Other"),
                 "description":   raw_desc,
                 "merchant_name": raw_merchant,
+                "merchant_key": raw_key,
             })
 
         return merchant_groups, display_names

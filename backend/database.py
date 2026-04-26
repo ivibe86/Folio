@@ -207,6 +207,8 @@ def init_db():
         _migrate_merchant_aliases(conn)
         _migrate_transaction_expense_type(conn)
         _migrate_description_normalized(conn)
+        _migrate_transaction_merchant_identity(conn)
+        _migrate_canonical_merchant_metadata(conn)
         _migrate_category_pinned(conn)
         _migrate_accounts_provider(conn)
         _migrate_accounts_last_four(conn)
@@ -365,6 +367,215 @@ def _migrate_description_normalized(conn: sqlite3.Connection):
         logger.info("Backfilled description_normalized for %d transactions.", total)
 
 
+def _migrate_transaction_merchant_identity(conn: sqlite3.Connection):
+    """
+    Add explicit merchant identity columns.
+
+    description_normalized remains as legacy rule-pattern data. This migration
+    intentionally backfills merchant_key only from existing merchant_name, never
+    from regex-derived description_normalized for ambiguous unenriched rows.
+    """
+    from merchant_identity import (
+        MERCHANT_PURCHASE,
+        canonicalize_merchant_key,
+        infer_non_merchant_kind,
+        normalize_merchant_kind,
+    )
+
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    additions = {
+        "merchant_key": "TEXT DEFAULT ''",
+        "merchant_source": "TEXT DEFAULT ''",
+        "merchant_confidence": "TEXT DEFAULT ''",
+        "merchant_kind": "TEXT DEFAULT ''",
+    }
+    for col, ddl in additions.items():
+        if col not in cols:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
+            logger.info("Added %s column to transactions table.", col)
+
+    updated = 0
+    while True:
+        rows = conn.execute(
+            """SELECT id, description, raw_description, category, transaction_type,
+                      expense_type, merchant_name, merchant_key, merchant_kind,
+                      enriched, merchant_source, merchant_confidence
+               FROM transactions
+               WHERE NULLIF(TRIM(COALESCE(merchant_name, '')), '') IS NOT NULL
+                 AND (
+                    COALESCE(merchant_key, '') = ''
+                    OR COALESCE(merchant_kind, '') = ''
+                    OR COALESCE(merchant_source, '') = ''
+                 )
+               LIMIT 500"""
+        ).fetchall()
+        if not rows:
+            break
+        batch_updated = 0
+        for row in rows:
+            tx = dict(row)
+            merchant_key = canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name"))
+            merchant_kind = normalize_merchant_kind(tx.get("merchant_kind"))
+            merchant_source = (tx.get("merchant_source") or "").strip()
+            merchant_confidence = (tx.get("merchant_confidence") or "").strip()
+
+            if merchant_key and not merchant_kind:
+                merchant_kind = MERCHANT_PURCHASE
+            if merchant_key and merchant_kind == "unknown":
+                merchant_kind = MERCHANT_PURCHASE
+            if merchant_key and merchant_source in ("", "none"):
+                merchant_source = "legacy"
+
+            if merchant_key or merchant_kind or merchant_source or merchant_confidence:
+                conn.execute(
+                    """UPDATE transactions
+                       SET merchant_key = COALESCE(NULLIF(?, ''), merchant_key, ''),
+                           merchant_kind = COALESCE(NULLIF(?, ''), merchant_kind, ''),
+                           merchant_source = COALESCE(NULLIF(?, ''), merchant_source, ''),
+                           merchant_confidence = COALESCE(NULLIF(?, ''), merchant_confidence, '')
+                       WHERE id = ?""",
+                    (merchant_key, merchant_kind, merchant_source, merchant_confidence, tx["id"]),
+                )
+                updated += 1
+                batch_updated += 1
+        conn.commit()
+        if batch_updated == 0:
+            break
+
+    # Mark obvious non-merchant rows without creating merchant keys from raw descriptions.
+    # Keep ambiguous blank-merchant rows untouched so startup does not rewrite the whole ledger.
+    non_merchant_updated = 0
+    while True:
+        rows = conn.execute(
+            """SELECT id, description, raw_description, category, transaction_type,
+                      expense_type, merchant_name, merchant_key, merchant_kind,
+                      enriched, merchant_source, merchant_confidence
+               FROM transactions
+               WHERE COALESCE(merchant_key, '') = ''
+                 AND NULLIF(TRIM(COALESCE(merchant_name, '')), '') IS NULL
+                 AND COALESCE(merchant_kind, '') = ''
+                 AND (
+                    UPPER(COALESCE(description, '') || ' ' || COALESCE(raw_description, '')) LIKE '%ZELLE%'
+                    OR UPPER(COALESCE(description, '') || ' ' || COALESCE(raw_description, '')) LIKE '%CREDIT CRD%'
+                    OR UPPER(COALESCE(description, '') || ' ' || COALESCE(raw_description, '')) LIKE '%EPAY%'
+                    OR UPPER(COALESCE(description, '') || ' ' || COALESCE(raw_description, '')) LIKE '%PAYROLL%'
+                    OR UPPER(COALESCE(description, '') || ' ' || COALESCE(raw_description, '')) LIKE '%IRS%'
+                    OR UPPER(COALESCE(category, '')) IN ('INCOME', 'PAYROLL', 'TAXES', 'FEES')
+                 )
+               LIMIT 500"""
+        ).fetchall()
+        if not rows:
+            break
+        batch_updated = 0
+        for row in rows:
+            tx = dict(row)
+            merchant_kind = infer_non_merchant_kind(tx)
+            if not merchant_kind:
+                continue
+            conn.execute(
+                """UPDATE transactions
+                   SET merchant_kind = ?,
+                       merchant_source = COALESCE(NULLIF(merchant_source, ''), 'rule'),
+                       merchant_confidence = COALESCE(NULLIF(merchant_confidence, ''), 'high')
+                   WHERE id = ?""",
+                (merchant_kind, tx["id"]),
+            )
+            updated += 1
+            non_merchant_updated += 1
+            batch_updated += 1
+        conn.commit()
+        if batch_updated == 0:
+            break
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_merchant_key ON transactions(merchant_key)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_profile_merchant_key "
+        "ON transactions(profile_id, merchant_key)"
+    )
+    if updated:
+        logger.info("Backfilled merchant identity for %d transactions.", updated)
+    if non_merchant_updated:
+        logger.info("Classified %d obvious non-merchant transactions.", non_merchant_updated)
+
+
+def _migrate_canonical_merchant_metadata(conn: sqlite3.Connection):
+    """Bridge legacy merchant metadata/aliases onto canonical merchant_key values."""
+    from merchant_identity import canonicalize_merchant_key
+
+    rows = conn.execute(
+        """SELECT merchant_key, clean_name, logo_url, domain, category, industry,
+                  source, is_subscription, subscription_frequency, subscription_amount,
+                  subscription_status, cancelled_at, cancelled_by_user,
+                  last_charge_date, next_expected_date, total_spent, charge_count,
+                  profile_id
+           FROM merchants
+           WHERE COALESCE(profile_id, '') != ''
+             AND NULLIF(TRIM(clean_name), '') IS NOT NULL"""
+    ).fetchall()
+    copied = 0
+    for row in rows:
+        item = dict(row)
+        canonical_key = canonicalize_merchant_key(item.get("clean_name"))
+        profile_id = item.get("profile_id")
+        if not canonical_key or not profile_id:
+            continue
+        if canonical_key == canonicalize_merchant_key(item.get("merchant_key")):
+            continue
+        conn.execute(
+            """INSERT INTO merchants
+               (merchant_key, clean_name, logo_url, domain, category, industry,
+                source, is_subscription, subscription_frequency, subscription_amount,
+                subscription_status, cancelled_at, cancelled_by_user,
+                last_charge_date, next_expected_date, total_spent, charge_count,
+                profile_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
+                   clean_name = COALESCE(NULLIF(merchants.clean_name, ''), excluded.clean_name),
+                   logo_url = COALESCE(NULLIF(merchants.logo_url, ''), excluded.logo_url),
+                   domain = COALESCE(NULLIF(merchants.domain, ''), excluded.domain),
+                   category = COALESCE(NULLIF(merchants.category, ''), excluded.category),
+                   industry = COALESCE(NULLIF(merchants.industry, ''), excluded.industry),
+                   is_subscription = MAX(merchants.is_subscription, excluded.is_subscription),
+                   subscription_frequency = COALESCE(NULLIF(merchants.subscription_frequency, ''), excluded.subscription_frequency),
+                   subscription_amount = COALESCE(merchants.subscription_amount, excluded.subscription_amount),
+                   subscription_status = COALESCE(NULLIF(merchants.subscription_status, ''), excluded.subscription_status),
+                   cancelled_at = COALESCE(NULLIF(merchants.cancelled_at, ''), excluded.cancelled_at),
+                   cancelled_by_user = MAX(merchants.cancelled_by_user, excluded.cancelled_by_user),
+                   last_charge_date = COALESCE(NULLIF(merchants.last_charge_date, ''), excluded.last_charge_date),
+                   next_expected_date = COALESCE(NULLIF(merchants.next_expected_date, ''), excluded.next_expected_date),
+                   updated_at = datetime('now')""",
+            (
+                canonical_key,
+                item.get("clean_name"),
+                item.get("logo_url"),
+                item.get("domain"),
+                item.get("category"),
+                item.get("industry"),
+                item.get("source") or "legacy",
+                item.get("is_subscription") or 0,
+                item.get("subscription_frequency"),
+                item.get("subscription_amount"),
+                item.get("subscription_status"),
+                item.get("cancelled_at"),
+                item.get("cancelled_by_user") or 0,
+                item.get("last_charge_date"),
+                item.get("next_expected_date"),
+                item.get("total_spent") or 0,
+                item.get("charge_count") or 0,
+                profile_id,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO merchant_aliases (merchant_key, profile_id, display_name, source)
+               VALUES (?, ?, ?, 'user')
+               ON CONFLICT(merchant_key, profile_id) DO NOTHING""",
+            (canonical_key, profile_id, item.get("clean_name")),
+        )
+        copied += 1
+    if copied:
+        logger.info("Bridged %d merchant metadata rows to canonical merchant keys.", copied)
+
+
 def _migrate_category_pinned(conn: sqlite3.Connection):
     """
     Add category_pinned column to transactions.
@@ -486,6 +697,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     merchant_industry       TEXT DEFAULT '',
     merchant_city           TEXT DEFAULT '',
     merchant_state          TEXT DEFAULT '',
+    merchant_key            TEXT DEFAULT '',
+    merchant_source         TEXT DEFAULT '',
+    merchant_confidence     TEXT DEFAULT '',
+    merchant_kind           TEXT DEFAULT '',
     enriched                INTEGER DEFAULT 0,
     confidence              TEXT DEFAULT '',
     is_excluded             INTEGER DEFAULT 0,

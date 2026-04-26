@@ -17,6 +17,14 @@ from dotenv import load_dotenv
 from log_config import get_logger
 from privacy import mask_amount
 import llm_client
+from merchant_identity import (
+    MERCHANT_PURCHASE,
+    build_merchant_identity,
+    canonicalize_merchant_key,
+    infer_non_merchant_kind,
+    merchant_name_supported,
+    normalize_merchant_kind,
+)
 
 load_dotenv()
 
@@ -215,7 +223,8 @@ def _upsert_merchant_from_tx(tx: dict, enrichment: dict, source: str = "trove"):
     if not profile_id:
         return
 
-    merchant_key = _dedup_key(tx)
+    merchant_name = (enrichment.get("name") or enrichment.get("merchant_name") or "").strip()
+    merchant_key = canonicalize_merchant_key(merchant_name)
     if not merchant_key or len(merchant_key) < 3:
         return
 
@@ -311,14 +320,14 @@ def _resolve_enrichment_mode() -> str:
     Pick the active enrichment backend.
 
     Preference order:
-    1. Trove, if enabled and configured
-    2. Local LLM enrichment, if enabled and an LLM is available
+    1. Local LLM enrichment, if enabled and an LLM is available
+    2. Trove fallback, if enabled and configured
     3. None
     """
-    if ENABLE_TROVE and TROVE_API_KEY:
-        return "trove"
     if ENABLE_LOCAL_ENRICHMENT and llm_client.get_provider() == "ollama" and llm_client.is_available():
         return "local_llm"
+    if ENABLE_TROVE and TROVE_API_KEY:
+        return "trove"
     return "none"
 
 
@@ -425,30 +434,7 @@ def _merchant_name_supported(description: str, merchant_name: str) -> bool:
     Generic guardrail against cross-row hallucinations: the chosen merchant
     should have some lexical support in the transaction text.
     """
-    if not description or not merchant_name:
-        return False
-
-    desc_tokens = _match_tokens(description)
-    name_tokens = _match_tokens(merchant_name)
-    if not desc_tokens or not name_tokens:
-        return False
-
-    if merchant_name.strip().lower() in PLATFORM_NORMALIZE_MERCHANTS:
-        return True
-
-    if not desc_tokens.isdisjoint(name_tokens):
-        return True
-
-    alias_tokens = _merchant_alias_tokens(merchant_name)
-    if alias_tokens and not desc_tokens.isdisjoint(alias_tokens):
-        return True
-
-    desc_compact = _compact_text(description)
-    name_compact = _compact_text(merchant_name)
-    if len(name_compact) >= 5 and name_compact in desc_compact:
-        return True
-
-    return False
+    return merchant_name_supported(description, merchant_name)
 
 
 def _validate_local_enrichment_with_reason(tx: dict, enrichment: dict | None) -> tuple[dict | None, str]:
@@ -457,11 +443,13 @@ def _validate_local_enrichment_with_reason(tx: dict, enrichment: dict | None) ->
         return None, "parse_failed"
 
     merchant_name = (enrichment.get("name") or "").strip()
+    merchant_kind = normalize_merchant_kind(enrichment.get("merchant_kind"), tx)
     merchant_industry = (enrichment.get("industry") or "").strip()
     description = (tx.get("raw_description") or tx.get("description") or "").strip()
 
-    if not merchant_name and not merchant_industry:
-        return None, "abstained"
+    if not merchant_name and merchant_kind in {"personal_transfer", "credit_card_payment", "income", "tax", "bank_fee"}:
+        enrichment["merchant_kind"] = merchant_kind
+        return enrichment, "accepted_non_merchant"
 
     if not merchant_name:
         return None, "empty_merchant_name"
@@ -469,9 +457,11 @@ def _validate_local_enrichment_with_reason(tx: dict, enrichment: dict | None) ->
     if not merchant_industry or merchant_industry == "Unknown":
         return None, "unknown_industry"
 
-    if not _merchant_name_supported(description, merchant_name):
+    evidence_tokens = enrichment.get("evidence_tokens") or []
+    if not merchant_name_supported(description, merchant_name, evidence_tokens):
         return None, "unsupported_merchant_name"
 
+    enrichment["merchant_kind"] = MERCHANT_PURCHASE if merchant_kind == "unknown" else merchant_kind
     return enrichment, "accepted"
 
 
@@ -567,8 +557,10 @@ def _local_rule_enrichment(tx: dict) -> dict | None:
         if pattern.search(upper):
             return {
                 "name": name,
+                "merchant_kind": MERCHANT_PURCHASE,
                 "industry": industry,
                 "confidence": "high",
+                "evidence_tokens": [name],
                 "_cache_source": "local_rule",
             }
 
@@ -594,23 +586,23 @@ def _local_enrichment_line(tx: dict, index: int) -> str:
 LOCAL_ENRICHMENT_EXAMPLES = """
 Examples:
 - Raw description: "ALASKA AIR 0272123773667 SEATTLE"
-  Output: {"merchant_name":"Alaska Air","merchant_industry":"Travel / Airline","confidence":"high"}
+  Output: {"merchant_name":"Alaska Air","merchant_kind":"merchant_purchase","merchant_industry":"Travel / Airline","confidence":"high","evidence_tokens":["ALASKA AIR"]}
 - Raw description: "LUFTHAN 2204081455193 NEW YORK"
-  Output: {"merchant_name":"Lufthansa","merchant_industry":"Travel / Airline","confidence":"high"}
+  Output: {"merchant_name":"Lufthansa","merchant_kind":"merchant_purchase","merchant_industry":"Travel / Airline","confidence":"high","evidence_tokens":["LUFTHAN"]}
 - Raw description: "DOORDASH*11/16-2 ORDER 855-431-0459"
-  Output: {"merchant_name":"DoorDash","merchant_industry":"Restaurant","confidence":"high"}
+  Output: {"merchant_name":"DoorDash","merchant_kind":"merchant_purchase","merchant_industry":"Restaurant","confidence":"high","evidence_tokens":["DOORDASH"]}
 - Raw description: "DD *DOORDASH SAFEWAY 855-973-1040"
-  Output: {"merchant_name":"DoorDash","merchant_industry":"Restaurant","confidence":"medium"}
+  Output: {"merchant_name":"DoorDash","merchant_kind":"merchant_purchase","merchant_industry":"Restaurant","confidence":"medium","evidence_tokens":["DD","DOORDASH"]}
 - Raw description: "AMAZON DIGITAL SVCS AMZN.COM/BILL"
-  Output: {"merchant_name":"Amazon Digital Services","merchant_industry":"Streaming / Media","confidence":"high"}
+  Output: {"merchant_name":"Amazon Digital Services","merchant_kind":"merchant_purchase","merchant_industry":"Streaming / Media","confidence":"high","evidence_tokens":["AMAZON DIGITAL"]}
 - Raw description: "AMZN Mktp US *A1B2C3D4E"
-  Output: {"merchant_name":"Amazon Marketplace","merchant_industry":"E-commerce Marketplace","confidence":"high"}
+  Output: {"merchant_name":"Amazon Marketplace","merchant_kind":"merchant_purchase","merchant_industry":"E-commerce Marketplace","confidence":"high","evidence_tokens":["AMZN","Mktp"]}
 - Raw description: "AMAZONFRESH AMZN.COM/FRESH"
-  Output: {"merchant_name":"Amazon Fresh","merchant_industry":"Grocery","confidence":"high"}
+  Output: {"merchant_name":"Amazon Fresh","merchant_kind":"merchant_purchase","merchant_industry":"Grocery","confidence":"high","evidence_tokens":["AMAZONFRESH"]}
 - Raw description: "CHATGPT SUBSCRIPTION HTTPSOPENAI.C"
-  Output: {"merchant_name":"OpenAI","merchant_industry":"Software / SaaS","confidence":"high"}
+  Output: {"merchant_name":"OpenAI","merchant_kind":"merchant_purchase","merchant_industry":"Software / SaaS","confidence":"high","evidence_tokens":["CHATGPT"]}
 - Raw description: "PAYPAL *TRANSFER JOHN D"
-  Output: {"merchant_name":"","merchant_industry":"","confidence":"low"}
+  Output: {"merchant_name":"","merchant_kind":"personal_transfer","merchant_industry":"","confidence":"high","evidence_tokens":["PAYPAL TRANSFER"]}
 """.strip()
 
 LOCAL_ENRICHMENT_PLATFORM_POLICY = """
@@ -632,13 +624,14 @@ def _build_local_enrichment_prompt(tx: dict) -> str:
     return f"""You normalize merchant purchase descriptions for a personal finance app.
 
 Return ONLY valid JSON with this exact schema:
-{{"merchant_name":"...", "merchant_industry":"...", "confidence":"high|medium|low"}}
+{{"merchant_name":"...", "merchant_kind":"merchant_purchase|personal_transfer|credit_card_payment|income|tax|bank_fee|unknown", "merchant_industry":"...", "confidence":"high|medium|low", "evidence_tokens":["..."]}}
 
 Rules:
 - Use ONLY this merchant_industry list:
   {", ".join(MERCHANT_INDUSTRIES)}
 - Do not generate website domains, cities, states, or countries
 - Normalize the merchant_name to a clean human-readable merchant label
+- Set merchant_kind even when merchant_name is empty
 - If the transaction is too ambiguous or not clearly a merchant purchase, return merchant_name="" and merchant_industry=""
 - If the merchant appears to be a payment processor wrapper (like PayPal, Square, Toast), prefer the underlying merchant when it is clearly present; otherwise keep the processor name
 - If confidence would be low, leave both merchant_name and merchant_industry empty
@@ -663,13 +656,14 @@ def _build_local_enrichment_batch_prompt(batch: list[dict]) -> str:
     return f"""You normalize merchant purchase descriptions for a personal finance app.
 
 Return ONLY valid JSON as an array with this exact schema:
-[{{"index":0,"merchant_name":"...","merchant_industry":"...","confidence":"high|medium|low"}}]
+[{{"index":0,"merchant_name":"...","merchant_kind":"merchant_purchase|personal_transfer|credit_card_payment|income|tax|bank_fee|unknown","merchant_industry":"...","confidence":"high|medium|low","evidence_tokens":["..."]}}]
 
 Rules:
 - Use ONLY this merchant_industry list:
   {", ".join(MERCHANT_INDUSTRIES)}
 - Do not generate website domains, cities, states, or countries
 - Normalize the merchant_name to a clean human-readable merchant label
+- Set merchant_kind even when merchant_name is empty
 - If the transaction is too ambiguous or not clearly a merchant purchase, return merchant_name="" and merchant_industry=""
 - If the merchant appears to be a payment processor wrapper (like PayPal, Square, Toast), prefer the underlying merchant when it is clearly present; otherwise keep the processor name
 - If confidence would be low, leave both merchant_name and merchant_industry empty
@@ -727,24 +721,30 @@ def _parse_local_enrichment_response(raw: str) -> dict | None:
         return None
 
     merchant_name = (parsed.get("merchant_name") or "").strip()
+    merchant_kind = normalize_merchant_kind(parsed.get("merchant_kind"))
     merchant_industry = _normalize_industry(parsed.get("merchant_industry") or "")
     confidence = (parsed.get("confidence") or "medium").strip().lower()
+    evidence_tokens = parsed.get("evidence_tokens") or []
+    if not isinstance(evidence_tokens, list):
+        evidence_tokens = []
     if confidence not in {"high", "medium", "low"}:
         confidence = "medium"
 
-    if not merchant_name and merchant_industry == "Unknown":
+    if not merchant_name and merchant_kind not in {"personal_transfer", "credit_card_payment", "income", "tax", "bank_fee"}:
         return None
 
-    if merchant_industry == "Unknown":
+    if merchant_name and merchant_industry == "Unknown":
         return None
 
-    if not _confidence_meets_threshold(confidence):
+    if merchant_name and not _confidence_meets_threshold(confidence):
         return None
 
     return {
         "name": merchant_name,
+        "merchant_kind": merchant_kind,
         "industry": merchant_industry,
         "confidence": confidence,
+        "evidence_tokens": [str(token)[:80] for token in evidence_tokens[:6]],
     }
 
 
@@ -846,6 +846,13 @@ def _should_enrich(tx: dict) -> bool:
     if tx.get("enriched"):
         return False
 
+    non_merchant_kind = infer_non_merchant_kind(tx)
+    if non_merchant_kind:
+        tx["merchant_kind"] = non_merchant_kind
+        tx["merchant_source"] = tx.get("merchant_source") or "rule"
+        tx["merchant_confidence"] = tx.get("merchant_confidence") or "high"
+        return False
+
     cat = tx.get("category", "")
     if cat in SKIP_ENRICHMENT_CATEGORIES:
         return False
@@ -891,6 +898,9 @@ def _apply_enrichment(tx: dict, enrichment: dict) -> dict:
     name = (enrichment.get("name") or "").strip()
     industry = (enrichment.get("industry") or "").strip()
     categories = enrichment.get("categories") or []
+    source = enrichment.get("_cache_source") or enrichment.get("source") or "trove"
+    confidence = (enrichment.get("confidence") or enrichment.get("merchant_confidence") or "").strip()
+    merchant_kind = normalize_merchant_kind(enrichment.get("merchant_kind"), tx)
 
     merchant_name = name if name else (_domain_to_name(domain) if domain else "")
     merchant_city = enrichment.get("hq_city") or enrichment.get("city") or ""
@@ -904,6 +914,10 @@ def _apply_enrichment(tx: dict, enrichment: dict) -> dict:
     if domain or (merchant_name and has_actionable_industry):
         tx["merchant_domain"] = domain
         tx["merchant_name"] = merchant_name
+        tx["merchant_key"] = canonicalize_merchant_key(merchant_name)
+        tx["merchant_source"] = "llm" if source in ("local_llm", "llm") else source
+        tx["merchant_confidence"] = confidence or ("high" if domain else "medium")
+        tx["merchant_kind"] = merchant_kind if merchant_kind != "unknown" else MERCHANT_PURCHASE
         tx["merchant_industry"] = industry
         tx["merchant_categories"] = categories
         tx["merchant_city"] = merchant_city
@@ -912,6 +926,12 @@ def _apply_enrichment(tx: dict, enrichment: dict) -> dict:
         tx["enriched"] = True
         tx["enrichment_tier"] = "full" if (domain and merchant_name) else "normalized"
     else:
+        inferred_kind = merchant_kind if merchant_kind != "unknown" else infer_non_merchant_kind(tx)
+        if inferred_kind:
+            tx["merchant_kind"] = inferred_kind
+            tx["merchant_source"] = "llm" if source in ("local_llm", "llm") else source
+            tx["merchant_confidence"] = confidence or "high"
+        tx["merchant_key"] = tx.get("merchant_key", "")
         tx["enriched"] = False
 
     return tx
@@ -1056,7 +1076,8 @@ def _fanout_enrichment(
     enrichment_fields = [
         "merchant_domain", "merchant_name", "merchant_industry",
         "merchant_categories", "merchant_city", "merchant_state",
-        "merchant_country", "enriched", "enrichment_tier",
+        "merchant_country", "merchant_key", "merchant_source",
+        "merchant_confidence", "merchant_kind", "enriched", "enrichment_tier",
     ]
 
     for idx in siblings:

@@ -273,11 +273,12 @@ def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
         """(
             UPPER(COALESCE(description, '')) LIKE ?
             OR UPPER(COALESCE(raw_description, '')) LIKE ?
+            OR UPPER(COALESCE(merchant_key, '')) LIKE ?
             OR UPPER(COALESCE(merchant_name, '')) LIKE ?
             OR UPPER(COALESCE(category, '')) LIKE ?
         )""",
     ]
-    params.extend([search, search, search, search])
+    params.extend([search, search, search, search, search])
     if profile and profile != "household":
         where.append("profile_id = ?")
         params.append(profile)
@@ -304,7 +305,7 @@ def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
         f"""
         SELECT id as original_id, profile_id as profile, date, description, raw_description,
                amount, category, original_category, categorization_source, confidence,
-               transaction_type as type, account_name, account_type, merchant_name,
+               transaction_type as type, account_name, account_type, merchant_name, merchant_key,
                enriched, is_excluded, expense_type
         FROM transactions_visible
         WHERE {where_sql}
