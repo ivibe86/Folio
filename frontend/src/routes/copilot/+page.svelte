@@ -27,6 +27,44 @@
     let copilotModel = '';
     let copilotModelSaving = false;
     let copilotModelInstalling = false;
+    let appConfig = { receiptIntelligenceEnabled: false };
+
+    let receiptsOpen = false;
+    let receiptFile = null;
+    let receiptParsing = false;
+    let receiptSaving = false;
+    let receiptError = '';
+    let receiptDraft = null;
+    let receiptItems = [];
+    let receiptComparisons = [];
+    let receiptSummaryEditing = false;
+    let receiptParseStartedAt = null;
+    let receiptParseElapsed = 0;
+    let receiptParseTimer = null;
+
+    $: receiptParseStage = (() => {
+        if (!receiptParsing) return '';
+        if (receiptParseElapsed < 3) return 'Uploading receipt image';
+        if (receiptParseElapsed < 7) return receiptFile?.name?.toLowerCase().endsWith('.heic') || receiptFile?.name?.toLowerCase().endsWith('.heif')
+            ? 'Converting HEIC photo'
+            : 'Preparing image';
+        if (receiptParseElapsed < 14) return 'Reading receipt text with local vision';
+        return 'Extracting item names and prices';
+    })();
+
+    function startReceiptParseTimer() {
+        clearReceiptParseTimer();
+        receiptParseStartedAt = Date.now();
+        receiptParseElapsed = 0;
+        receiptParseTimer = setInterval(() => {
+            receiptParseElapsed = Math.max(0, Math.floor((Date.now() - receiptParseStartedAt) / 1000));
+        }, 250);
+    }
+
+    function clearReceiptParseTimer() {
+        if (receiptParseTimer) clearInterval(receiptParseTimer);
+        receiptParseTimer = null;
+    }
 
     // Strip <observation>/<memory_proposal> tags from streamed text so they never
     // briefly appear in the UI before the server-side cleanup at done. Also reverses
@@ -98,6 +136,12 @@
                 { key: 'new_name', label: 'New display name', type: 'text', placeholder: 'e.g. Amazon Marketplace', required: true },
             ],
         },
+        {
+            id: 'receipt_compare',
+            label: 'Compare grocery receipt prices',
+            inputs: [],
+            requiresReceipts: true,
+        },
     ];
 
     // Chip form state
@@ -132,7 +176,7 @@
     onMount(async () => {
         const prompt = $page.url.searchParams.get('prompt');
         if (prompt) input = prompt;
-        await Promise.all([refreshSidebar(), loadLocalLlm()]);
+        await Promise.all([refreshSidebar(), loadLocalLlm(), loadAppConfig()]);
         lastLoadedProfile = activeProfileId;
         // Load categories for chip form dropdowns
         try {
@@ -144,6 +188,7 @@
     $: if (activeProfileId && lastLoadedProfile !== undefined && activeProfileId !== lastLoadedProfile) {
         lastLoadedProfile = activeProfileId;
         refreshSidebar();
+        if (receiptsOpen && appConfig.receiptIntelligenceEnabled) loadReceiptComparisons();
     }
 
     function setNotice(message) {
@@ -269,6 +314,14 @@
         } catch (error) {
             localLlmStatus = null;
             localLlmCatalog = null;
+        }
+    }
+
+    async function loadAppConfig() {
+        try {
+            appConfig = { ...appConfig, ...(await api.getAppConfig()) };
+        } catch (error) {
+            appConfig = { ...appConfig, receiptIntelligenceEnabled: false };
         }
     }
 
@@ -633,6 +686,7 @@
         if (chip.id === 'bulk_recategorize') return `Move all ${values.merchant} transactions to ${values.category}`;
         if (chip.id === 'create_rule') return `Create a rule: ${values.pattern} → ${values.category}`;
         if (chip.id === 'rename_merchant') return `Rename ${values.old_name} to ${values.new_name}`;
+        if (chip.id === 'receipt_compare') return 'Compare grocery receipt prices';
         return chip.label;
     }
 
@@ -689,6 +743,10 @@
     }
 
     async function activateChip(chip) {
+        if (chip.id === 'receipt_compare') {
+            openReceipts();
+            return;
+        }
         if (chip.inputs.length === 0) {
             // No inputs needed — execute immediately
             const userMsg = buildChipMessage(chip, {});
@@ -795,6 +853,165 @@
             throw error;
         }
     }
+
+    function openReceipts() {
+        receiptsOpen = true;
+        receiptError = '';
+        loadReceiptComparisons();
+    }
+
+    function closeReceipts() {
+        receiptsOpen = false;
+        receiptError = '';
+    }
+
+    async function loadReceiptComparisons() {
+        if (!appConfig.receiptIntelligenceEnabled) return;
+        try {
+            const result = await api.getReceiptComparisons(activeProfileId);
+            receiptComparisons = result?.items || [];
+        } catch (error) {
+            receiptComparisons = [];
+        }
+    }
+
+    function handleReceiptFile(event) {
+        receiptFile = event.currentTarget.files?.[0] || null;
+        receiptError = '';
+    }
+
+    function setReceiptItemValue(index, key, value) {
+        const next = [...receiptItems];
+        const current = { ...next[index] };
+        if (['quantity', 'total_price', 'unit_price'].includes(key)) {
+            current[key] = value === '' ? null : Number(value);
+        } else {
+            current[key] = value;
+        }
+        next[index] = current;
+        receiptItems = next;
+    }
+
+    function syncReceiptState(receipt) {
+        receiptDraft = receipt;
+        receiptItems = (receipt?.items || []).map((item) => ({ ...item }));
+    }
+
+    function setReceiptDraftValue(key, value) {
+        if (!receiptDraft || receiptDraft.status !== 'draft') return;
+        receiptDraft = { ...receiptDraft, [key]: value };
+    }
+
+    function receiptDraftMetadata() {
+        return {
+            store_name: receiptDraft?.store_name || '',
+            receipt_date: receiptDraft?.receipt_date || null,
+        };
+    }
+
+    async function parseSelectedReceipt() {
+        if (!receiptFile || receiptParsing) return;
+        receiptParsing = true;
+        receiptError = '';
+        startReceiptParseTimer();
+        try {
+            const receipt = await api.parseReceipt(receiptFile, activeProfileId);
+            syncReceiptState(receipt);
+            setNotice('Receipt parsed. Review the items before approving.');
+            await loadReceiptComparisons();
+        } catch (error) {
+            receiptError = error?.message || 'Receipt parsing failed.';
+        } finally {
+            receiptParsing = false;
+            clearReceiptParseTimer();
+        }
+    }
+
+    async function saveReceiptItems() {
+        if (!receiptDraft || receiptSaving) return;
+        receiptSaving = true;
+        receiptError = '';
+        try {
+            const receipt = await api.updateReceiptItems(receiptDraft.id, receiptItems, activeProfileId, receiptDraftMetadata());
+            syncReceiptState(receipt);
+            receiptSummaryEditing = false;
+            setNotice('Receipt draft saved.');
+        } catch (error) {
+            receiptError = error?.message || 'Failed to save receipt items.';
+        } finally {
+            receiptSaving = false;
+        }
+    }
+
+    async function approveReceiptDraft() {
+        if (!receiptDraft || receiptSaving) return;
+        receiptSaving = true;
+        receiptError = '';
+        try {
+            await api.updateReceiptItems(receiptDraft.id, receiptItems, activeProfileId, receiptDraftMetadata());
+            const receipt = await api.approveReceipt(receiptDraft.id, activeProfileId);
+            syncReceiptState(receipt);
+            receiptSummaryEditing = false;
+            await loadReceiptComparisons();
+            setNotice('Receipt approved. Prices are now in comparisons.');
+        } catch (error) {
+            receiptError = error?.message || 'Failed to approve receipt.';
+        } finally {
+            receiptSaving = false;
+        }
+    }
+
+    async function discardReceiptDraft() {
+        if (!receiptDraft || receiptSaving) return;
+        receiptSaving = true;
+        receiptError = '';
+        try {
+            await api.discardReceipt(receiptDraft.id, activeProfileId);
+            receiptDraft = null;
+            receiptItems = [];
+            receiptFile = null;
+            receiptSummaryEditing = false;
+            setNotice('Receipt discarded.');
+            await loadReceiptComparisons();
+        } catch (error) {
+            receiptError = error?.message || 'Failed to discard receipt.';
+        } finally {
+            receiptSaving = false;
+        }
+    }
+
+    function startNewReceipt() {
+        receiptDraft = null;
+        receiptItems = [];
+        receiptFile = null;
+        receiptError = '';
+        receiptSummaryEditing = false;
+    }
+
+    function formatReceiptMoney(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const num = Number(value);
+        return Number.isFinite(num) ? formatCurrency(num, 2) : '—';
+    }
+
+    function formatUnitPrice(value, unit = '') {
+        const price = formatReceiptMoney(value);
+        return price === '—' ? price : `${price}${unit ? `/${unit}` : ''}`;
+    }
+
+    function receiptComparisonStores(itemName) {
+        const direct = receiptDraft?.comparisons?.[itemName];
+        if (direct) return direct;
+        return receiptComparisons.find((item) => item.item_name === itemName)?.stores || [];
+    }
+
+    function bestReceiptStore(stores) {
+        if (!stores || stores.length === 0) return null;
+        return stores.reduce((best, store) => {
+            if (best == null) return store;
+            return Number(store.lowest_unit_price) < Number(best.lowest_unit_price) ? store : best;
+        }, null);
+    }
 </script>
 
 <div class="flex flex-col gap-4">
@@ -809,6 +1026,15 @@
             </div>
         </div>
         <div class="copilot-header-actions">
+            {#if appConfig.receiptIntelligenceEnabled}
+                <button
+                    type="button"
+                    class="copilot-side-pill"
+                    class:copilot-side-pill-active={receiptsOpen}
+                    on:click={openReceipts}>
+                    Receipts
+                </button>
+            {/if}
             <a href="/copilot/memory" class="copilot-side-pill" data-sveltekit-preload-data="hover">
                 Memory
             </a>
@@ -825,6 +1051,259 @@
 
     {#if actionNotice}
         <div class="copilot-notice fade-in">{actionNotice}</div>
+    {/if}
+
+    {#if receiptsOpen && appConfig.receiptIntelligenceEnabled}
+        <section class="copilot-receipts-workspace fade-in-up">
+            <div class="copilot-panel-header">
+                <div>
+                    <h3>Receipt Price Compare</h3>
+                    <p>Upload a grocery receipt, review the parsed items, then approve it into your local price history.</p>
+                </div>
+                <div class="copilot-button-row">
+                    {#if receiptDraft}
+                        <button type="button" class="copilot-inline-btn" on:click={startNewReceipt} disabled={receiptParsing || receiptSaving}>
+                            New receipt
+                        </button>
+                    {/if}
+                    <button type="button" class="copilot-inline-btn" on:click={closeReceipts}>
+                        Close
+                    </button>
+                </div>
+            </div>
+
+            {#if receiptError}
+                <div class="copilot-receipt-error">{receiptError}</div>
+            {/if}
+
+            <div class="copilot-receipt-grid">
+                <div class="copilot-receipt-upload">
+                    <div class="copilot-receipt-drop">
+                        <span class="material-symbols-outlined">upload_file</span>
+                        <div>
+                            <strong>{receiptFile ? receiptFile.name : 'Upload receipt image'}</strong>
+                            <p>Images are parsed locally and discarded immediately after the draft is created.</p>
+                        </div>
+                        <input type="file" accept="image/*" on:change={handleReceiptFile} disabled={receiptParsing || receiptSaving} />
+                    </div>
+                    <button
+                        type="button"
+                        class="copilot-primary-btn"
+                        on:click={parseSelectedReceipt}
+                        disabled={!receiptFile || receiptParsing || receiptSaving}
+                    >
+                        <span class="material-symbols-outlined text-[14px]" class:copilot-spin={receiptParsing}>
+                            {receiptParsing ? 'progress_activity' : 'document_scanner'}
+                        </span>
+                        {receiptParsing ? 'Parsing…' : 'Parse receipt'}
+                    </button>
+                    {#if receiptParsing}
+                        <div class="copilot-receipt-progress" aria-live="polite">
+                            <div class="copilot-receipt-progress-bar">
+                                <span style="width: {Math.min(92, 12 + receiptParseElapsed * 4)}%"></span>
+                            </div>
+                            <div class="copilot-receipt-progress-copy">
+                                <strong>{receiptParseStage}</strong>
+                                <span>{receiptParseElapsed}s elapsed · local model calls can take 15-30s</span>
+                            </div>
+                        </div>
+                    {/if}
+                </div>
+
+                <div class="copilot-receipt-summary">
+                    {#if receiptDraft}
+                        <div class="copilot-receipt-summary-field">
+                            <div class="copilot-receipt-summary-label-row">
+                                <span>Store</span>
+                                {#if receiptDraft.status === 'draft'}
+                                    <button
+                                        type="button"
+                                        class="copilot-receipt-edit-btn"
+                                        on:click={() => receiptSummaryEditing = !receiptSummaryEditing}
+                                        aria-label={receiptSummaryEditing ? 'Done editing receipt details' : 'Edit receipt details'}
+                                    >
+                                        <span class="material-symbols-outlined">{receiptSummaryEditing ? 'check' : 'edit'}</span>
+                                    </button>
+                                {/if}
+                            </div>
+                            {#if receiptSummaryEditing && receiptDraft.status === 'draft'}
+                                <input
+                                    class="copilot-receipt-summary-input"
+                                    value={receiptDraft.store_name || ''}
+                                    placeholder="Store name"
+                                    on:input={(event) => setReceiptDraftValue('store_name', event.currentTarget.value)}
+                                />
+                            {:else}
+                                <strong>{receiptDraft.store_name || 'Unknown store'}</strong>
+                            {/if}
+                        </div>
+                        <div class="copilot-receipt-summary-field">
+                            <div class="copilot-receipt-summary-label-row">
+                                <span>Date</span>
+                            </div>
+                            {#if receiptSummaryEditing && receiptDraft.status === 'draft'}
+                                <input
+                                    class="copilot-receipt-summary-input"
+                                    type="date"
+                                    value={receiptDraft.receipt_date || ''}
+                                    on:input={(event) => setReceiptDraftValue('receipt_date', event.currentTarget.value)}
+                                />
+                            {:else}
+                                <strong>{receiptDraft.receipt_date || 'Unknown'}</strong>
+                            {/if}
+                        </div>
+                        <div>
+                            <span>Total</span>
+                            <strong>{formatReceiptMoney(receiptDraft.total)}</strong>
+                        </div>
+                        <div>
+                            <span>Status</span>
+                            <strong>{receiptDraft.status}</strong>
+                        </div>
+                    {:else}
+                        <div>
+                            <span>Approved items</span>
+                            <strong>{receiptComparisons.length}</strong>
+                        </div>
+                        <div>
+                            <span>Mode</span>
+                            <strong>Review first</strong>
+                        </div>
+                    {/if}
+                </div>
+            </div>
+
+            {#if receiptDraft}
+                <div class="copilot-receipt-section">
+                    <div class="copilot-panel-header">
+                        <div>
+                            <h3>Review Parsed Items</h3>
+                            <p>Draft rows do not affect comparisons until approved.</p>
+                        </div>
+                        {#if receiptDraft.status === 'draft'}
+                            <div class="copilot-button-row">
+                                <button type="button" class="copilot-inline-btn" on:click={saveReceiptItems} disabled={receiptSaving}>
+                                    Save draft
+                                </button>
+                                <button type="button" class="copilot-inline-btn copilot-inline-btn-danger" on:click={discardReceiptDraft} disabled={receiptSaving}>
+                                    Discard
+                                </button>
+                                <button type="button" class="copilot-primary-btn" on:click={approveReceiptDraft} disabled={receiptSaving || receiptItems.length === 0}>
+                                    Approve
+                                </button>
+                            </div>
+                        {/if}
+                    </div>
+
+                    <div class="copilot-receipt-table-wrap">
+                        <table class="copilot-receipt-table">
+                            <thead>
+                                <tr>
+                                    <th>Raw item</th>
+                                    <th>Normalized item</th>
+                                    <th>Qty</th>
+                                    <th>Unit</th>
+                                    <th>Total</th>
+                                    <th>Unit price</th>
+                                    <th>Best seen</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {#each receiptItems as item, index (item.id)}
+                                    {@const stores = receiptComparisonStores(item.normalized_item_name)}
+                                    {@const best = bestReceiptStore(stores)}
+                                    <tr>
+                                        <td>
+                                            <input
+                                                value={item.raw_item_text}
+                                                on:input={(event) => setReceiptItemValue(index, 'raw_item_text', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                value={item.normalized_item_name}
+                                                on:input={(event) => setReceiptItemValue(index, 'normalized_item_name', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                value={item.quantity ?? ''}
+                                                on:input={(event) => setReceiptItemValue(index, 'quantity', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                value={item.unit}
+                                                on:input={(event) => setReceiptItemValue(index, 'unit', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                value={item.total_price ?? ''}
+                                                on:input={(event) => setReceiptItemValue(index, 'total_price', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                value={item.unit_price ?? ''}
+                                                on:input={(event) => setReceiptItemValue(index, 'unit_price', event.currentTarget.value)}
+                                                disabled={receiptDraft.status !== 'draft'}
+                                            />
+                                        </td>
+                                        <td>
+                                            {#if best}
+                                                <span class="copilot-receipt-best">{best.store_name} · {formatUnitPrice(best.lowest_unit_price, item.unit)}</span>
+                                            {:else}
+                                                <span class="copilot-row-subtitle">No approved history</span>
+                                            {/if}
+                                        </td>
+                                    </tr>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {/if}
+
+            <div class="copilot-receipt-section">
+                <div class="copilot-panel-header">
+                    <div>
+                        <h3>Approved Price History</h3>
+                        <p>Lowest and average unit prices from receipts you approved.</p>
+                    </div>
+                    <button type="button" class="copilot-inline-btn" on:click={loadReceiptComparisons}>Refresh</button>
+                </div>
+                {#if receiptComparisons.length === 0}
+                    <div class="copilot-empty-state">No approved receipt prices yet.</div>
+                {:else}
+                    <div class="copilot-receipt-comparison-list">
+                        {#each receiptComparisons as item}
+                            <div class="copilot-receipt-comparison-card">
+                                <strong>{item.item_name}</strong>
+                                <div class="copilot-receipt-store-row">
+                                    {#each item.stores as store}
+                                        <span>
+                                            {store.store_name || 'Unknown'} · {formatUnitPrice(store.lowest_unit_price)} · avg {formatReceiptMoney(store.average_unit_price)}
+                                        </span>
+                                    {/each}
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        </section>
     {/if}
 
     <div class="copilot-chat-layout fade-in-up">
@@ -1067,7 +1546,7 @@
                     {:else}
                         <p class="text-[9px] font-bold tracking-[0.2em] uppercase mb-2.5" style="color: var(--text-muted)">Try asking</p>
                         <div class="flex flex-wrap gap-2">
-                            {#each chipActions as chip}
+                            {#each chipActions.filter((chip) => !chip.requiresReceipts || appConfig.receiptIntelligenceEnabled) as chip}
                                 <button on:click={() => activateChip(chip)} class="copilot-suggestion-btn">
                                     {chip.label}
                                 </button>

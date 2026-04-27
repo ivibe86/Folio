@@ -7,6 +7,7 @@ Supported providers (set LLM_PROVIDER in .env):
   ollama     — calls a local Ollama instance
 """
 
+import base64
 import json as _json
 import os
 import httpx
@@ -30,6 +31,7 @@ _ANTHROPIC_MODEL = "claude-3-haiku-20240307"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL_CATEGORIZE = os.getenv("OLLAMA_MODEL_CATEGORIZE", "gemma4:e4b")
 OLLAMA_MODEL_COPILOT = os.getenv("OLLAMA_MODEL_COPILOT", "gemma4:26b")
+OLLAMA_MODEL_RECEIPT = os.getenv("OLLAMA_MODEL_RECEIPT", "gemma4:e4b")
 # Timeouts are generous by default — local inference on a laptop is slow,
 # especially categorization batches of 50 transactions.
 # Increase further via env if your hardware is particularly slow.
@@ -86,6 +88,22 @@ def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> s
     if get_provider() == "ollama":
         return _complete_ollama(prompt, max_tokens, purpose)
     return _complete_anthropic(prompt, max_tokens)
+
+
+def complete_vision(
+    prompt: str,
+    image_bytes: bytes,
+    max_tokens: int = 2048,
+    purpose: str = "copilot",
+    mime_type: str | None = None,
+) -> tuple[str, str]:
+    """
+    Send one image plus text to the configured local vision model.
+    Returns (response_text, model_name). Receipt parsing is intentionally local-only.
+    """
+    if get_provider() != "ollama":
+        raise Exception("Receipt image parsing requires local Ollama.")
+    return _complete_ollama_vision(prompt, image_bytes, max_tokens, purpose, mime_type)
 
 
 def _complete_anthropic(prompt: str, max_tokens: int) -> str:
@@ -534,3 +552,55 @@ def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
     if "message" not in result:
         raise Exception(f"Ollama API error: {result}")
     return result["message"]["content"].strip()
+
+
+def _complete_ollama_vision(
+    prompt: str,
+    image_bytes: bytes,
+    max_tokens: int,
+    purpose: str,
+    mime_type: str | None = None,
+) -> tuple[str, str]:
+    ollama_config = get_ollama_config()
+    preferred_model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
+    model = _select_ollama_vision_model(preferred_model, ollama_config)
+    timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
+    url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "images": [image_b64],
+            "content": prompt,
+        }],
+        "stream": False,
+        "think": False,
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": 0,
+        },
+    }
+    if purpose == "copilot":
+        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
+
+    resp = httpx.post(url, json=payload, timeout=timeout)
+    result = resp.json()
+    if "message" not in result:
+        raise Exception(f"Ollama vision API error: {result}")
+    return result["message"]["content"].strip(), model
+
+
+def _select_ollama_vision_model(preferred_model: str, ollama_config: dict) -> str:
+    candidates = [
+        preferred_model,
+        ollama_config.get("copilot_model"),
+        ollama_config.get("categorize_model"),
+        OLLAMA_MODEL_RECEIPT,
+    ]
+    for candidate in candidates:
+        model = (candidate or "").strip()
+        family = model.lower()
+        if model and ("gemma4" in family or "gemma3" in family):
+            return model
+    return OLLAMA_MODEL_RECEIPT

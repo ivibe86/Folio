@@ -1046,6 +1046,42 @@ CREATE TABLE IF NOT EXISTS simplefin_connections (
 CREATE INDEX IF NOT EXISTS idx_sf_connections_profile ON simplefin_connections(profile);
 CREATE INDEX IF NOT EXISTS idx_sf_connections_active  ON simplefin_connections(is_active);
 
+CREATE TABLE IF NOT EXISTS receipt_imports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id      TEXT NOT NULL DEFAULT 'household',
+    store_name      TEXT NOT NULL DEFAULT '',
+    receipt_date    TEXT DEFAULT NULL,
+    subtotal        REAL DEFAULT NULL,
+    tax             REAL DEFAULT NULL,
+    total           REAL DEFAULT NULL,
+    status          TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'approved', 'discarded')),
+    parser_model    TEXT NOT NULL DEFAULT '',
+    confidence      REAL DEFAULT 0.0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipt_imports_profile_status ON receipt_imports(profile_id, status);
+CREATE INDEX IF NOT EXISTS idx_receipt_imports_date ON receipt_imports(receipt_date);
+
+CREATE TABLE IF NOT EXISTS receipt_items (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_import_id     INTEGER NOT NULL REFERENCES receipt_imports(id) ON DELETE CASCADE,
+    raw_item_text         TEXT NOT NULL DEFAULT '',
+    normalized_item_name  TEXT NOT NULL DEFAULT '',
+    quantity              REAL DEFAULT NULL,
+    unit                  TEXT NOT NULL DEFAULT '',
+    total_price           REAL DEFAULT NULL,
+    unit_price            REAL DEFAULT NULL,
+    confidence            REAL DEFAULT 0.0,
+    user_corrected        INTEGER NOT NULL DEFAULT 0,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipt_items_import ON receipt_items(receipt_import_id);
+CREATE INDEX IF NOT EXISTS idx_receipt_items_normalized ON receipt_items(normalized_item_name);
+
 CREATE TABLE IF NOT EXISTS app_settings (
     key         TEXT PRIMARY KEY,
     value       TEXT,

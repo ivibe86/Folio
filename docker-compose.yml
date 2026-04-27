@@ -31,6 +31,7 @@ services:
     environment:
       - ORIGIN=http://localhost:${FRONTEND_PORT:-3000}
       - BACKEND_URL=http://backend:8000
+      - BODY_SIZE_LIMIT=16777216
     depends_on:
       backend:
         condition: service_healthy

@@ -8,11 +8,11 @@ from datetime import datetime, timedelta
 import csv
 import io
 
-from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from auth import verify_api_key, rate_limit_middleware
 import bank
 from bank import validate_teller_config, close_all_clients
@@ -27,6 +27,12 @@ setup_logging()
 logger = get_logger(__name__)
 
 DEMO_MODE = os.getenv("DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+_receipt_flag = os.getenv("RECEIPT_INTELLIGENCE_ENABLED")
+RECEIPT_INTELLIGENCE_ENABLED = (
+    (_receipt_flag.strip().lower() in {"1", "true", "yes", "on"})
+    if _receipt_flag is not None
+    else not DEMO_MODE
+)
 
 from data_manager import (
     get_data, fetch_fresh_data, fetch_simplefin_data,
@@ -304,12 +310,18 @@ def _require_live_mode(detail: str = "This action is disabled in demo mode.") ->
         raise HTTPException(status_code=403, detail=detail)
 
 
+def _require_receipts_enabled() -> None:
+    if not RECEIPT_INTELLIGENCE_ENABLED:
+        raise HTTPException(status_code=404, detail="Receipt intelligence is disabled.")
+
+
 def _app_config_payload(db=None) -> dict:
     payload = {
         "demoMode": DEMO_MODE,
         "bankLinkingEnabled": not DEMO_MODE,
         "manualSyncEnabled": not DEMO_MODE,
         "demoPersistence": "ephemeral" if DEMO_MODE else "persistent",
+        "receiptIntelligenceEnabled": RECEIPT_INTELLIGENCE_ENABLED,
     }
     try:
         payload.update(get_frontend_flags(db))
@@ -372,6 +384,12 @@ class LocalLlmSettingsUpdate(BaseModel):
 
 class LocalLlmInstallRequest(BaseModel):
     model: str
+
+
+class ReceiptItemUpdateRequest(BaseModel):
+    items: list[dict]
+    store_name: str | None = None
+    receipt_date: str | None = None
 
 
 # ── Helper Functions ──
@@ -454,7 +472,7 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
 
     try:
         update_local_llm_settings(db, payload)
-    except ValueError as exc:
+    except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     if body.copilot_model is not None or body.llm_provider is not None:
@@ -470,7 +488,7 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
 def post_local_llm_install(body: LocalLlmInstallRequest, db=Depends(get_db_session)):
     try:
         result = install_local_llm_model(body.model, db)
-    except ValueError as exc:
+    except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {
         **result,
@@ -567,6 +585,97 @@ def export_transactions(
         "row_count": len(rows),
         "total_count": total_count if total_count is not None else len(rows),
     }
+
+
+@app.post("/api/receipts/parse")
+async def parse_receipt(
+    file: UploadFile = File(...),
+    profile: str | None = Query(None),
+    db=Depends(get_db_session),
+):
+    _require_receipts_enabled()
+    validated_profile = validate_profile(profile)
+    content_type = (file.content_type or "").lower()
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Upload a receipt image.")
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Receipt image is empty.")
+    if len(image_bytes) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Receipt image must be under 12 MB.")
+
+    try:
+        from receipts import create_draft_receipt, parse_receipt_image
+        parsed, parser_model = parse_receipt_image(image_bytes, mime_type=file.content_type)
+        return create_draft_receipt(db, validated_profile, parsed, parser_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Receipt parsing failed")
+        raise HTTPException(status_code=502, detail=f"Receipt parsing failed: {exc}")
+
+
+@app.get("/api/receipts/comparisons")
+def receipt_comparisons(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    _require_receipts_enabled()
+    from receipts import get_comparisons
+    return get_comparisons(db, profile)
+
+
+@app.get("/api/receipts/{receipt_id}")
+def receipt_detail(receipt_id: int, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    _require_receipts_enabled()
+    from receipts import get_receipt
+    try:
+        return get_receipt(db, receipt_id, profile)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.patch("/api/receipts/{receipt_id}/items")
+def patch_receipt_items(
+    receipt_id: int,
+    body: ReceiptItemUpdateRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    _require_receipts_enabled()
+    from receipts import ReceiptDraftMetadataUpdate, ReceiptItemUpdate, update_receipt_items
+    try:
+        items = [ReceiptItemUpdate.model_validate(item) for item in body.items]
+        metadata = ReceiptDraftMetadataUpdate.model_validate({
+            "store_name": body.store_name,
+            "receipt_date": body.receipt_date,
+        })
+        return update_receipt_items(db, receipt_id, profile, items, metadata)
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/receipts/{receipt_id}/approve")
+def approve_receipt(receipt_id: int, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    _require_receipts_enabled()
+    from receipts import set_receipt_status
+    try:
+        return set_receipt_status(db, receipt_id, profile, "approved")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/receipts/{receipt_id}/discard")
+def discard_receipt(receipt_id: int, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    _require_receipts_enabled()
+    from receipts import set_receipt_status
+    try:
+        return set_receipt_status(db, receipt_id, profile, "discarded")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.patch("/api/transactions/{tx_id}/category")

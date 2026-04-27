@@ -1350,11 +1350,14 @@ def get_merchant_insights_data(
 
 def get_net_worth_series_data(interval: str = "weekly", profile: str | None = None, conn=None) -> list[dict]:
     """
-    Compute a running net-worth time series from transaction history.
-    Uses SQL to fetch daily net changes, then builds the series in Python
-    (cumulative day-by-day logic doesn't benefit from SQL window functions in SQLite).
+    Compute a running net-worth time series for the dashboard chart.
+
+    Stored net-worth snapshots are authoritative for dates where they exist,
+    but new snapshot history should not truncate older transaction-derived
+    history after a migration. When snapshots start after the first
+    transaction, stitch a reconstructed prefix in front of the stored series.
     """
-    from datetime import timedelta
+    from datetime import date as dt_date, timedelta
 
     def _query(c):
         history_profile = _profile_id(profile)
@@ -1365,35 +1368,57 @@ def get_net_worth_series_data(interval: str = "weekly", profile: str | None = No
                ORDER BY date ASC""",
             (history_profile,),
         ).fetchall()
-        if history_rows:
-            step = 1 if interval == "daily" else 2 if interval == "weekly" else 1
-            sampled = history_rows[::step]
-            if sampled[-1][0] != history_rows[-1][0]:
-                sampled.append(history_rows[-1])
-            return [{"date": row[0], "value": round(float(row[1] or 0), 2)} for row in sampled]
 
         state = _build_reconstructed_net_worth_state(c, profile=profile)
+        step_days = 1 if interval == "daily" else 7 if interval == "weekly" else 14
+
+        def _reconstructed_series(start_date, end_date):
+            series = []
+            d = start_date
+            while d <= end_date:
+                nw = _reconstructed_net_worth_on(state, d)
+                if nw is not None:
+                    series.append({"date": d.isoformat(), "value": nw})
+                d += timedelta(days=step_days)
+
+            if series and series[-1]["date"] != end_date.isoformat():
+                nw = _reconstructed_net_worth_on(state, end_date)
+                if nw is not None:
+                    series.append({"date": end_date.isoformat(), "value": nw})
+            return series
+
+        if history_rows:
+            sampled_history = []
+            last_sampled_date = None
+            for row in history_rows:
+                try:
+                    row_date = dt_date.fromisoformat(str(row[0])[:10])
+                except ValueError:
+                    continue
+                if (
+                    last_sampled_date is None
+                    or (row_date - last_sampled_date).days >= step_days
+                    or row == history_rows[-1]
+                ):
+                    sampled_history.append({"date": row_date.isoformat(), "value": round(float(row[1] or 0), 2)})
+                    last_sampled_date = row_date
+
+            if not sampled_history:
+                return []
+
+            first_history_date = dt_date.fromisoformat(sampled_history[0]["date"])
+            if state["first_date"] is not None and state["first_date"] < first_history_date:
+                prefix_end = first_history_date - timedelta(days=1)
+                prefix = _reconstructed_series(state["first_date"], min(prefix_end, state["last_date"]))
+                return prefix + sampled_history
+
+            if len(sampled_history) >= 2 or state["first_date"] is None or state["last_date"] is None:
+                return sampled_history
+
         if state["first_date"] is None or state["last_date"] is None:
             return []
 
-        first_date = state["first_date"]
-        last_date = state["last_date"]
-
-        step_days = 7 if interval == "weekly" else 14
-        series = []
-        d = first_date
-        while d <= last_date:
-            nw = _reconstructed_net_worth_on(state, d)
-            if nw is not None:
-                series.append({"date": d.isoformat(), "value": nw})
-            d += timedelta(days=step_days)
-
-        if series and series[-1]["date"] != last_date.isoformat():
-            nw = _reconstructed_net_worth_on(state, last_date)
-            if nw is not None:
-                series.append({"date": last_date.isoformat(), "value": nw})
-
-        return series
+        return _reconstructed_series(state["first_date"], state["last_date"])
 
     if conn is not None:
         return _query(conn)

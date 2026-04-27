@@ -42,7 +42,7 @@ export async function handle({ event, resolve }) {
         const method = event.request.method;
         let body = null;
         if (method !== 'GET' && method !== 'HEAD') {
-            body = await event.request.text();
+            body = await event.request.arrayBuffer();
         }
 
         // Enroll/sync can take 6+ minutes (LLM categorization batches).

@@ -219,18 +219,46 @@
             splitDrafts = {
                 ...splitDrafts,
                 [tx.original_id]: {
-                    loading: true,
+                    loading: false,
                     rows: [{ category: tx.category || 'Uncategorized', amount: Math.abs(parseFloat(tx.amount || 0)).toFixed(2), notes: '' }]
                 }
             };
-            loadTransactionSplits(tx);
         }
         return splitDrafts[tx.original_id];
+    }
+
+    function toggleTransactionDetails(tx, isSelected) {
+        if (isSelected) {
+            selectedTxId = null;
+            return;
+        }
+
+        selectedTxId = tx.original_id;
+        const draft = ensureSplitDraft(tx);
+        if (!draft.loaded && !draft.loading) {
+            splitDrafts = {
+                ...splitDrafts,
+                [tx.original_id]: { ...draft, loading: true }
+            };
+            loadTransactionSplits(tx);
+        }
     }
 
     async function loadTransactionSplits(tx) {
         try {
             const result = await api.getTransactionSplits(tx.original_id);
+            const currentDraft = splitDrafts[tx.original_id] || {};
+            if (currentDraft.dirty) {
+                splitDrafts = {
+                    ...splitDrafts,
+                    [tx.original_id]: {
+                        ...currentDraft,
+                        loading: false,
+                        loaded: true
+                    }
+                };
+                return;
+            }
             const rows = (result.items || []).map(item => ({
                 category: item.category || tx.category || 'Uncategorized',
                 amount: Math.abs(parseFloat(item.amount || 0)).toFixed(2),
@@ -240,6 +268,7 @@
                 ...splitDrafts,
                 [tx.original_id]: {
                     loading: false,
+                    loaded: true,
                     rows: rows.length > 0
                         ? rows
                         : [{ category: tx.category || 'Uncategorized', amount: Math.abs(parseFloat(tx.amount || 0)).toFixed(2), notes: '' }]
@@ -251,7 +280,8 @@
                 ...splitDrafts,
                 [tx.original_id]: {
                     ...(splitDrafts[tx.original_id] || {}),
-                    loading: false
+                    loading: false,
+                    loaded: true
                 }
             };
         }
@@ -261,7 +291,31 @@
         const draft = splitDrafts[txId];
         if (!draft) return;
         const rows = draft.rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row);
-        splitDrafts = { ...splitDrafts, [txId]: { ...draft, rows } };
+        splitDrafts = { ...splitDrafts, [txId]: { ...draft, dirty: true, rows } };
+    }
+
+    function fillSingleBlankSplitRemainder(tx) {
+        const draft = splitDrafts[tx.original_id];
+        if (!draft) return;
+
+        const blankIndexes = draft.rows
+            .map((row, index) => ({ row, index }))
+            .filter(({ row }) => String(row.amount ?? '').trim() === '')
+            .map(({ index }) => index);
+
+        if (blankIndexes.length !== 1) return;
+
+        const blankIndex = blankIndexes[0];
+        const assigned = draft.rows.reduce((sum, row, index) => {
+            if (index === blankIndex) return sum;
+            return sum + Math.abs(parseFloat(row.amount || 0));
+        }, 0);
+        const remainder = Math.max(0, Math.abs(parseFloat(tx.amount || 0)) - assigned);
+        const rows = draft.rows.map((row, index) => index === blankIndex
+            ? { ...row, amount: remainder > 0 ? remainder.toFixed(2) : '' }
+            : row);
+
+        splitDrafts = { ...splitDrafts, [tx.original_id]: { ...draft, dirty: true, rows } };
     }
 
     function addSplitRow(tx) {
@@ -270,6 +324,8 @@
             ...splitDrafts,
             [tx.original_id]: {
                 ...draft,
+                loading: false,
+                dirty: true,
                 rows: [...draft.rows, { category: tx.category || 'Uncategorized', amount: '', notes: '' }]
             }
         };
@@ -280,7 +336,7 @@
         if (!draft || draft.rows.length <= 1) return;
         splitDrafts = {
             ...splitDrafts,
-            [txId]: { ...draft, rows: draft.rows.filter((_, rowIndex) => rowIndex !== index) }
+            [txId]: { ...draft, dirty: true, rows: draft.rows.filter((_, rowIndex) => rowIndex !== index) }
         };
     }
 
@@ -290,6 +346,15 @@
 
     function getSplitDelta(tx) {
         return Math.abs(parseFloat(tx?.amount || 0)) - getSplitTotal(tx.original_id);
+    }
+
+    function getSplitDeltaFromDraft(tx, draft) {
+        const total = (draft?.rows || []).reduce((sum, row) => sum + Math.abs(parseFloat(row.amount || 0)), 0);
+        return Math.abs(parseFloat(tx?.amount || 0)) - total;
+    }
+
+    function getSplitTotalFromDraft(draft) {
+        return (draft?.rows || []).reduce((sum, row) => sum + Math.abs(parseFloat(row.amount || 0)), 0);
     }
 
     async function saveTransactionSplits(tx) {
@@ -309,6 +374,8 @@
                 ...splitDrafts,
                 [tx.original_id]: {
                     loading: false,
+                    loaded: true,
+                    dirty: false,
                     rows: (result.items || rows).map(item => ({
                         category: item.category || tx.category || 'Uncategorized',
                         amount: Math.abs(parseFloat(item.amount || 0)).toFixed(2),
@@ -1351,11 +1418,11 @@
                         role="button"
                         tabindex="0"
                         aria-expanded={isSelected}
-                        on:click={() => selectedTxId = isSelected ? null : tx.original_id}
+                        on:click={() => toggleTransactionDetails(tx, isSelected)}
                         on:keydown={(event) => {
                             if (event.key === 'Enter' || event.key === ' ') {
                                 event.preventDefault();
-                                selectedTxId = isSelected ? null : tx.original_id;
+                                toggleTransactionDetails(tx, isSelected);
                             }
                         }}>
 
@@ -1526,8 +1593,8 @@
                     </div>
 
                     {#if isSelected}
-                        {@const splitDraft = ensureSplitDraft(tx)}
-                        {@const splitDelta = getSplitDelta(tx)}
+                        {@const splitDraft = splitDrafts[tx.original_id] || ensureSplitDraft(tx)}
+                        {@const splitDelta = getSplitDeltaFromDraft(tx, splitDraft)}
                         <div class="tx-detail-drawer fade-in" role="presentation" on:click|stopPropagation>
                             <div class="tx-detail-pane">
                                 <h4>Merchant pattern</h4>
@@ -1624,51 +1691,51 @@
                                     <button on:click={() => addSplitRow(tx)}>Add line</button>
                                 </div>
                                 {#if splitDraft.loading}
-                                    <p class="tx-split-muted">Loading split details...</p>
-                                {:else}
-                                    <div class="tx-split-rows">
-                                        {#each splitDraft.rows as split, splitIndex}
-                                            <div class="tx-split-row">
-                                                <select
-                                                    value={split.category}
-                                                    on:change={(e) => updateSplitField(tx.original_id, splitIndex, 'category', e.currentTarget.value)}>
-                                                    {#each allCategories as cat}
-                                                        <option value={cat}>{cat}</option>
-                                                    {/each}
-                                                    {#if !allCategories.includes(split.category)}
-                                                        <option value={split.category}>{split.category}</option>
-                                                    {/if}
-                                                </select>
-                                                <input
-                                                    type="number"
-                                                    min="0"
-                                                    step="0.01"
-                                                    value={split.amount}
-                                                    on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'amount', e.currentTarget.value)}
-                                                    aria-label="Split amount" />
-                                                <button
-                                                    class="tx-split-remove"
-                                                    disabled={splitDraft.rows.length <= 1}
-                                                    on:click={() => removeSplitRow(tx.original_id, splitIndex)}
-                                                    aria-label="Remove split line">
-                                                    <span class="material-symbols-outlined">close</span>
-                                                </button>
-                                                <input
-                                                    class="tx-split-note"
-                                                    value={split.notes}
-                                                    placeholder="Optional note"
-                                                    on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'notes', e.currentTarget.value)} />
-                                            </div>
-                                        {/each}
-                                    </div>
-                                    <div class="tx-split-total" class:tx-split-total-off={Math.abs(splitDelta) >= 0.01}>
-                                        <span>Total {formatCurrency(getSplitTotal(tx.original_id), 2)}</span>
-                                        <strong>{Math.abs(splitDelta) < 0.01 ? 'Balanced' : `${splitDelta > 0 ? 'Unassigned' : 'Over'} ${formatCurrency(Math.abs(splitDelta), 2)}`}</strong>
-                                    </div>
-                                    <button class="tx-meta-save" disabled={savingSplitsFor === tx.original_id} on:click={() => saveTransactionSplits(tx)}>
-                                        {savingSplitsFor === tx.original_id ? 'Saving...' : 'Save split'}
-                                    </button>
+                                    <p class="tx-split-muted">Checking saved split details...</p>
                                 {/if}
+                                <div class="tx-split-rows">
+                                    {#each splitDraft.rows as split, splitIndex}
+                                        <div class="tx-split-row">
+                                            <select
+                                                value={split.category}
+                                                on:change={(e) => updateSplitField(tx.original_id, splitIndex, 'category', e.currentTarget.value)}>
+                                                {#each allCategories as cat}
+                                                    <option value={cat}>{cat}</option>
+                                                {/each}
+                                                {#if !allCategories.includes(split.category)}
+                                                    <option value={split.category}>{split.category}</option>
+                                                {/if}
+                                            </select>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={split.amount}
+                                                on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'amount', e.currentTarget.value)}
+                                                on:blur={() => fillSingleBlankSplitRemainder(tx)}
+                                                aria-label="Split amount" />
+                                            <button
+                                                class="tx-split-remove"
+                                                disabled={splitDraft.rows.length <= 1}
+                                                on:click={() => removeSplitRow(tx.original_id, splitIndex)}
+                                                aria-label="Remove split line">
+                                                <span class="material-symbols-outlined">close</span>
+                                            </button>
+                                            <input
+                                                class="tx-split-note"
+                                                value={split.notes}
+                                                placeholder="Optional note"
+                                                on:input={(e) => updateSplitField(tx.original_id, splitIndex, 'notes', e.currentTarget.value)} />
+                                        </div>
+                                    {/each}
+                                </div>
+                                <div class="tx-split-total" class:tx-split-total-off={Math.abs(splitDelta) >= 0.01}>
+                                    <span>Total {formatCurrency(getSplitTotalFromDraft(splitDraft), 2)}</span>
+                                    <strong>{Math.abs(splitDelta) < 0.01 ? 'Balanced' : `${splitDelta > 0 ? 'Unassigned' : 'Over'} ${formatCurrency(Math.abs(splitDelta), 2)}`}</strong>
+                                </div>
+                                <button class="tx-meta-save" disabled={savingSplitsFor === tx.original_id} on:click={() => saveTransactionSplits(tx)}>
+                                    {savingSplitsFor === tx.original_id ? 'Saving...' : 'Save split'}
+                                </button>
                             </div>
                         </div>
                     {/if}

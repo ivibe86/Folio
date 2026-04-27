@@ -3,6 +3,9 @@ uvicorn[standard]==0.30.0
 httpx==0.27.0
 python-dotenv==1.0.1
 pydantic==2.9.0
+python-multipart==0.0.12
 certifi>=2024.2.2
 cryptography>=42.0.0
 pip-system-certs
+Pillow>=10.0.0
+pillow-heif>=0.16.0

@@ -1022,6 +1022,17 @@
     // We use it as a hidden dependency in key reactive expressions.
     $: privacyKey = $privacyMode;
 
+    function parseDashboardDate(raw) {
+        if (!raw) return null;
+        const value = String(raw).trim();
+        const match = value.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+        if (match) {
+            return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3] || 1));
+        }
+        const dt = new Date(value);
+        return isNaN(dt.getTime()) ? null : dt;
+    }
+
     // ââ Net Worth chart hover ââ
     function handleChartHover(event) {
         if (!netWorthTrendData.length || !nwChart.linePath) return;
@@ -1050,7 +1061,8 @@
         const y = padY + chartH - ((d.value - min) / range) * chartH;
 
         const raw = d.month || d.date;
-        const dt = new Date(raw.length === 7 ? raw + '-01' : raw);
+        const dt = parseDashboardDate(raw);
+        if (!dt) return;
         const dateLabel = dt.toLocaleDateString('en-US', {
             month: 'short', day: 'numeric', year: 'numeric'
         });
@@ -1135,8 +1147,8 @@
         for (let i = 0; i < data.length; i++) {
             const raw = data[i].month || data[i].date;
             if (!raw) continue;
-            const dt = new Date(raw.length === 7 ? raw + '-01' : raw);
-            if (isNaN(dt.getTime())) continue;
+            const dt = parseDashboardDate(raw);
+            if (!dt) continue;
             const mo = dt.getMonth();
             const yr = dt.getFullYear();
             const quarter = `${yr}-Q${Math.floor(mo / 3)}`;
@@ -1150,12 +1162,16 @@
 
         if (monthLabels.length === 0 && data.length >= 1) {
             const firstRaw = data[0].month || data[0].date;
-            const firstDt = new Date(firstRaw.length === 7 ? firstRaw + '-01' : firstRaw);
-            monthLabels.push({ x: 0, y: height - 6, label: `${firstDt.toLocaleString('default', { month: 'short' })} '${String(firstDt.getFullYear()).slice(-2)}` });
+            const firstDt = parseDashboardDate(firstRaw);
+            if (firstDt) {
+                monthLabels.push({ x: 0, y: height - 6, label: `${firstDt.toLocaleString('default', { month: 'short' })} '${String(firstDt.getFullYear()).slice(-2)}` });
+            }
             if (data.length > 1) {
                 const lastRaw = data[data.length - 1].month || data[data.length - 1].date;
-                const lastDt = new Date(lastRaw.length === 7 ? lastRaw + '-01' : lastRaw);
-                monthLabels.push({ x: (data.length - 1) * stepX, y: height - 6, label: `${lastDt.toLocaleString('default', { month: 'short' })} '${String(lastDt.getFullYear()).slice(-2)}` });
+                const lastDt = parseDashboardDate(lastRaw);
+                if (lastDt) {
+                    monthLabels.push({ x: (data.length - 1) * stepX, y: height - 6, label: `${lastDt.toLocaleString('default', { month: 'short' })} '${String(lastDt.getFullYear()).slice(-2)}` });
+                }
             }
         }
 
@@ -1656,7 +1672,8 @@
         const avgGrowth = change / Math.max(months, 1);
 
         function formatShortDate(dateStr) {
-            const dt = new Date(dateStr.length === 7 ? dateStr + '-01' : dateStr);
+            const dt = parseDashboardDate(dateStr);
+            if (!dt) return '';
             return dt.toLocaleString('default', { month: 'short', year: '2-digit' });
         }
 
@@ -1675,8 +1692,8 @@
 
                 const dates = netWorthTrendData.map(d => {
                     const raw = d.month || d.date;
-                    const dt = new Date(raw.length === 7 ? raw + '-01' : raw);
-                    return dt.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+                    const dt = parseDashboardDate(raw);
+                    return dt ? dt.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }) : '';
                 });
                 const values = netWorthTrendData.map(d => d.value);
 

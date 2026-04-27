@@ -789,6 +789,67 @@ export function createApi(fetchFn = fetch) {
                 method: 'POST',
                 body: JSON.stringify({ mappings, deactivate_teller: deactivateTeller }),
             }),
+
+        // ── Mira Receipt Intelligence ──
+
+        parseReceipt: async (file, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            const form = new FormData();
+            form.append('file', file);
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetchFn(`${BASE}/receipts/parse${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                headers,
+                body: form,
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(err.detail || 'Receipt parse failed');
+            }
+            return res.json();
+        },
+
+        getReceipt: (receiptId, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/receipts/${receiptId}${qs ? '?' + qs : ''}`);
+        },
+
+        updateReceiptItems: (receiptId, items, profile = null, metadata = {}) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/receipts/${receiptId}/items${qs ? '?' + qs : ''}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ items, ...metadata }),
+            });
+        },
+
+        approveReceipt: (receiptId, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/receipts/${receiptId}/approve${qs ? '?' + qs : ''}`, { method: 'POST' });
+        },
+
+        discardReceipt: (receiptId, profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/receipts/${receiptId}/discard${qs ? '?' + qs : ''}`, { method: 'POST' });
+        },
+
+        getReceiptComparisons: (profile = null) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/receipts/comparisons${qs ? '?' + qs : ''}`);
+        },
     };
 }
 
