@@ -6,7 +6,7 @@ from datetime import datetime
 from database import get_db
 from data_manager import explain_category_assignment
 
-from .base import emit_done_with_memory, tool_loop_result, tool_loop_stream
+from .base import emit_done_with_memory
 
 
 SOURCE_LABELS = {
@@ -117,13 +117,20 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
         result["llm_calls"] = 0
         return result
 
-    return tool_loop_result(
+    result = core._finalize_answer(
         question=question,
         profile=profile,
-        history=history,
-        selected_tools=["run_sql"],
-        system=core._build_system_prompt(profile, ["run_sql"]),
+        raw_answer=(
+            "Raw SQL is reserved for internal debug tooling now. "
+            "Ask me for the finance view you want and I will use the grounded Folio tools."
+        ),
+        trace=[],
+        cache={},
+        iterations=0,
+        run_detector=False,
     )
+    result["llm_calls"] = 0
+    return result
 
 
 def stream(question: str, profile: str | None, history: list[dict] | None = None):
@@ -149,10 +156,16 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         )
         return
 
-    yield from tool_loop_stream(
+    yield {"type": "reset_text"}
+    yield from emit_done_with_memory(
         question=question,
         profile=profile,
-        history=history,
-        selected_tools=["run_sql"],
-        system=core._build_system_prompt(profile, ["run_sql"]),
+        final_answer=(
+            "Raw SQL is reserved for internal debug tooling now. "
+            "Ask me for the finance view you want and I will use the grounded Folio tools."
+        ),
+        trace=[],
+        cache={},
+        iterations=0,
+        llm_calls=0,
     )

@@ -6,6 +6,7 @@ from typing import Any
 
 import llm_client
 from copilot_tools import execute_tool
+from mira import provenance
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ def emit_done_with_memory(
     data: Any = None,
     data_source: str | None = None,
     llm_calls: int = 0,
+    route: dict | None = None,
 ):
     import copilot_agent as core
 
@@ -50,6 +52,16 @@ def emit_done_with_memory(
             done_event["data_source"] = "write_preview"
     if pending_chart:
         done_event["chart"] = pending_chart
+    provenance_entry = provenance.record_completed_action(
+        profile=profile,
+        question=question,
+        answer=answer_text,
+        route=route,
+        trace=trace,
+        cache=cache,
+    )
+    if provenance_entry:
+        done_event["provenance"] = provenance_entry
     yield done_event
 
     detector_props = core._persist_detector_signals(
@@ -112,7 +124,6 @@ def tool_loop_result(
             if isinstance(result, dict) and result.get("_write_preview"):
                 pending_write = {
                     "confirmation_id": result.get("confirmation_id"),
-                    "sql": result.get("sql"),
                     "rows_affected": result.get("rows_affected"),
                     "samples": result.get("samples", []),
                     "preview_changes": result.get("preview_changes", []),
@@ -204,7 +215,6 @@ def tool_loop_stream(
             if isinstance(result, dict) and result.get("_write_preview"):
                 pending_write = {
                     "confirmation_id": result.get("confirmation_id"),
-                    "sql": result.get("sql"),
                     "rows_affected": result.get("rows_affected"),
                     "samples": result.get("samples", []),
                     "preview_changes": result.get("preview_changes", []),

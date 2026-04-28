@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from typing import Any
 
 import llm_client
 from database import get_db
 from copilot_tools import execute_tool
+from merchant_aliases import resolve_merchant_alias
+from mira import answer_composer
+from mira import domain_actions
+from mira import provenance
+from mira.grounding import (
+    candidate_names_for_text,
+    exact_merchant_for_text,
+    ground_text,
+    resolve_category_name,
+)
+from range_parser import has_explicit_time_scope, parse_range
 
 from .base import emit_done_with_memory, tool_loop_result, tool_loop_stream
 
@@ -17,23 +29,8 @@ TRANSACTION_TOOLS = {"get_transactions", "get_transactions_for_merchant"}
 SPEND_WORD_RE = re.compile(r"\b(how much|spend|spent|paid|pay|charges?|expenses?|transactions?|bought|purchase[ds]?)\b", re.I)
 CHART_WORD_RE = re.compile(r"\b(plot|chart|graph|visualize|trend)\b", re.I)
 WRITE_WORD_RE = re.compile(r"\b(move all|recategorize|reclassify|rename|create (?:a )?rule|always categorize)\b", re.I)
-STOP_SUBJECTS = {
-    "a", "an", "and", "any", "at", "by", "did", "do", "for", "from", "how", "i", "in",
-    "last", "me", "month", "months", "much", "my", "of", "on", "over", "paid", "past",
-    "pay", "spend", "spent", "the", "this", "to", "what", "with", "year",
-}
-CATEGORY_SYNONYMS = {
-    "grocery": "Groceries",
-    "groceries": "Groceries",
-    "food": "Food & Dining",
-    "dining": "Food & Dining",
-    "food and dining": "Food & Dining",
-    "food dining": "Food & Dining",
-    "restaurants": "Food & Dining",
-    "restaurant": "Food & Dining",
-    "subscriptions": "Subscriptions",
-    "subscription": "Subscriptions",
-}
+_CANDIDATE_CACHE_TTL_SECONDS = 60
+_CANDIDATE_CACHE: dict[tuple[str, str | None], dict] = {}
 
 
 def _money(value: Any) -> str:
@@ -45,14 +42,6 @@ def _money(value: Any) -> str:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
-
-
-def _tokens(text: str) -> set[str]:
-    return {t for t in _norm(text).split() if t and t not in STOP_SUBJECTS}
-
-
-def _canonical_key(text: str) -> str:
-    return " ".join(t for t in _norm(text).split() if t != "and")
 
 
 def _parse_jsonish(raw: str) -> dict | None:
@@ -67,50 +56,11 @@ def _parse_jsonish(raw: str) -> dict | None:
 
 
 def _range_from_question(question: str) -> str:
-    q = _norm(question)
-
-    if re.search(r"\b(this|current)\s+month\b", q):
-        return "current_month"
-    if re.search(r"\b(last|previous|prior)\s+month\b", q):
-        return "last_month"
-    if re.search(r"\b(this|current)\s+week\b", q):
-        return "this_week"
-    if re.search(r"\b(last|previous|prior)\s+week\b", q):
-        return "last_week"
-    if re.search(r"\b(ytd|year\s+to\s+date|this\s+year)\b", q):
-        return "ytd"
-    if re.search(r"\blast\s+year\b", q):
-        return "last_year"
-    if re.search(r"\b(past|previous|prior)\s+year\b", q) or re.search(r"\bover\s+the\s+past\s+year\b", q):
-        return "last_12_months"
-    if re.search(r"\b(all\s+time|alltime|ever|lifetime|till\s+now|until\s+now|to\s+date)\b", q):
-        return "all"
-    if re.search(r"\bso\s+far\b", q) and not re.search(r"\b(this|current)\s+(month|week|year)\b", q):
-        return "all"
-
-    half_year = re.search(r"\b(?:last|past|previous|prior|over\s+the\s+last|over\s+the\s+past)\s+half\s+(?:a\s+)?year\b", q)
-    if half_year:
-        return "last_6_months"
-
-    months = re.search(r"\b(?:last|past|previous|prior|over\s+the\s+last|over\s+the\s+past|in\s+the\s+last)\s+(\d{1,2})\s+months?\b", q)
-    if months:
-        n = max(1, min(int(months.group(1)), 36))
-        return f"last_{n}_months"
-
-    days = re.search(r"\b(?:last|past|previous|prior|over\s+the\s+last|over\s+the\s+past|in\s+the\s+last)\s+(\d{1,3})\s+days?\b", q)
-    if days:
-        n = max(1, min(int(days.group(1)), 365))
-        return f"last_{n}d"
-
-    return "current_month"
+    return parse_range(question).token
 
 
 def _has_explicit_time_phrase(question: str) -> bool:
-    q = _norm(question)
-    return bool(re.search(
-        r"\b(this|current|last|previous|prior|past|all\s+time|alltime|ever|lifetime|till\s+now|until\s+now|to\s+date|so\s+far|ytd|year\s+to\s+date|\d{1,3}\s+days?|\d{1,2}\s+months?)\b",
-        q,
-    ))
+    return has_explicit_time_scope(question)
 
 
 def _range_label(result: dict) -> str:
@@ -189,6 +139,12 @@ def _transaction_answer(tool_name: str, args: dict, result: dict) -> str:
     if limit == 1:
         return f"Your latest transaction is {desc} on {date} for {amount}, categorized as {category}{account_part}."
     count = len(rows)
+    if tool_name == "get_transactions_for_merchant" and args.get("_matched_from"):
+        merchant = args.get("merchant") or result.get("merchant") or "that merchant"
+        return (
+            f"I matched `{args.get('_matched_from')}` to {merchant} and found {count} matching "
+            f"transaction{'s' if count != 1 else ''}. The most recent is {desc} on {date} for {amount}."
+        )
     return f"I found {count} matching transaction{'s' if count != 1 else ''}. The most recent is {desc} on {date} for {amount}."
 
 
@@ -199,6 +155,24 @@ def _looks_like_subject_followup(question: str) -> bool:
 def _direct_plan_from_route(route: dict | None, question: str = "", history: list[dict] | None = None, profile: str | None = None) -> dict | None:
     if not route:
         return None
+    action_steps = domain_actions.tool_plan_for_route(route, {"SpendTotal", "TransactionSearch"})
+    if action_steps:
+        step = action_steps[0]
+        if step["name"] in SPEND_TOTAL_TOOLS and _looks_like_subject_followup(question):
+            inherited = _history_subject(history, profile)
+            if inherited:
+                inherited_tool, subject = inherited
+                arg_name = "category" if inherited_tool == "get_category_spend" else "merchant"
+                return {
+                    "name": inherited_tool,
+                    "args": {arg_name: subject, "range": (step.get("args") or {}).get("range") or _range_from_question(question)},
+                    "source": "domain_action_history_followup",
+                }
+        return {
+            "name": step["name"],
+            "args": step.get("args") or {},
+            "source": "domain_action",
+        }
     tool_name = route.get("tool_name")
     if tool_name in SPEND_TOTAL_TOOLS or tool_name in TRANSACTION_TOOLS:
         args = route.get("args") or {}
@@ -223,53 +197,86 @@ def _answer_for_direct_plan(tool_name: str, args: dict, result: dict) -> str:
     return _transaction_answer(tool_name, args, result)
 
 
-def _load_categories(profile: str | None) -> list[str]:
+def _candidate_fingerprint(conn, profile: str | None) -> tuple[int, str]:
+    params: list[Any] = []
+    where = "1 = 1"
+    if profile and profile != "household":
+        where += " AND profile_id = ?"
+        params.append(profile)
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count, MAX(COALESCE(updated_at, '')) AS max_updated FROM transactions_visible WHERE {where}",
+            params,
+        ).fetchone()
+    except Exception:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count, MAX(COALESCE(date, '')) AS max_updated FROM transactions_visible WHERE {where}",
+            params,
+        ).fetchone()
+    return int(row[0] or 0), str(row[1] or "")
+
+
+def _cached_candidates(kind: str, profile: str | None, loader) -> list[str]:
+    key = (kind, profile if profile != "household" else None)
+    now = time.time()
     try:
         with get_db() as conn:
-            params: list[Any] = []
-            where = "category IS NOT NULL AND category != ''"
-            if profile and profile != "household":
-                where += " AND profile_id = ?"
-                params.append(profile)
-            rows = conn.execute(
-                f"""
-                SELECT DISTINCT category
-                FROM transactions_visible
-                WHERE {where}
-                ORDER BY LENGTH(category) DESC, category
-                """,
-                params,
-            ).fetchall()
-        return [str(r[0]) for r in rows if r[0]]
+            fingerprint = _candidate_fingerprint(conn, profile)
+            cached = _CANDIDATE_CACHE.get(key)
+            if cached and cached.get("fingerprint") == fingerprint and now - cached.get("ts", 0) < _CANDIDATE_CACHE_TTL_SECONDS:
+                return list(cached.get("values") or [])
+            values = loader(conn)
+            _CANDIDATE_CACHE[key] = {"fingerprint": fingerprint, "ts": now, "values": values}
+            return values
     except Exception:
         return []
 
 
+def _load_categories(profile: str | None) -> list[str]:
+    def _loader(conn):
+        params: list[Any] = []
+        where = "category IS NOT NULL AND category != ''"
+        if profile and profile != "household":
+            where += " AND profile_id = ?"
+            params.append(profile)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT category
+            FROM transactions_visible
+            WHERE {where}
+            ORDER BY LENGTH(category) DESC, category
+            """,
+            params,
+        ).fetchall()
+        return [str(r[0]) for r in rows if r[0]]
+
+    return _cached_candidates("categories", profile, _loader)
+
+
 def _load_merchants(profile: str | None) -> list[str]:
-    try:
-        with get_db() as conn:
-            params: list[Any] = []
-            where = """
-                COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) IS NOT NULL
-                AND COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) != ''
-                AND amount < 0
-                AND is_excluded = 0
-                AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
-                AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
-            """
-            if profile and profile != "household":
-                where += " AND profile_id = ?"
-                params.append(profile)
-            rows = conn.execute(
-                f"""
-                SELECT COALESCE(NULLIF(merchant_name, ''), merchant_key) AS merchant_name, COUNT(*) AS count
-                FROM transactions_visible
-                WHERE {where}
-                GROUP BY COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''))
-                ORDER BY LENGTH(merchant_name) DESC, count DESC
-                """,
-                params,
-            ).fetchall()
+    def _loader(conn):
+        params: list[Any] = []
+        where = """
+            COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) IS NOT NULL
+            AND COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) != ''
+            AND amount < 0
+            AND is_excluded = 0
+            AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
+            AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
+        """
+        if profile and profile != "household":
+            where += " AND profile_id = ?"
+            params.append(profile)
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(merchant_name, ''), merchant_key) AS merchant_name, COUNT(*) AS count
+            FROM transactions_visible
+            WHERE {where}
+            GROUP BY COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''))
+            ORDER BY LENGTH(merchant_name) DESC, count DESC
+            """,
+            params,
+        ).fetchall()
         names = []
         seen = set()
         for row in rows:
@@ -279,70 +286,28 @@ def _load_merchants(profile: str | None) -> list[str]:
                 names.append(name)
                 seen.add(key)
         return names
-    except Exception:
-        return []
+
+    return _cached_candidates("merchants", profile, _loader)
 
 
 def _candidate_names(question: str, names: list[str], limit: int = 20) -> list[str]:
-    q_norm = _norm(question)
-    q_key = _canonical_key(question)
-    q_tokens = _tokens(question)
-    scored: list[tuple[int, int, str]] = []
-    for name in names:
-        n_norm = _norm(name)
-        n_key = _canonical_key(name)
-        n_tokens = _tokens(name)
-        if not n_key or n_key in STOP_SUBJECTS:
-            continue
-        score = 0
-        if re.search(rf"(?<!\w){re.escape(n_norm)}(?!\w)", q_norm):
-            score += 100
-        if n_key != n_norm and re.search(rf"(?<!\w){re.escape(n_key)}(?!\w)", q_key):
-            score += 95
-        overlap = len(q_tokens & n_tokens)
-        if overlap:
-            score += overlap * 20
-        if score:
-            scored.append((score, len(n_norm), name))
-    scored.sort(reverse=True)
-    return [name for _, _, name in scored[:limit]]
-
-
-def _contains_phrase(normalized_question: str, phrase: str) -> bool:
-    normalized = _norm(phrase)
-    if not normalized or normalized in STOP_SUBJECTS:
-        return False
-    return re.search(rf"(?<!\w){re.escape(normalized)}(?!\w)", normalized_question) is not None
+    if not names:
+        return []
+    merchant_match = resolve_merchant_alias(question, names)
+    entity_type = "merchant" if merchant_match else "category"
+    grounded = candidate_names_for_text(question, names, entity_type=entity_type, limit=limit)
+    if merchant_match and merchant_match not in grounded:
+        grounded.insert(0, merchant_match)
+    return grounded[:limit]
 
 
 def _match_category(question: str, profile: str | None) -> str | None:
-    q = _norm(question)
-    for phrase, category in sorted(CATEGORY_SYNONYMS.items(), key=lambda item: len(item[0]), reverse=True):
-        if _contains_phrase(q, phrase):
-            return category
-    for category in _load_categories(profile):
-        if _contains_phrase(q, category):
-            return category
-        if category.endswith("s") and _contains_phrase(q, category[:-1]):
-            return category
-    return None
+    return resolve_category_name(question, _load_categories(profile))
 
 
 def _match_merchant(question: str, profile: str | None) -> str | None:
-    q = _norm(question)
-    q_key = _canonical_key(question)
-    candidates = []
-    for merchant in _load_merchants(profile):
-        normalized = _norm(merchant)
-        canonical = _canonical_key(merchant)
-        if len(normalized) < 3 or normalized in STOP_SUBJECTS:
-            continue
-        if _contains_phrase(q, merchant) or (canonical and re.search(rf"(?<!\w){re.escape(canonical)}(?!\w)", q_key)):
-            candidates.append((len(normalized), merchant))
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
+    merchants = _load_merchants(profile)
+    return exact_merchant_for_text(question, merchants)
 
 
 def _history_subject(history: list[dict] | None, profile: str | None) -> tuple[str, str] | None:
@@ -369,15 +334,9 @@ def _resolve_name(subject_type: str, subject_text: str | None, profile: str | No
     if not pool:
         pool = _load_categories(profile) if subject_type == "category" else _load_merchants(profile)
 
-    subject_norm = _norm(subject_text)
-    subject_key = _canonical_key(subject_text)
-    for name in pool:
-        if _norm(name) == subject_norm or _canonical_key(name) == subject_key:
-            return name
-    for name in pool:
-        name_key = _canonical_key(name)
-        if name_key and (name_key in subject_key or subject_key in name_key):
-            return name
+    result = ground_text(subject_text, subject_type, pool, limit=3)
+    if result.kind in {"exact", "approximate"} and result.value:
+        return result.value
     return None
 
 
@@ -409,7 +368,7 @@ def structured_spend_plan(question: str, profile: str | None, history: list[dict
     prompt = f"""Parse the latest user message for Folio dispatch.
 
 Return JSON only with this schema:
-{{"intent":"drilldown|chart|write|overview|sql|chat","operation":"spend_total|list_transactions|other","subject_type":"merchant|category|none","subject_text":string|null,"range":string|null,"confidence":number,"needs_clarification":boolean}}
+{{"intent":"drilldown|chart|write|overview|chat","operation":"spend_total|list_transactions|other","subject_type":"merchant|category|none","subject_text":string|null,"range":string|null,"confidence":number,"needs_clarification":boolean}}
 
 Rules:
 - Use intent=chat for non-finance/general knowledge/code/science/life questions.
@@ -429,7 +388,7 @@ Recent context:
 
 Latest message: {question}
 JSON:"""
-    raw = llm_client.complete(prompt, max_tokens=180, purpose="copilot")
+    raw = llm_client.complete(prompt, max_tokens=180, purpose="controller")
     parsed = _parse_jsonish(raw)
     if not parsed:
         return None, 1
@@ -546,7 +505,10 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
         result_payload = execute_tool(direct["name"], direct["args"], profile, cache=cache)
         duration_ms = int((datetime.now() - start).total_seconds() * 1000)
         trace = [{"name": direct["name"], "args": direct["args"], "duration_ms": duration_ms}]
-        answer = _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        answer = (
+            answer_composer.compose_finance_answer(route, trace, cache, profile)
+            or _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        )
         result = core._finalize_answer(
             question=question,
             profile=profile,
@@ -557,7 +519,14 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
             run_detector=True,
         )
         result["llm_calls"] = parser_calls
-        return result
+        return provenance.attach_completed_action(
+            result,
+            profile=profile,
+            question=question,
+            route=route,
+            trace=trace,
+            cache=cache,
+        )
 
     first, trace, cache, llm_calls = _first_tool_result(question, profile, history)
     if first and first["call"].get("name") in SPEND_TOTAL_TOOLS and isinstance(first.get("result"), dict):
@@ -572,7 +541,14 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
             run_detector=True,
         )
         result["llm_calls"] = llm_calls
-        return result
+        return provenance.attach_completed_action(
+            result,
+            profile=profile,
+            question=question,
+            route=route,
+            trace=trace,
+            cache=cache,
+        )
 
     return tool_loop_result(
         question=question,
@@ -599,7 +575,10 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         duration_ms = int((datetime.now() - start).total_seconds() * 1000)
         trace.append({"name": direct["name"], "args": direct["args"], "duration_ms": duration_ms})
         yield {"type": "tool_result", "name": direct["name"], "duration_ms": duration_ms}
-        answer = _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        answer = (
+            answer_composer.compose_finance_answer(route, trace, cache, profile)
+            or _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        )
         yield from emit_done_with_memory(
             question=question,
             profile=profile,
@@ -608,6 +587,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
             cache=cache,
             iterations=0,
             llm_calls=parser_calls,
+            route=route,
         )
         return
 
@@ -649,6 +629,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
                 cache=cache,
                 iterations=0,
                 llm_calls=1,
+                route=route,
             )
             return
 

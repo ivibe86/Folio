@@ -1,13 +1,45 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from datetime import datetime
 from typing import Any
 
 import llm_client
+from mira import controller as conversation_controller
+from mira.context_policy import apply_turn_state_context_route
+from mira.dialogue_routes import (
+    _answer_context_followup_route,
+    _answer_context_from_history,
+    _confirmed_merchant_route,
+    _context_direct_route,
+    _context_policy_callbacks,
+    _dialogue_state_from_history,
+    _dialogue_state_route,
+    _is_merchant_selection_prompt,
+    _plain_history_finance_context,
+)
+from mira.fast_paths import (
+    _category_spend_shortcut,
+    _chart_shortcut,
+    _ground_untrusted_subject_route,
+    _looks_like_followup,
+    _merchant_confirmation_route,
+    _merchant_spend_shortcut,
+    _missing_spend_subject_route,
+    _planner_shortcut,
+    _postprocess_route,
+    _shortcut_base,
+    _transaction_shortcut,
+    _unresolved_finance_comparison,
+    _write_budget_shortcut,
+    _write_recategorize_shortcut,
+    _write_rename_shortcut,
+    _write_rule_shortcut,
+)
+from mira.router_prompt import build_router_prompt
+from range_parser import chart_months, contains, has_explicit_time_scope, parse_range, words
 
 VALID_DISPATCH_INTENTS = {
     "overview",
@@ -15,28 +47,53 @@ VALID_DISPATCH_INTENTS = {
     "transactions",
     "chart",
     "write",
-    "sql",
+    "plan",
     "chat",
     "drilldown",  # compatibility for forced intent/debug scripts
     "error",
 }
-DISPATCHER_ENV = "COPILOT_USE_DISPATCHER"
-LEGACY_ENV = "COPILOT_USE_LEGACY_AGENT"
-
 _SPENDING_TOOLS = {"get_category_spend", "get_merchant_spend"}
 _TRANSACTION_TOOLS = {"get_transactions", "get_transactions_for_merchant"}
 _CHART_FETCH_TOOLS = {"get_monthly_spending_trend", "get_net_worth_trend"}
-_WRITE_TOOLS = {"preview_bulk_recategorize", "preview_create_rule", "preview_rename_merchant"}
-_SQL_TOOLS = {"run_sql"}
+_SEMANTIC_TOOLS = {
+    "get_dashboard_snapshot",
+    "analyze_subject",
+    "compare_periods",
+    "get_budget_status",
+    "find_transactions",
+    "explain_metric",
+    "get_recurring_changes",
+}
+_WRITE_TOOLS = {
+    "preview_bulk_recategorize",
+    "preview_create_rule",
+    "preview_rename_merchant",
+    "preview_set_budget",
+    "preview_create_goal",
+    "preview_update_goal_target",
+    "preview_mark_goal_funded",
+    "preview_set_transaction_note",
+    "preview_set_transaction_tags",
+    "preview_mark_reviewed",
+    "preview_bulk_mark_reviewed",
+    "preview_update_manual_account_balance",
+    "preview_split_transaction",
+    "preview_confirm_recurring_obligation",
+    "preview_dismiss_recurring_obligation",
+    "preview_cancel_recurring",
+    "preview_restore_recurring",
+}
+_PROVIDER_NAMES = {
+    "anthropic", "claude", "openai", "chatgpt", "gpt", "gemini", "sonnet", "opus", "haiku"
+}
+_PROVIDER_ACTIONS = {
+    "switch", "change", "use", "using", "set", "configure", "select", "provider", "model", "llm", "cloud"
+}
+_ACK_TOKENS = {"thanks", "thank", "thx", "cool", "ok", "okay", "gotcha", "nice", "great"}
 
 
 def dispatcher_enabled() -> bool:
-    if os.getenv(LEGACY_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
-        return False
-    value = os.getenv(DISPATCHER_ENV)
-    if value is None or not value.strip():
-        return True
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return True
 
 
 def estimate_tokens(text: str) -> int:
@@ -60,25 +117,122 @@ def default_tools_for_intent(intent: str) -> list[str]:
     if intent in {"drilldown", "spending"}:
         return list(core.DRILLDOWN_TOOLS)
     if intent == "transactions":
-        return ["get_transactions", "get_transactions_for_merchant"]
+        return ["find_transactions", "get_transactions", "get_transactions_for_merchant"]
     if intent == "chart":
         return list(core.TREND_CHART_TOOLS)
     if intent == "write":
         return list(core.WRITE_TOOLS)
-    if intent == "sql":
-        return ["run_sql"]
+    if intent == "plan":
+        return [
+            "analyze_subject",
+            "compare_periods",
+            "get_budget_status",
+            "get_category_spend",
+            "get_merchant_spend",
+            "get_monthly_spending_trend",
+            "get_transactions",
+            "get_recurring_summary",
+            "get_net_worth_trend",
+            "get_net_worth_delta",
+        ]
+    if intent == "overview":
+        return ["get_dashboard_snapshot", "explain_metric", "get_recurring_changes"]
     return []
 
 
 def planned_tools_for_route(route: dict) -> list[str]:
     tool_name = route.get("tool_name")
     if isinstance(tool_name, str) and tool_name:
+        if tool_name == "run_sql":
+            return []
         if tool_name == "get_monthly_spending_trend":
             return ["get_monthly_spending_trend", "plot_chart"]
         if tool_name == "get_net_worth_trend":
             return ["get_net_worth_trend", "plot_chart"]
         return [tool_name]
     return default_tools_for_intent(str(route.get("intent") or ""))
+
+
+def answer_context_for_route(
+    route: dict | None,
+    trace: list[dict] | None = None,
+    provenance: dict | None = None,
+) -> dict | None:
+    route = route or {}
+    args = route.get("args") if isinstance(route.get("args"), dict) else {}
+    trace = trace or []
+    subject_type = ""
+    subject = ""
+    tool_name = str(route.get("tool_name") or "")
+
+    if route.get("intent") == "plan":
+        subject_type = str(args.get("subject_type") or "")
+        subject = str(args.get("subject") or "")
+    elif tool_name == "get_merchant_spend":
+        subject_type = "merchant"
+        subject = str(args.get("merchant") or "")
+    elif tool_name == "get_category_spend":
+        subject_type = "category"
+        subject = str(args.get("category") or "")
+    elif tool_name == "get_transactions_for_merchant":
+        subject_type = "merchant"
+        subject = str(args.get("merchant") or "")
+    elif tool_name == "get_monthly_spending_trend" and args.get("category"):
+        subject_type = "category"
+        subject = str(args.get("category") or "")
+
+    if not subject and trace:
+        first_args = trace[0].get("args") if isinstance(trace[0].get("args"), dict) else {}
+        if trace[0].get("name") == "get_merchant_spend":
+            subject_type = "merchant"
+            subject = str(first_args.get("merchant") or "")
+        elif trace[0].get("name") == "get_category_spend":
+            subject_type = "category"
+            subject = str(first_args.get("category") or "")
+        elif trace[0].get("name") == "get_transactions_for_merchant":
+            subject_type = "merchant"
+            subject = str(first_args.get("merchant") or "")
+        elif trace[0].get("name") == "get_monthly_spending_trend" and first_args.get("category"):
+            subject_type = "category"
+            subject = str(first_args.get("category") or "")
+
+    if subject_type not in {"merchant", "category"} or not subject:
+        if not isinstance(provenance, dict) or not provenance.get("id"):
+            return None
+        grounded = provenance.get("grounded_entities") if isinstance(provenance.get("grounded_entities"), list) else []
+        first_entity = grounded[0] if grounded and isinstance(grounded[0], dict) else {}
+        subject_type = str(first_entity.get("entity_type") or "")
+        subject = str(first_entity.get("display_name") or first_entity.get("value") or "")
+
+    if subject_type not in {"merchant", "category"} and not (isinstance(provenance, dict) and provenance.get("id")):
+        return None
+
+    ranges: list[str] = []
+    tools: list[dict] = []
+    for call in trace:
+        call_args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        tool = str(call.get("name") or "")
+        if tool:
+            tools.append({"name": tool, "args": call_args})
+        range_token = str(call_args.get("range") or "").strip()
+        if range_token and range_token not in ranges:
+            ranges.append(range_token)
+
+    context = {
+        "version": 1,
+        "kind": "finance_answer_context",
+        "subject_type": subject_type,
+        "subject": subject,
+        "intent": route.get("intent"),
+        "operation": route.get("operation"),
+        "tool_name": tool_name or (tools[0]["name"] if tools else None),
+        "ranges": ranges,
+        "tools": tools[:4],
+    }
+    if isinstance(provenance, dict) and provenance.get("id"):
+        context["provenance_id"] = provenance.get("id")
+        context["provenance_action"] = provenance.get("action")
+    return context
 
 
 def _parse_jsonish(raw: str) -> Any:
@@ -100,18 +254,35 @@ def _history_lines(history: list[dict] | None, limit: int = 4) -> str:
     return "\n".join(lines) or "(none)"
 
 
-def _candidate_payload(question: str, profile: str | None) -> dict[str, list[str]]:
-    try:
-        from .drilldown import _candidate_names, _load_categories, _load_merchants
+def _looks_like_provider_config_request(question: str) -> bool:
+    tokens = words(question)
+    token_set = set(tokens)
+    if not (token_set & _PROVIDER_NAMES):
+        return False
+    if token_set & _PROVIDER_ACTIONS:
+        return True
+    return contains(tokens, ("can", "you")) and contains(tokens, ("to", "anthropic"))
 
-        merchants = _load_merchants(profile)
-        categories = _load_categories(profile)
-        return {
-            "merchants": _candidate_names(question, merchants, limit=40) or merchants[:60],
-            "categories": _candidate_names(question, categories, limit=30) or categories[:50],
-        }
-    except Exception:
-        return {"merchants": [], "categories": []}
+
+def _looks_like_grounding_question(question: str) -> bool:
+    tokens = words(question)
+    token_set = set(tokens)
+    if (
+        contains(tokens, ("how", "did", "you", "get", "that"))
+        or contains(tokens, ("where", "did", "that", "come", "from"))
+        or contains(tokens, ("where", "did", "you", "get", "that"))
+    ):
+        return True
+    asks_how = "how" in token_set or contains(tokens, ("where", "did"))
+    info_terms = {"information", "info", "numbers", "number", "data", "source", "sources", "transactions", "proof"}
+    get_terms = {"get", "got", "find", "derive", "calculate", "computed", "answer"}
+    return asks_how and bool(token_set & info_terms) and bool(token_set & get_terms)
+
+
+def _with_controller_act(route: dict, act) -> dict:
+    if act:
+        route["controller_act"] = act.as_dict() if hasattr(act, "as_dict") else act
+    return route
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -130,58 +301,17 @@ def _coerce_confidence(value: Any) -> float:
 
 
 def _has_explicit_time_scope(question: str) -> bool:
-    q = (question or "").lower()
-    return bool(re.search(
-        r"\b(this|current|last|previous|prior|past|since|from|between|ytd|year\s+to\s+date|all\s+time|alltime|ever|lifetime|today|yesterday|week|month|year|days?)\b|\b\d{4}-\d{2}\b|\b\d{1,2}\s+(?:days?|months?|years?)\b",
-        q,
-    ))
+    return has_explicit_time_scope(question)
 
 
 def _months_since_named_month(question: str) -> int | None:
-    match = re.search(
-        r"\bsince\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(20\d{2}))?\b",
-        (question or "").lower(),
-    )
-    if not match:
-        return None
-    lookup = {
-        "jan": 1, "january": 1,
-        "feb": 2, "february": 2,
-        "mar": 3, "march": 3,
-        "apr": 4, "april": 4,
-        "may": 5,
-        "jun": 6, "june": 6,
-        "jul": 7, "july": 7,
-        "aug": 8, "august": 8,
-        "sep": 9, "sept": 9, "september": 9,
-        "oct": 10, "october": 10,
-        "nov": 11, "november": 11,
-        "dec": 12, "december": 12,
-    }
-    now = datetime.now()
-    month = lookup[match.group(1)]
-    year = int(match.group(2) or now.year)
-    if not match.group(2) and month > now.month:
-        year -= 1
-    return max(1, min((now.year - year) * 12 + now.month - month + 1, 36))
+    months = parse_range(question).chart_months
+    return months
 
 
 def _range_override(question: str) -> str | None:
-    q = (question or "").lower()
-    if re.search(r"\b(all\s+time|alltime|ever|lifetime|till\s+now|until\s+now|to\s+date)\b", q):
-        return "all"
-    if re.search(r"\blast\s+year\b", q) and not re.search(r"\b(past|previous|prior)\s+year\b|\blast\s+12\s+months\b", q):
-        return "last_year"
-    if re.search(r"\b(past|previous|prior)\s+year\b|\blast\s+12\s+months\b|\bover\s+the\s+past\s+year\b", q):
-        return "last_12_months"
-    return None
-
-
-def _looks_like_followup(question: str) -> bool:
-    return bool(re.search(
-        r"\b(what\s+about|how\s+about|and\s+for|now\s+for|that|those|same|it|them)\b",
-        (question or "").lower(),
-    ))
+    parsed = parse_range(question)
+    return parsed.token if parsed.explicit else None
 
 
 def _write_tool_override(question: str, tool_name: str | None, args: dict) -> tuple[str | None, dict]:
@@ -205,7 +335,7 @@ def _clean_args(tool_name: str | None, args: Any, question: str = "") -> dict:
     if not isinstance(args, dict):
         return {}
     cleaned = {k: v for k, v in args.items() if v not in (None, "", [])}
-    if tool_name == "get_transactions":
+    if tool_name in {"get_transactions", "find_transactions"}:
         if "limit" in cleaned:
             try:
                 cleaned["limit"] = max(1, min(int(cleaned["limit"]), 50))
@@ -216,10 +346,22 @@ def _clean_args(tool_name: str | None, args: Any, question: str = "") -> dict:
                 cleaned["offset"] = max(0, int(cleaned["offset"]))
             except (TypeError, ValueError):
                 cleaned.pop("offset", None)
-    if tool_name in {"get_category_spend", "get_merchant_spend", "get_transactions"}:
+    if tool_name in {
+        "get_category_spend",
+        "get_merchant_spend",
+        "get_transactions",
+        "find_transactions",
+        "analyze_subject",
+        "compare_periods",
+        "get_budget_status",
+        "explain_metric",
+    }:
         override = _range_override(question)
         if override:
-            cleaned["range"] = override
+            if tool_name == "compare_periods":
+                cleaned.setdefault("range_a", override)
+            else:
+                cleaned["range"] = override
     if tool_name == "get_monthly_spending_trend":
         try:
             cleaned["months"] = max(1, min(int(cleaned.get("months") or 6), 36))
@@ -227,9 +369,7 @@ def _clean_args(tool_name: str | None, args: Any, question: str = "") -> dict:
             cleaned["months"] = 6
         if not _has_explicit_time_scope(question):
             cleaned["months"] = 6
-        since_months = _months_since_named_month(question)
-        if since_months is not None:
-            cleaned["months"] = since_months
+        cleaned["months"] = chart_months(question, fallback=cleaned["months"])
     return cleaned
 
 
@@ -237,6 +377,19 @@ def _normalize_tool(intent: str, operation: str, tool_name: str | None) -> str |
     tool_name = (tool_name or "").strip() or None
     if tool_name:
         return tool_name
+    semantic_operation_map = {
+        "dashboard_snapshot": "get_dashboard_snapshot",
+        "subject_analysis": "analyze_subject",
+        "period_comparison": "compare_periods",
+        "compare": "compare_periods",
+        "budget_status": "get_budget_status",
+        "on_track": "get_budget_status",
+        "find_transactions": "find_transactions",
+        "metric_explanation": "explain_metric",
+        "recurring_changes": "get_recurring_changes",
+    }
+    if operation in semantic_operation_map:
+        return semantic_operation_map[operation]
     if intent == "transactions":
         return "get_transactions"
     if intent == "chart" and operation == "net_worth_chart":
@@ -249,24 +402,42 @@ def _normalize_tool(intent: str, operation: str, tool_name: str | None) -> str |
         return "preview_create_rule"
     if intent == "write" and operation == "rename_merchant":
         return "preview_rename_merchant"
-    if intent == "sql":
-        return "run_sql"
+    write_operation_map = {
+        "set_budget": "preview_set_budget",
+        "create_goal": "preview_create_goal",
+        "update_goal_target": "preview_update_goal_target",
+        "mark_goal_funded": "preview_mark_goal_funded",
+        "set_transaction_note": "preview_set_transaction_note",
+        "set_transaction_tags": "preview_set_transaction_tags",
+        "mark_reviewed": "preview_mark_reviewed",
+        "bulk_mark_reviewed": "preview_bulk_mark_reviewed",
+        "update_manual_account_balance": "preview_update_manual_account_balance",
+        "split_transaction": "preview_split_transaction",
+        "confirm_recurring_obligation": "preview_confirm_recurring_obligation",
+        "dismiss_recurring_obligation": "preview_dismiss_recurring_obligation",
+        "cancel_recurring": "preview_cancel_recurring",
+        "restore_recurring": "preview_restore_recurring",
+    }
+    if intent == "write" and operation in write_operation_map:
+        return write_operation_map[operation]
+    if intent == "plan":
+        return None
     return None
 
 
 def _tool_allowed(intent: str, tool_name: str | None) -> bool:
     if not tool_name:
-        return intent in {"overview", "chat", "error"}
+        return intent in {"overview", "chat", "plan", "error"}
     if intent in {"spending", "drilldown"}:
-        return tool_name in _SPENDING_TOOLS
+        return tool_name in (_SPENDING_TOOLS | {"analyze_subject"})
     if intent == "transactions":
-        return tool_name in _TRANSACTION_TOOLS
+        return tool_name in (_TRANSACTION_TOOLS | {"find_transactions"})
     if intent == "chart":
         return tool_name in _CHART_FETCH_TOOLS
     if intent == "write":
         return tool_name in _WRITE_TOOLS
-    if intent == "sql":
-        return tool_name in _SQL_TOOLS
+    if intent in {"overview", "plan"}:
+        return tool_name in _SEMANTIC_TOOLS
     return False
 
 
@@ -280,10 +451,15 @@ def _normalize_route(parsed: dict, *, question: str, raw: str, elapsed_ms: float
     operation = str(parsed.get("operation") or intent).strip().lower()
     tool_name = _normalize_tool(intent, operation, parsed.get("tool_name"))
     args = _clean_args(tool_name, parsed.get("args") or {}, question)
+    if _looks_like_provider_config_request(question):
+        intent = "chat"
+        operation = "local_only_provider"
+        tool_name = None
+        args = {}
     if _is_categorization_debug(question):
-        intent = "sql"
+        intent = "chat"
         operation = "categorization_debug"
-        tool_name = "run_sql"
+        tool_name = None
         args = {}
     uses_history = _coerce_bool(parsed.get("uses_history"))
     if tool_name in {"get_category_spend", "get_merchant_spend"}:
@@ -344,11 +520,135 @@ def route_question(
     profile: str | None = None,
 ) -> dict:
     start = time.perf_counter()
+    turn_interpretation: dict | None = None
+
+    def finish(route: dict) -> dict:
+        route["route_ms"] = route.get("route_ms") or round((time.perf_counter() - start) * 1000, 2)
+        if turn_interpretation and not route.get("turn_interpretation"):
+            route["turn_interpretation"] = dict(turn_interpretation)
+        return conversation_controller.finalize_route(route, profile)
+
     if forced_intent:
-        return _forced_route(forced_intent, start)
+        return finish(_forced_route(forced_intent, start))
+
+    answer_context = _answer_context_from_history(history, profile)
+    active_state, _last_assistant, _active_source = conversation_controller.active_clarification_from_history(profile, history)
+    has_active_dialogue = bool(active_state)
+    if not has_active_dialogue and history:
+        for turn in reversed(history[-3:]):
+            if turn.get("role") != "assistant":
+                continue
+            if isinstance(turn.get("dialogue_state"), dict):
+                has_active_dialogue = turn["dialogue_state"].get("kind") == "merchant_clarification"
+                break
+            if _is_merchant_selection_prompt(turn.get("content") or ""):
+                has_active_dialogue = True
+                break
+    turn = conversation_controller.interpret_turn_state(
+        question,
+        answer_context=answer_context,
+        has_active_dialogue=has_active_dialogue,
+    )
+    turn_interpretation = turn.as_dict()
+
+    if turn.turn_kind == "provenance":
+        route = _shortcut_base("chat", "explain_grounding", start)
+        route["uses_history"] = bool(answer_context)
+        return finish(route)
+
+    if _looks_like_provider_config_request(question):
+        return finish(_shortcut_base("chat", "local_only_provider", start))
+
+    if _is_categorization_debug(question):
+        return finish(_shortcut_base("chat", "categorization_debug", start))
+
+    if turn.turn_kind == "general_chat":
+        if set(words(question)) <= _ACK_TOKENS:
+            return finish(_context_direct_route("context_acknowledge", start, "Got it."))
+        return finish(_shortcut_base("chat", "chat", start))
+
+    had_dialogue_state = False
+    if turn.turn_kind in {"confirm", "cancel", "correction", "unclear"}:
+        had_dialogue_state = _dialogue_state_from_history(history, profile)[0] is not None
+        dialogue_route = _dialogue_state_route(question, history, profile, start)
+        if dialogue_route is not None:
+            return finish(dialogue_route)
+
+    if turn.turn_kind in {"correction", "followup_range_shift", "followup_subject_shift", "followup_action_shift"}:
+        context_for_turn = answer_context or _plain_history_finance_context(history, profile)
+        context_route = apply_turn_state_context_route(
+            question,
+            context_for_turn,
+            start,
+            turn_interpretation,
+            _context_policy_callbacks(profile),
+        )
+        if context_route is not None:
+            return finish(context_route)
+
+    if turn.turn_kind == "unclear":
+        answer_context_route = _answer_context_followup_route(question, history, profile, start)
+        if answer_context_route is not None:
+            return finish(answer_context_route)
+
+    if not had_dialogue_state and turn.turn_kind != "new_finance_task":
+        confirmed_route = _confirmed_merchant_route(question, history, profile, start)
+        if confirmed_route is not None:
+            return finish(confirmed_route)
+
+    if _looks_like_grounding_question(question):
+        return finish(_shortcut_base("chat", "explain_grounding", start))
+
+    transaction_route = _transaction_shortcut(question, profile, start)
+    if transaction_route is not None:
+        return finish(transaction_route)
+
+    chart_route = _chart_shortcut(question, profile, start)
+    if chart_route is not None:
+        return finish(chart_route)
+
+    category_spend_route = _category_spend_shortcut(question, profile, start)
+    if category_spend_route is not None:
+        return finish(category_spend_route)
+
+    merchant_spend_route = _merchant_spend_shortcut(question, profile, start)
+    if merchant_spend_route is not None:
+        return finish(merchant_spend_route)
+
+    merchant_confirmation = _merchant_confirmation_route(question, profile, start)
+    if merchant_confirmation is not None:
+        return finish(merchant_confirmation)
+
+    missing_spend_subject = _missing_spend_subject_route(question, profile, start)
+    if missing_spend_subject is not None:
+        return finish(missing_spend_subject)
+
+    write_recategorize_route = _write_recategorize_shortcut(question, profile, start)
+    if write_recategorize_route is not None:
+        return finish(write_recategorize_route)
+
+    write_rename_route = _write_rename_shortcut(question, profile, start)
+    if write_rename_route is not None:
+        return finish(write_rename_route)
+
+    write_budget_route = _write_budget_shortcut(question, profile, start)
+    if write_budget_route is not None:
+        return finish(write_budget_route)
+
+    write_rule_route = _write_rule_shortcut(question, profile, start)
+    if write_rule_route is not None:
+        return finish(write_rule_route)
+
+    planner_route = _planner_shortcut(question, profile, start)
+    if planner_route is not None:
+        return finish(planner_route)
+
+    unresolved_comparison = _unresolved_finance_comparison(question, profile, start)
+    if unresolved_comparison is not None:
+        return finish(unresolved_comparison)
 
     if not llm_client.is_available():
-        return {
+        return finish({
             "intent": "error",
             "operation": "configuration_error",
             "tool_name": None,
@@ -360,78 +660,36 @@ def route_question(
             "route_ms": round((time.perf_counter() - start) * 1000, 2),
             "classifier_ms": 0,
             "raw": None,
-            "error": "Mira needs a configured Ollama or Anthropic provider for natural-language routing.",
-        }
+            "error": "Mira needs a configured local Ollama provider for natural-language routing.",
+        })
 
-    candidates = _candidate_payload(question, profile)
     today = datetime.now().strftime("%Y-%m-%d")
-    prompt = f"""You are Mira's routing layer inside Folio, a local-first finance app.
-Classify ONLY the latest user message. Return JSON only. Do not answer the user.
-Today is {today}.
-
-Schema:
-{{
-  "intent": "chat|overview|spending|transactions|chart|write|sql",
-  "operation": "chat|watch|category_total|merchant_total|list_transactions|monthly_spending_chart|net_worth_chart|bulk_recategorize|create_rule|rename_merchant|categorization_debug|run_sql",
-  "tool_name": "get_category_spend|get_merchant_spend|get_transactions|get_monthly_spending_trend|get_net_worth_trend|preview_bulk_recategorize|preview_create_rule|preview_rename_merchant|run_sql|null",
-  "args": object,
-  "uses_history": boolean,
-  "confidence": number,
-  "needs_clarification": boolean,
-  "clarification_question": string
-}}
-
-Tool contracts:
-- spending/category_total -> get_category_spend args {{"category": exact category, "range": range}}
-- spending/merchant_total -> get_merchant_spend args {{"merchant": merchant, "range": range}}
-- transactions/list_transactions -> get_transactions args {{"limit": number, "range": optional, "category": optional, "account": optional, "search": optional}}
-- chart/monthly_spending_chart -> get_monthly_spending_trend args {{"months": 1-36, "category": optional exact category}}
-- chart/net_worth_chart -> get_net_worth_trend args {{"interval": "monthly", "limit": optional}}
-- write/bulk_recategorize -> preview_bulk_recategorize args {{"merchant": merchant, "category": target category}}
-- write/create_rule -> preview_create_rule args {{"pattern": text, "category": target category}}
-- write/rename_merchant -> preview_rename_merchant args {{"old_name": merchant, "new_name": new display name}}
-- sql/categorization_debug or run_sql -> run_sql only when no specific tool fits.
-
-Routing rules:
-- "latest transaction", "last transaction", "most recent transaction", "which transaction occurred last", or "just 1 transaction" is transactions/list_transactions with get_transactions limit 1.
-- Transaction listing/search questions are transactions, not spending totals.
-- Spending totals require "how much/spend/spent/paid/charges/expenses" plus a merchant/category subject.
-- Charts require chart/plot/graph/visualize/trend or an explicit chart follow-up.
-- Use history only for true follow-ups such as "what about last month?", "chart that", "show those". If the latest message names a fresh subject or operation, uses_history must be false.
-- Never reuse a previous category/merchant/chart type unless uses_history is true and the latest message is a clear follow-up.
-- If information is missing for a write or spend request, set needs_clarification=true.
-
-Ranges: current_month, last_month, this_week, last_week, ytd, last_year, all, last_Nd, last_N_months, or YYYY-MM.
-"past year" means last_12_months. "last year" means the previous calendar year.
-For chart month counts such as "since October", count calendar months inclusively from that month through the current month.
-
-Merchant candidates: {json.dumps(candidates["merchants"][:40], ensure_ascii=True)}
-Category candidates: {json.dumps(candidates["categories"][:30], ensure_ascii=True)}
-
-Recent context:
-{_history_lines(history)}
-
-Latest message: {question}
-JSON:"""
+    prompt = build_router_prompt(
+        question=question,
+        recent_context=_history_lines(history),
+        today=today,
+    )
 
     raw = ""
     classifier_start = time.perf_counter()
     try:
-        raw = llm_client.complete(prompt, max_tokens=260, purpose="copilot")
+        raw = llm_client.complete(prompt, max_tokens=260, purpose="controller")
         classifier_ms = (time.perf_counter() - classifier_start) * 1000
         parsed = _parse_jsonish(raw)
         if not isinstance(parsed, dict):
             raise ValueError("router did not return a JSON object")
-        return _normalize_route(
+        route = _normalize_route(
             parsed,
             question=question,
             raw=raw,
             elapsed_ms=(time.perf_counter() - start) * 1000,
             classifier_ms=classifier_ms,
         )
+        route = _postprocess_route(route, question, profile)
+        return finish(_ground_untrusted_subject_route(route, question, profile))
     except Exception as exc:
         classifier_ms = (time.perf_counter() - classifier_start) * 1000
-        return {
+        return finish({
             "intent": "error",
             "operation": "router_error",
             "tool_name": None,
@@ -444,4 +702,4 @@ JSON:"""
             "classifier_ms": round(classifier_ms, 2),
             "raw": raw,
             "error": f"Mira could not route that request cleanly: {exc}",
-        }
+        })

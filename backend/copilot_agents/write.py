@@ -6,6 +6,7 @@ from typing import Any
 
 import llm_client
 from copilot_tools import execute_tool
+from mira import domain_actions
 
 from .base import emit_done_with_memory
 from .base import tool_loop_result, tool_loop_stream
@@ -70,7 +71,7 @@ Recent context:
 
 Latest message: {question}
 JSON:"""
-    raw = llm_client.complete(prompt, max_tokens=220, purpose="copilot")
+    raw = llm_client.complete(prompt, max_tokens=220, purpose="controller")
     parsed = _parse_jsonish(raw)
     if not parsed:
         return None, 1
@@ -140,7 +141,6 @@ def _pending_write(result: Any) -> dict | None:
         return None
     return {
         "confirmation_id": result.get("confirmation_id"),
-        "sql": result.get("sql"),
         "rows_affected": result.get("rows_affected"),
         "samples": result.get("samples", []),
         "preview_changes": result.get("preview_changes", []),
@@ -148,11 +148,28 @@ def _pending_write(result: Any) -> dict | None:
     }
 
 
+def _write_system_prompt(profile: str | None) -> str:
+    return (
+        "You are Mira's write-preview specialist inside Folio. "
+        "Use exactly one preview_* tool when the user explicitly asks to change Folio data. "
+        "Do not perform reads for curiosity and do not answer before the tool call. "
+        "If transaction_id, goal name/id, account name/id, merchant, category, amount, or split amounts are missing, ask one short clarification. "
+        "All writes are previews only; the UI handles confirmation. "
+        f"Active profile: {profile or 'household'}."
+    )
+
+
 def _plan_from_route(route: dict | None) -> tuple[dict | None, int]:
+    action_steps = domain_actions.tool_plan_for_route(route, {"WritePreview"})
+    if action_steps:
+        step = action_steps[0]
+        return {"name": step["name"], "args": step.get("args") or {}}, 0
     if not route or route.get("intent") != "write":
         return None, 0
     tool_name = route.get("tool_name")
-    if tool_name not in {"preview_bulk_recategorize", "preview_create_rule", "preview_rename_merchant"}:
+    import copilot_agent as core
+
+    if tool_name not in set(core.WRITE_TOOLS):
         return None, 0
     return {"name": tool_name, "args": route.get("args") or {}}, 0
 
@@ -199,7 +216,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
         profile=profile,
         history=history,
         selected_tools=list(core.WRITE_TOOLS),
-        system=core._build_system_prompt(profile, list(core.WRITE_TOOLS)),
+        system=_write_system_prompt(profile),
     )
 
 
@@ -236,5 +253,5 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         profile=profile,
         history=history,
         selected_tools=list(core.WRITE_TOOLS),
-        system=core._build_system_prompt(profile, list(core.WRITE_TOOLS)),
+        system=_write_system_prompt(profile),
     )

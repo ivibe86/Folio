@@ -1,26 +1,28 @@
 from __future__ import annotations
 
-import re
-
 from copilot_tools import execute_tool
+from mira import answer_composer
+from mira import provenance
+from range_parser import words as range_words
 from .base import emit_done_with_memory, tool_loop_result, tool_loop_stream
 
 
 def chart_kind_from_question(question: str, history: list[dict] | None = None) -> str | None:
     import copilot_agent as core
 
-    current = (question or "").lower()
-    if re.search(r"\b(spending|spent|expenses?|groceries|grocery|dining|shopping|travel|subscriptions?)\b", current):
+    current_tokens = set(range_words(question))
+    spending_terms = {"spending", "spent", "expense", "expenses", "groceries", "grocery", "dining", "shopping", "travel", "subscription", "subscriptions"}
+    if current_tokens & spending_terms:
         return "spending"
-    if re.search(r"\bnet\s*worth|networth\b", current):
+    if "networth" in current_tokens or {"net", "worth"}.issubset(current_tokens):
         return "net_worth"
-    if re.search(r"\b(that|those|same|every month|monthly|chart|graph|plot|trend)\b", current):
+    if current_tokens & {"that", "those", "same", "monthly", "chart", "graph", "plot", "trend"} or {"every", "month"}.issubset(current_tokens):
         if core._extract_chart_spending_category(question, history):
             return "spending"
-    context = core._history_text(history).lower()
-    if re.search(r"\b(spending|spent|expenses?|groceries|grocery|dining|shopping|travel|subscriptions?)\b", context):
+    context_tokens = set(range_words(core._history_text(history)))
+    if context_tokens & spending_terms:
         return "spending"
-    if re.search(r"\bnet\s*worth|networth\b", context):
+    if "networth" in context_tokens or {"net", "worth"}.issubset(context_tokens):
         return "net_worth"
     return None
 
@@ -98,6 +100,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
     chart_kind = None if routed_chart else chart_kind_from_question(question, history)
     if routed_chart or chart_kind:
         answer, trend, trace, chart = routed_chart or core._execute_chart_plan(chart_kind, question, profile, history, cache)
+        answer = answer_composer.compose_finance_answer(route, trace, cache, profile) or answer
         result = core._finalize_answer(
             question=question,
             profile=profile,
@@ -112,7 +115,14 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
         result["data"] = trend.get("series") or result.get("data")
         result["data_source"] = trace[0]["name"] if trace else result.get("data_source")
         result["llm_calls"] = 0
-        return result
+        return provenance.attach_completed_action(
+            result,
+            profile=profile,
+            question=question,
+            route=route,
+            trace=trace,
+            cache=cache,
+        )
 
     return tool_loop_result(
         question=question,
@@ -141,7 +151,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         yield from emit_done_with_memory(
             question=question,
             profile=profile,
-            final_answer=answer,
+            final_answer=answer_composer.compose_finance_answer(route, trace, cache, profile) or answer,
             trace=trace,
             cache=cache,
             iterations=0,
@@ -149,6 +159,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
             data=trend.get("series"),
             data_source=trace[0]["name"] if trace else None,
             llm_calls=0,
+            route=route,
         )
         return
 
