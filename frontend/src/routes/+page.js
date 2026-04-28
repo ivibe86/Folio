@@ -41,7 +41,13 @@ export async function load({ fetch }) {
         monthlyCategoryBreakdown: Array.isArray(bundle.monthlyCategoryBreakdown) ? bundle.monthlyCategoryBreakdown : [],
         ccRepaid: bundle.ccRepaid || 0,
         externalTransfers: bundle.externalTransfers || 0,
+        incomingTransfers: bundle.incomingTransfers || 0,
+        creditsRefunds: bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0,
         planSnapshot: bundle.planSnapshot || null,
         reviewQueue: bundle.reviewQueue || null,
+        dataHealth: bundle.dataHealth || null,
+        scheduled: bundle.scheduled || null,
+        cashFlowForecast: bundle.cashFlowForecast || null,
+        investments: bundle.investments || null,
     };
 }

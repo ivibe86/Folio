@@ -35,6 +35,11 @@ _wal_lock = threading.Lock()
 _wal_initialized = False
 _SQLITE_CONNECT_RETRIES = int(os.getenv("SQLITE_CONNECT_RETRIES", "3"))
 _SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
+_DEFAULT_JOURNAL_MODE = "DELETE" if str(DB_PATH).startswith("/data/") else "WAL"
+_SQLITE_JOURNAL_MODE = os.getenv("SQLITE_JOURNAL_MODE", _DEFAULT_JOURNAL_MODE).upper()
+if _SQLITE_JOURNAL_MODE not in {"DELETE", "WAL", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
+    logger.warning("Invalid SQLITE_JOURNAL_MODE=%s; falling back to %s", _SQLITE_JOURNAL_MODE, _DEFAULT_JOURNAL_MODE)
+    _SQLITE_JOURNAL_MODE = _DEFAULT_JOURNAL_MODE
 
 
 def _sqlite_regexp(pattern, value) -> int:
@@ -76,7 +81,7 @@ def _open_connection() -> sqlite3.Connection:
 
 
 def _ensure_wal_mode() -> None:
-    """Set WAL once per process instead of on every request-scoped connection."""
+    """Set the SQLite journal mode once per process."""
     global _wal_initialized
     if _wal_initialized:
         return
@@ -88,7 +93,7 @@ def _ensure_wal_mode() -> None:
             conn = None
             try:
                 conn = _open_connection()
-                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(f"PRAGMA journal_mode={_SQLITE_JOURNAL_MODE}")
                 conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
                 conn.close()
                 _wal_initialized = True
@@ -214,6 +219,11 @@ def init_db():
         _migrate_accounts_last_four(conn)
         _migrate_memory_entries_theme(conn)
         _migrate_public_planning_tables(conn)
+        _migrate_user_declared_subscription_category(conn)
+        _migrate_user_declared_subscription_expected_day(conn)
+        _migrate_user_declared_subscription_amount_review(conn)
+        _migrate_investments_lite(conn)
+        _migrate_recurring_obligations(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)          
@@ -714,6 +724,275 @@ def _migrate_public_planning_tables(conn: sqlite3.Connection):
     )
 
 
+def _migrate_user_declared_subscription_category(conn: sqlite3.Connection):
+    """Remember the obligation category for user-declared recurring items."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(user_declared_subscriptions)").fetchall()]
+    if "category" not in cols:
+        conn.execute("ALTER TABLE user_declared_subscriptions ADD COLUMN category TEXT DEFAULT 'Subscriptions'")
+        conn.execute("UPDATE user_declared_subscriptions SET category = 'Subscriptions' WHERE category IS NULL OR category = ''")
+
+
+def _migrate_user_declared_subscription_expected_day(conn: sqlite3.Connection):
+    """Allow user-confirmed recurring items to carry an expected day-of-month."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(user_declared_subscriptions)").fetchall()]
+    if "expected_day" not in cols:
+        conn.execute("ALTER TABLE user_declared_subscriptions ADD COLUMN expected_day INTEGER DEFAULT NULL")
+
+
+def _migrate_user_declared_subscription_amount_review(conn: sqlite3.Connection):
+    """Remember dismissed recurring amount suggestions until newer evidence arrives."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(user_declared_subscriptions)").fetchall()]
+    if "amount_review_dismissed_amount" not in cols:
+        conn.execute("ALTER TABLE user_declared_subscriptions ADD COLUMN amount_review_dismissed_amount REAL DEFAULT NULL")
+    if "amount_review_dismissed_latest_date" not in cols:
+        conn.execute("ALTER TABLE user_declared_subscriptions ADD COLUMN amount_review_dismissed_latest_date TEXT DEFAULT NULL")
+    if "amount_review_dismissed_at" not in cols:
+        conn.execute("ALTER TABLE user_declared_subscriptions ADD COLUMN amount_review_dismissed_at TEXT DEFAULT NULL")
+
+
+def _migrate_investments_lite(conn: sqlite3.Connection):
+    """Add local-first manual holdings support without broker sync or price networking."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS investment_holdings (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id      TEXT NOT NULL REFERENCES profiles(id),
+            account_id      TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+            symbol          TEXT DEFAULT '',
+            name            TEXT NOT NULL,
+            asset_class     TEXT NOT NULL DEFAULT 'stock',
+            quantity        REAL DEFAULT 0.0,
+            cost_basis      REAL DEFAULT 0.0,
+            current_price   REAL DEFAULT 0.0,
+            manual_value    REAL DEFAULT NULL,
+            target_percent  REAL DEFAULT NULL,
+            notes           TEXT DEFAULT '',
+            price_as_of     TEXT DEFAULT NULL,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_holdings_profile
+            ON investment_holdings(profile_id, asset_class);
+        CREATE INDEX IF NOT EXISTS idx_holdings_account
+            ON investment_holdings(account_id);
+        CREATE INDEX IF NOT EXISTS idx_holdings_symbol
+            ON investment_holdings(symbol);
+        """
+    )
+
+
+def _migrate_recurring_obligations(conn: sqlite3.Connection):
+    """Add the recurring obligation model and backfill it from legacy tables."""
+    event_cols = [row[1] for row in conn.execute("PRAGMA table_info(subscription_events)").fetchall()]
+    if "event_key" not in event_cols:
+        conn.execute("ALTER TABLE subscription_events ADD COLUMN event_key TEXT DEFAULT NULL")
+
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_events_event_key
+            ON subscription_events(event_key)
+            WHERE event_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS recurring_detection_runs (
+            id                  TEXT PRIMARY KEY,
+            profile_id          TEXT NOT NULL,
+            mode                TEXT NOT NULL DEFAULT 'shadow',
+            detector_version    INTEGER NOT NULL DEFAULT 1,
+            started_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at        TEXT,
+            txn_count           INTEGER DEFAULT 0,
+            candidate_count     INTEGER DEFAULT 0,
+            status              TEXT NOT NULL DEFAULT 'running'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recurring_runs_profile
+            ON recurring_detection_runs(profile_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_recurring_runs_status
+            ON recurring_detection_runs(profile_id, status);
+
+        CREATE TABLE IF NOT EXISTS recurring_obligations (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id          TEXT NOT NULL,
+            obligation_key      TEXT NOT NULL,
+            merchant_key        TEXT NOT NULL,
+            display_name        TEXT NOT NULL DEFAULT '',
+            service_tag         TEXT DEFAULT '',
+            seed_name           TEXT DEFAULT '',
+            category            TEXT DEFAULT 'Subscriptions',
+            amount_cents        INTEGER NOT NULL DEFAULT 0,
+            amount_p10_cents    INTEGER,
+            amount_p90_cents    INTEGER,
+            frequency           TEXT DEFAULT 'monthly',
+            anchor_day          INTEGER,
+            anchor_month        INTEGER,
+            anchor_mode         TEXT DEFAULT 'observed_pattern',
+            next_expected_date  TEXT,
+            state               TEXT NOT NULL DEFAULT 'candidate',
+            source              TEXT NOT NULL DEFAULT 'algorithm',
+            confidence_score    INTEGER NOT NULL DEFAULT 0,
+            confidence_label    TEXT NOT NULL DEFAULT 'low',
+            evidence_json       TEXT NOT NULL DEFAULT '{}',
+            first_seen_date     TEXT,
+            last_seen_date      TEXT,
+            last_run_id         TEXT,
+            detector_version    INTEGER NOT NULL DEFAULT 1,
+            last_user_action_at TEXT,
+            created_at          TEXT DEFAULT (datetime('now')),
+            updated_at          TEXT DEFAULT (datetime('now')),
+            UNIQUE(profile_id, obligation_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recurring_obligations_profile_state
+            ON recurring_obligations(profile_id, state);
+        CREATE INDEX IF NOT EXISTS idx_recurring_obligations_profile_merchant
+            ON recurring_obligations(profile_id, merchant_key);
+        CREATE INDEX IF NOT EXISTS idx_recurring_obligations_run
+            ON recurring_obligations(last_run_id);
+
+        CREATE TABLE IF NOT EXISTS recurring_feedback (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id          TEXT NOT NULL,
+            obligation_key      TEXT DEFAULT '',
+            merchant_key        TEXT NOT NULL,
+            feedback_type       TEXT NOT NULL,
+            scope               TEXT NOT NULL DEFAULT 'merchant',
+            payload_json        TEXT NOT NULL DEFAULT '{}',
+            expires_at          TEXT,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            superseded_at       TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recurring_feedback_active
+            ON recurring_feedback(profile_id, merchant_key, feedback_type, scope)
+            WHERE superseded_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_recurring_feedback_obligation
+            ON recurring_feedback(profile_id, obligation_key)
+            WHERE superseded_at IS NULL;
+
+        CREATE TABLE IF NOT EXISTS recurring_events_v2 (
+            merchant_key        TEXT NOT NULL,
+            profile_id          TEXT NOT NULL,
+            event_type          TEXT NOT NULL,
+            period_bucket       TEXT NOT NULL,
+            payload_json        TEXT NOT NULL DEFAULT '{}',
+            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (merchant_key, profile_id, event_type, period_bucket)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recurring_events_v2_profile
+            ON recurring_events_v2(profile_id, created_at DESC);
+
+        INSERT OR IGNORE INTO recurring_obligations
+            (profile_id, obligation_key, merchant_key, display_name, service_tag,
+             category, amount_cents, frequency, anchor_day, anchor_mode,
+             next_expected_date, state, source, confidence_score, confidence_label,
+             evidence_json, first_seen_date, last_seen_date, detector_version,
+             last_user_action_at, created_at, updated_at)
+        SELECT
+            COALESCE(profile_id, 'household') AS profile_id,
+            UPPER(TRIM(merchant_key)) || ':user:' || UPPER(TRIM(COALESCE(NULLIF(clean_name, ''), merchant_key))) AS obligation_key,
+            UPPER(TRIM(merchant_key)) AS merchant_key,
+            COALESCE(NULLIF(clean_name, ''), merchant_key) AS display_name,
+            COALESCE(NULLIF(clean_name, ''), merchant_key) AS service_tag,
+            COALESCE(NULLIF(category, ''), 'Subscriptions') AS category,
+            CAST(ROUND(COALESCE(subscription_amount, 0) * 100) AS INTEGER) AS amount_cents,
+            COALESCE(NULLIF(subscription_frequency, ''), 'monthly') AS frequency,
+            CASE
+                WHEN next_expected_date IS NOT NULL AND length(next_expected_date) >= 10
+                THEN CAST(substr(next_expected_date, 9, 2) AS INTEGER)
+                ELSE NULL
+            END AS anchor_day,
+            'observed_pattern' AS anchor_mode,
+            next_expected_date,
+            CASE
+                WHEN COALESCE(cancelled_by_user, 0) = 1 THEN 'cancelled'
+                WHEN COALESCE(subscription_status, '') = 'inactive' THEN 'inactive'
+                WHEN source = 'user' THEN 'confirmed'
+                WHEN COALESCE(subscription_status, 'active') = 'active' THEN 'active'
+                ELSE 'candidate'
+            END AS state,
+            COALESCE(NULLIF(source, ''), 'algorithm') AS source,
+            CASE
+                WHEN source = 'user' THEN 100
+                WHEN source = 'seed' THEN 75
+                ELSE 60
+            END AS confidence_score,
+            CASE
+                WHEN source = 'user' THEN 'user'
+                WHEN source = 'seed' THEN 'high'
+                ELSE 'medium'
+            END AS confidence_label,
+            '{"backfilled_from":"merchants"}' AS evidence_json,
+            last_charge_date,
+            last_charge_date,
+            1,
+            CASE WHEN COALESCE(cancelled_by_user, 0) = 1 THEN cancelled_at ELSE NULL END,
+            COALESCE(created_at, datetime('now')),
+            COALESCE(updated_at, datetime('now'))
+        FROM merchants
+        WHERE is_subscription = 1
+          AND COALESCE(merchant_key, '') != '';
+
+        INSERT OR IGNORE INTO recurring_obligations
+            (profile_id, obligation_key, merchant_key, display_name, service_tag,
+             category, amount_cents, frequency, anchor_day, anchor_mode,
+             next_expected_date, state, source, confidence_score, confidence_label,
+             evidence_json, detector_version, last_user_action_at, created_at, updated_at)
+        SELECT
+            profile_id,
+            UPPER(TRIM(merchant_name)) || ':user:' || UPPER(TRIM(merchant_name)) AS obligation_key,
+            UPPER(TRIM(merchant_name)) AS merchant_key,
+            merchant_name,
+            merchant_name,
+            COALESCE(NULLIF(category, ''), 'Subscriptions'),
+            CAST(ROUND(COALESCE(amount, 0) * 100) AS INTEGER),
+            COALESCE(NULLIF(frequency, ''), 'monthly'),
+            expected_day,
+            CASE WHEN expected_day IS NOT NULL THEN 'exact_day' ELSE 'observed_pattern' END,
+            NULL,
+            'confirmed',
+            'user',
+            100,
+            'user',
+            '{"backfilled_from":"user_declared_subscriptions"}',
+            1,
+            COALESCE(updated_at, created_at, datetime('now')),
+            COALESCE(created_at, datetime('now')),
+            COALESCE(updated_at, datetime('now'))
+        FROM user_declared_subscriptions
+        WHERE is_active = 1
+          AND COALESCE(merchant_name, '') != '';
+
+        INSERT INTO recurring_feedback
+            (profile_id, obligation_key, merchant_key, feedback_type, scope,
+             payload_json, created_at)
+        SELECT
+            profile_id,
+            UPPER(TRIM(merchant_name)) || ':merchant',
+            UPPER(TRIM(merchant_name)),
+            'dismissed',
+            'merchant',
+            '{"backfilled_from":"dismissed_recurring"}',
+            COALESCE(dismissed_at, datetime('now'))
+        FROM dismissed_recurring d
+        WHERE COALESCE(merchant_name, '') != ''
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recurring_feedback f
+              WHERE f.profile_id = d.profile_id
+                AND (
+                    f.merchant_key = UPPER(TRIM(d.merchant_name))
+                    OR REPLACE(UPPER(TRIM(f.merchant_key)), '_', ' ') = UPPER(TRIM(d.merchant_name))
+                )
+                AND f.feedback_type = 'dismissed'
+                AND f.scope = 'merchant'
+                AND f.superseded_at IS NULL
+          );
+        """
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -999,6 +1278,11 @@ CREATE TABLE IF NOT EXISTS user_declared_subscriptions (
     merchant_name       TEXT NOT NULL,
     amount              REAL NOT NULL,
     frequency           TEXT NOT NULL DEFAULT 'monthly',
+    category            TEXT NOT NULL DEFAULT 'Subscriptions',
+    expected_day        INTEGER DEFAULT NULL,
+    amount_review_dismissed_amount REAL DEFAULT NULL,
+    amount_review_dismissed_latest_date TEXT DEFAULT NULL,
+    amount_review_dismissed_at TEXT DEFAULT NULL,
     profile_id          TEXT NOT NULL,
     is_active           INTEGER DEFAULT 1,
     created_at          TEXT DEFAULT (datetime('now')),
@@ -1015,6 +1299,7 @@ CREATE TABLE IF NOT EXISTS subscription_events (
     merchant_name       TEXT NOT NULL,
     profile_id          TEXT NOT NULL,
     detail              TEXT DEFAULT '{}',
+    event_key           TEXT DEFAULT NULL,
     created_at          TEXT DEFAULT (datetime('now')),
     is_read             INTEGER DEFAULT 0
 );

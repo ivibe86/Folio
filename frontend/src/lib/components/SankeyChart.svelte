@@ -6,6 +6,8 @@ import { privacyMode } from '$lib/stores.js';
 
 export let income = 0;
 export let expenses = 0;
+export let creditsRefunds = 0;
+export let incomingTransfers = 0;
 export let savingsTransfer = 0;
 export let personalTransfer = 0;
 export let ccRepaid = 0;
@@ -48,6 +50,8 @@ const MIN_NODE_HEIGHT = 28;
 /* Use CSS variables for theme-aware colors, with fallbacks */
 const FLOW_COLORS = {
     income:            { color: 'var(--flow-income)',       glow: 'var(--flow-income-glow)' },
+    credits_refunds:   { color: 'var(--positive)',          glow: 'rgba(16, 185, 129, 0.18)' },
+    incoming_transfer: { color: 'var(--flow-transfer)',     glow: 'var(--flow-transfer-glow)' },
     expenses:          { color: 'var(--flow-expenses)',     glow: 'var(--flow-expenses-glow)' },
     savings_transfer:  { color: 'var(--flow-savings)',      glow: 'var(--flow-savings-glow)' },
     personal_transfer: { color: 'var(--flow-transfer)',     glow: 'var(--flow-transfer-glow)' },
@@ -87,11 +91,11 @@ function getFlowColor(nodeId) {
         // Build a lightweight key from the data that actually affects layout.
         // selectedCategory and theme changes do NOT affect layout — only visual props.
         // Privacy mode is included to force label re-render (layout stays the same).
-        const key = `${income}|${expenses}|${savingsTransfer}|${personalTransfer}|${ccRepaid}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
+        const key = `${income}|${creditsRefunds}|${incomingTransfers}|${expenses}|${savingsTransfer}|${personalTransfer}|${ccRepaid}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
 
         if (key !== prevGraphKey) {
             prevGraphKey = key;
-            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories, ccRepaid);
+            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories, ccRepaid, creditsRefunds, incomingTransfers);
             if (containerEl && graphData && mounted) {
                 layoutSankey(graphData);
             }
@@ -103,15 +107,19 @@ function getFlowColor(nodeId) {
         if (nodes.length > 0 && ccRepaid > 0.01) {
             const ccPaid = ccRepaid;
             const incomeNode = nodes.find(n => n.id === 'income');
+            const balanceNode = nodes.find(n => n.id === 'from_balance');
+            const creditNode = nodes.find(n => n.id === 'credits_refunds');
+            const incomingNode = nodes.find(n => n.id === 'incoming_transfer');
+            const fundingNode = balanceNode || incomeNode || creditNode || incomingNode;
             const maxDepth = nodes.reduce((mx, n) => Math.max(mx, n.depth || 0), 0);
             const destNodes = nodes.filter(n => n.depth === maxDepth && !n.isGhost);
             const maxX = destNodes.length > 0 ? Math.max(...destNodes.map(n => n.x0)) : (svgWidth - 120);
             const maxY = nodes.filter(n => !n.isGhost).reduce((mx, n) => Math.max(mx, n.y1 || 0), 0);
 
-            if (incomeNode) {
+            if (fundingNode) {
                 const ghostY0 = maxY + 36;
-                const incomeHeight = incomeNode.y1 - incomeNode.y0;
-                const ghostHeight = Math.max(18, Math.min(40, ccPaid / (incomeNode.value || 1) * incomeHeight));
+                const sourceHeight = fundingNode.y1 - fundingNode.y0;
+                const ghostHeight = Math.max(18, Math.min(40, ccPaid / (fundingNode.value || 1) * sourceHeight));
                 ghostNode = {
                     x0: maxX,
                     x1: maxX + NODE_WIDTH,
@@ -122,9 +130,9 @@ function getFlowColor(nodeId) {
                     color: '#f472b6'
                 };
 
-                const srcX = incomeNode.x1;
-                const srcY0 = incomeNode.y1 - ghostHeight;
-                const srcY1 = incomeNode.y1;
+                const srcX = fundingNode.x1;
+                const srcY0 = fundingNode.y1 - ghostHeight;
+                const srcY1 = fundingNode.y1;
                 const tgtX = ghostNode.x0;
                 const tgtY0 = ghostNode.y0;
                 const tgtY1 = ghostNode.y1;
@@ -147,8 +155,8 @@ function getFlowColor(nodeId) {
         }
     }
 
-function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
-    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0 && ccRepaidAmt === 0) return null;
+function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsRefundsAmt = 0, incomingTransfersAmt = 0) {
+    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0 && ccRepaidAmt === 0 && creditsRefundsAmt === 0 && incomingTransfersAmt === 0) return null;
 
     const top = (cats || []).slice(0, 10);
     const categoryTotal = top.reduce((s, c) => s + (c.total || 0), 0);
@@ -157,12 +165,15 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
     if (totalOutflow === 0) return null;
 
     const realIncome = inc || 0;
+    const realCreditsRefunds = creditsRefundsAmt || 0;
+    const realIncomingTransfers = incomingTransfersAmt || 0;
+    const realInflow = realIncome + realCreditsRefunds + realIncomingTransfers;
 
     // ── Balance-as-Reservoir model ──
     // When income doesn't cover outflow, the shortfall comes "from balance".
     // When income exceeds outflow, the surplus goes "to balance" (savings pool).
-    const shortfall = Math.max(totalOutflow - realIncome, 0);
-    const surplus = Math.max(realIncome - totalOutflow, 0);
+    const shortfall = Math.max(totalOutflow - realInflow, 0);
+    const surplus = Math.max(realInflow - totalOutflow, 0);
 
     // Layout income = the total left-side value that feeds into outflows.
     // This must equal totalOutflow so the Sankey balances visually.
@@ -170,6 +181,8 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
 
     realValues = {
         'income': realIncome,
+        'credits_refunds': realCreditsRefunds,
+        'incoming_transfer': realIncomingTransfers,
         'expenses': categoryTotal,
         'savings_transfer': savTotal,
         'personal_transfer': ptTotal,
@@ -189,6 +202,12 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
     // Always show income node if there IS income, even if it doesn't cover everything
     if (realIncome > 0) {
         nodeList.push({ id: 'income', label: 'Income', color: FLOW_COLORS.income.color });
+    }
+    if (realCreditsRefunds > 0) {
+        nodeList.push({ id: 'credits_refunds', label: 'Credits', color: FLOW_COLORS.credits_refunds.color });
+    }
+    if (realIncomingTransfers > 0) {
+        nodeList.push({ id: 'incoming_transfer', label: 'Incoming', color: FLOW_COLORS.incoming_transfer.color });
     }
 
     // Show "From Balance" node when drawing down reserves
@@ -234,93 +253,35 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0) {
 
     const linkList = [];
 
-    // ── Source → Expenses links ──
-    // Income feeds into expenses (up to the lesser of income or categoryTotal)
-    if (realIncome > 0 && top.length > 0 && categoryTotal > 0) {
-        const incomeToExpenses = Math.min(realIncome, categoryTotal);
-        linkList.push({
-            source: idToIndex['income'],
-            target: idToIndex['expenses'],
-            value: incomeToExpenses,
-            id: 'income-expenses'
-        });
-    }
+    const sources = [
+        { id: 'income', remaining: realIncome },
+        { id: 'credits_refunds', remaining: realCreditsRefunds },
+        { id: 'incoming_transfer', remaining: realIncomingTransfers },
+        { id: 'from_balance', remaining: shortfall }
+    ].filter(s => s.remaining > 0.01 && idToIndex[s.id] !== undefined);
 
-    // From Balance feeds the remainder of expenses
-    if (shortfall > 0.01 && top.length > 0 && categoryTotal > 0) {
-        // How much of categoryTotal is NOT covered by income?
-        const incomeToExpenses = Math.min(realIncome, categoryTotal);
-        const balanceToExpenses = categoryTotal - incomeToExpenses;
-        if (balanceToExpenses > 0.01) {
+    function allocateTo(targetId, amount) {
+        if (amount <= 0.01 || idToIndex[targetId] === undefined) return;
+        let remaining = amount;
+        for (const source of sources) {
+            if (remaining <= 0.01) break;
+            const take = Math.min(source.remaining, remaining);
+            if (take <= 0.01) continue;
             linkList.push({
-                source: idToIndex['from_balance'],
-                target: idToIndex['expenses'],
-                value: balanceToExpenses,
-                id: 'from_balance-expenses'
+                source: idToIndex[source.id],
+                target: idToIndex[targetId],
+                value: take,
+                id: `${source.id}-${targetId}`
             });
+            source.remaining -= take;
+            remaining -= take;
         }
     }
 
-    // ── Source → Savings Transfer links ──
-    if (savTotal > 0) {
-        // Allocate: income covers expenses first, then savings, then personal
-        const incomeAfterExpenses = Math.max(realIncome - categoryTotal, 0);
-        const incomeToSavings = Math.min(incomeAfterExpenses, savTotal);
-
-        if (incomeToSavings > 0.01 && idToIndex['income'] !== undefined) {
-            linkList.push({
-                source: idToIndex['income'],
-                target: idToIndex['savings_transfer'],
-                value: incomeToSavings,
-                id: 'income-savings_transfer'
-            });
-        }
-
-        const balanceToSavings = savTotal - incomeToSavings;
-        if (balanceToSavings > 0.01 && idToIndex['from_balance'] !== undefined) {
-            linkList.push({
-                source: idToIndex['from_balance'],
-                target: idToIndex['savings_transfer'],
-                value: balanceToSavings,
-                id: 'from_balance-savings_transfer'
-            });
-        }
-    }
-
-    // ── Source → Personal Transfer links ──
-    if (ptTotal > 0) {
-        const incomeAfterExpAndSav = Math.max(realIncome - categoryTotal - savTotal, 0);
-        const incomeToPersonal = Math.min(incomeAfterExpAndSav, ptTotal);
-
-        if (incomeToPersonal > 0.01 && idToIndex['income'] !== undefined) {
-            linkList.push({
-                source: idToIndex['income'],
-                target: idToIndex['personal_transfer'],
-                value: incomeToPersonal,
-                id: 'income-personal_transfer'
-            });
-        }
-
-        const balanceToPersonal = ptTotal - incomeToPersonal;
-        if (balanceToPersonal > 0.01 && idToIndex['from_balance'] !== undefined) {
-            linkList.push({
-                source: idToIndex['from_balance'],
-                target: idToIndex['personal_transfer'],
-                value: balanceToPersonal,
-                id: 'from_balance-personal_transfer'
-            });
-        }
-    }
-
-    // ── Income → To Balance (surplus) ──
-    if (surplus > 0.01 && idToIndex['income'] !== undefined && idToIndex['to_balance'] !== undefined) {
-        linkList.push({
-            source: idToIndex['income'],
-            target: idToIndex['to_balance'],
-            value: surplus,
-            id: 'income-to_balance'
-        });
-    }
+    allocateTo('expenses', top.length > 0 ? categoryTotal : 0);
+    allocateTo('savings_transfer', savTotal);
+    allocateTo('personal_transfer', ptTotal);
+    allocateTo('to_balance', surplus);
 
     //    Ghost: CC Repaid (visual only, does not affect Sankey balance)   
     // This link is injected AFTER the Sankey layout as a visual overlay.
@@ -443,8 +404,17 @@ function linkPath(link) {
 function isHiddenLink(link) { return link.isHidden === true; }
 function isHiddenNode(node) { return node.isHidden === true; }
 
+function selectedNodeId() {
+    if (selectedCategory === 'Credits & Refunds') return 'credits_refunds';
+    if (selectedCategory === 'Savings Transfer') return 'savings_transfer';
+    if (selectedCategory === 'Personal Transfer') return 'personal_transfer';
+    return selectedCategory;
+}
+
 function getLinkTargetCategory(link) {
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
+    const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
+    if (sourceNode?.id === 'credits_refunds') return 'Credits & Refunds';
     if (!targetNode || targetNode.isHidden) return null;
     if (targetNode.id === 'income' || targetNode.id === 'expenses') return null;
     if (targetNode.id === 'from_balance' || targetNode.id === 'to_balance') return null;
@@ -458,11 +428,14 @@ function getLinkOpacity(link) {
     const resolvedCategory = getLinkTargetCategory(link);
     const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
+    const activeNodeId = selectedNodeId();
 
     let opacity;
 
     if (selectedCategory) {
         if (resolvedCategory === selectedCategory) {
+            opacity = 0.75;
+        } else if (sourceNode?.id === activeNodeId || targetNode?.id === activeNodeId) {
             opacity = 0.75;
         } else if ((sourceNode?.id === 'income' || sourceNode?.id === 'from_balance') && targetNode?.id === 'expenses') {
         // Dim source→expenses trunk links (from income OR from_balance)
@@ -491,6 +464,7 @@ function getLinkStrokeWidth(link) {
     const resolvedCategory = getLinkTargetCategory(link);
     const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
+    const activeNodeId = selectedNodeId();
 
     /* Ensure minimum visible width for thin flows — thicker on frost surfaces
        Light mode frost needs wider minimums for contrast */
@@ -499,6 +473,7 @@ function getLinkStrokeWidth(link) {
 
     if (selectedCategory) {
         if (resolvedCategory === selectedCategory) return baseWidth + 2;
+        if (sourceNode?.id === activeNodeId || targetNode?.id === activeNodeId) return baseWidth + 2;
         if (sourceNode?.id === 'expenses' && targetNode?.id === selectedCategory) return baseWidth + 2;
     }
     if (hoveredLink && link === hoveredLink) return baseWidth + 1;
@@ -531,7 +506,7 @@ function getLinkTargetColor(link) {
 function getNodeRenderColor(node) {
     if (!syncOverlay) return node.color;
 
-    if (node.id === 'income' || node.id === 'from_balance') return '#7f8ea2';
+    if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'from_balance') return '#7f8ea2';
     if (node.id === 'expenses') return '#9fb1c8';
     if (node.id === 'to_balance') return '#95a8bb';
     return '#b7c4d5';
@@ -540,19 +515,20 @@ function getNodeRenderColor(node) {
 function getNodeOpacity(node) {
     if (isHiddenNode(node)) return 0;
     let opacity = 1;
+    const activeNodeId = selectedNodeId();
 
     if (!selectedCategory) {
         opacity = 1;
-    } else if (node.id === selectedCategory) {
+    } else if (node.id === selectedCategory || node.id === activeNodeId) {
         opacity = 1;
     } else if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') {
         opacity = 1;
     } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
         opacity = 1;
-    } else if (node.id === 'income' || node.id === 'from_balance' || node.id === 'to_balance') {
+    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'from_balance' || node.id === 'to_balance') {
         opacity = 0.4;
     } else if (node.id === 'expenses') {
-        const isExpenseCat = nodes.some(n => n.id === selectedCategory && n.id !== 'savings_transfer' && n.id !== 'personal_transfer' && n.id !== 'income' && n.id !== 'expenses' && n.id !== 'from_balance' && n.id !== 'to_balance');
+        const isExpenseCat = nodes.some(n => n.id === selectedCategory && !['savings_transfer', 'personal_transfer', 'income', 'credits_refunds', 'incoming_transfer', 'expenses', 'from_balance', 'to_balance'].includes(n.id));
         opacity = isExpenseCat ? 0.4 : 0.1;
     } else {
         opacity = 0.1;
@@ -568,16 +544,17 @@ function getNodeOpacity(node) {
 function getNodeLabelOpacity(node) {
     if (isHiddenNode(node)) return 0;
     let opacity = 1;
+    const activeNodeId = selectedNodeId();
 
     if (!selectedCategory) {
         opacity = 1;
-    } else if (node.id === selectedCategory) {
+    } else if (node.id === selectedCategory || node.id === activeNodeId) {
         opacity = 1;
     } else if (node.id === 'savings_transfer' && selectedCategory === 'Savings Transfer') {
         opacity = 1;
     } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
         opacity = 1;
-    } else if (node.id === 'income' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') {
+    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') {
         opacity = 0.4;
     } else {
         opacity = 0.1;
@@ -627,16 +604,17 @@ function getSyncNodeMaskOpacity(node) {
 function isLeafNode(node) {
     if (isHiddenNode(node)) return false;
     if (node.isGhost) return false;
-    return node.id !== 'income' && node.id !== 'expenses' && node.id !== '_unallocated' && node.id !== 'from_balance' && node.id !== 'to_balance';
+    return !['income', 'incoming_transfer', 'expenses', '_unallocated', 'from_balance', 'to_balance'].includes(node.id);
 }
 
 function isClickable(node) {
     if (isHiddenNode(node)) return false;
     if (node.isGhost) return false;
-    return node.id !== 'income' && node.id !== 'expenses' && node.id !== '_unallocated' && node.id !== 'from_balance' && node.id !== 'to_balance';
+    return !['income', 'incoming_transfer', 'expenses', '_unallocated', 'from_balance', 'to_balance'].includes(node.id);
 }
 
 function getClickCategory(node) {
+    if (node.id === 'credits_refunds') return 'Credits & Refunds';
     if (node.id === 'savings_transfer') return 'Savings Transfer';
     if (node.id === 'personal_transfer') return 'Personal Transfer';
     return node.id;
@@ -680,6 +658,18 @@ function handleBackgroundClick() {
     dispatch('select', null);
 }
 
+function handleBackgroundKeydown(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    handleBackgroundClick();
+}
+
+function handleLinkKeydown(event, link) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    handleLinkClick(event, link);
+}
+
 function handleNodeClick(event, node) {
     event.stopPropagation();
     if (!isClickable(node)) return;
@@ -706,6 +696,12 @@ function handleNodeHover(node, event) {
 
 function handleNodeLeave() {
     tooltip = { ...tooltip, show: false };
+}
+
+function handleNodeKeydown(event, node) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    handleNodeClick(event, node);
 }
 
 function nodeLabelX(node) {
@@ -752,7 +748,7 @@ onMount(() => {
 
 <div bind:this={containerEl} class="sankey-container" class:animate-in={animateIn} style="height: {ghostComputedHeight > computedHeight ? ghostComputedHeight : computedHeight}px; position: relative;">
     {#if nodes.length > 0}
-        <svg width={svgWidth} height={ghostComputedHeight > computedHeight ? ghostComputedHeight : computedHeight} class="sankey-svg">
+        <svg width={svgWidth} height={ghostComputedHeight > computedHeight ? ghostComputedHeight : computedHeight} class="sankey-svg" role="group" aria-label="Cash flow Sankey chart">
             <defs>
                 <!-- ── Node outer glow (luminous halo) ── -->
                 <filter id="nodeGlow" x="-60%" y="-60%" width="220%" height="220%">
@@ -915,7 +911,12 @@ onMount(() => {
             <!-- ── Dark theater background ── -->
             <rect x="0" y="0" width={svgWidth} height={computedHeight} fill="transparent"
                 rx="0" ry="0"
-                on:click={handleBackgroundClick} style="cursor: default;" />
+                role="button"
+                tabindex="0"
+                aria-label="Clear Sankey selection"
+                on:click={handleBackgroundClick}
+                on:keydown={handleBackgroundKeydown}
+                style="cursor: default;" />
 
             <!-- ── Flow links: glow underlayer (bloom effect) ── -->
             <!-- Single CSS filter on parent <g> instead of per-element SVG filter -->
@@ -947,10 +948,13 @@ onMount(() => {
                             filter="none"
                             class="sankey-link"
                             class:sankey-link-clickable={getLinkTargetCategory(link) !== null}
+                            role="button"
+                            tabindex="0"
+                            aria-label={`Flow from ${typeof link.source === 'object' ? link.source.label : 'source'} to ${typeof link.target === 'object' ? link.target.label : 'target'}`}
                             on:mouseenter={(e) => handleLinkHover(link, e)}
                             on:mouseleave={handleLinkLeave}
                             on:click={(e) => handleLinkClick(e, link)}
-                            aria-label="flow"
+                            on:keydown={(e) => handleLinkKeydown(e, link)}
                         />
                     {/if}
                 {/each}
@@ -1094,7 +1098,7 @@ onMount(() => {
                             on:click={(e) => handleNodeClick(e, node)}
                             on:mouseenter={(e) => handleNodeHover(node, e)}
                             on:mouseleave={handleNodeLeave}
-                            on:keydown={(e) => { if (e.key === 'Enter') handleNodeClick(e, node); }}
+                            on:keydown={(e) => handleNodeKeydown(e, node)}
                             role="button" tabindex="0" aria-label={node.label}
                         />
 
@@ -1126,7 +1130,7 @@ onMount(() => {
                             opacity={getNodeLabelOpacity(node)}
                             class:clickable={isClickable(node)}
                             on:click={(e) => handleNodeClick(e, node)}
-                            on:keydown={(e) => { if (e.key === 'Enter') handleNodeClick(e, node); }}
+                            on:keydown={(e) => handleNodeKeydown(e, node)}
                             role="button" tabindex="-1"
                         >
                             <tspan class="sankey-label-name">{node.label}</tspan>
@@ -1171,6 +1175,8 @@ onMount(() => {
                         stroke={syncOverlay ? '#bcc8d7' : '#f472b6'}
                         stroke-width="1.5"
                         stroke-dasharray="6 3"
+                        role="img"
+                        aria-label={`CC Repaid ${formatCurrency(ghostNode.value)}`}
                         on:mouseenter={(e) => {
                             tooltip = {
                                 show: true,

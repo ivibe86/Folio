@@ -7,6 +7,7 @@ from pathlib import Path as FilePath
 from datetime import datetime, timedelta
 import csv
 import io
+import json
 
 from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +38,7 @@ RECEIPT_INTELLIGENCE_ENABLED = (
 from data_manager import (
     get_data, fetch_fresh_data, fetch_simplefin_data,
     update_transaction_category,
+    bulk_mark_transactions_reviewed,
     add_category, get_categories, get_categories_meta, get_category_rules,
     get_accounts_filtered, get_transactions_paginated,
     get_summary_data, get_monthly_analytics_data,
@@ -52,6 +54,15 @@ from data_manager import (
     update_transaction_excluded, update_transaction_metadata,
     get_transaction_splits, replace_transaction_splits,
     create_manual_account, update_manual_account, deactivate_manual_account,
+    get_data_health_summary,
+    get_scheduled_transactions_data,
+    get_cash_flow_forecast_data,
+    create_month_explanation,
+    get_investments_summary_data,
+    upsert_investment_holding,
+    delete_investment_holding,
+    get_backup_status_data,
+    create_backup_export_data,
     get_transactions_for_merchant,
     get_category_rule_impact,
     explain_category_assignment, find_merchants_missing_category,
@@ -354,6 +365,11 @@ class SaveInsightRequest(BaseModel):
     source_conversation_id: int | None = None
 
 
+class MonthExplanationRequest(BaseModel):
+    month: str
+    use_llm: bool = True
+
+
 class MemoryEntryCreate(BaseModel):
     section: str
     body: str
@@ -529,6 +545,32 @@ def transactions(
 @app.get("/api/transactions/review-queue")
 def transaction_review_queue(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
     return get_review_queue_data(profile=profile, conn=db)
+
+
+@app.post("/api/transactions/bulk-review")
+def bulk_review_transactions(
+    month: str | None = Query(None, description="YYYY-MM"),
+    category: str | None = Query(None),
+    account: str | None = Query(None),
+    search: str | None = Query(None),
+    reviewed: bool | None = Query(None),
+    target_reviewed: bool = Query(True),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    return {
+        "status": "updated",
+        **bulk_mark_transactions_reviewed(
+            month=month,
+            category=category,
+            account=account,
+            search=search,
+            reviewed=reviewed,
+            target_reviewed=target_reviewed,
+            profile=profile,
+            conn=db,
+        ),
+    }
 
 
 @app.get("/api/transactions/export")
@@ -863,8 +905,9 @@ def merchant_insights(month: str | None = Query(None), profile: str | None = Dep
 @app.get("/api/analytics/recurring")
 def get_recurring_transactions(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
     """
-    Return stored recurring / subscription data from the merchants table.
-    Detection runs incrementally after each sync (see data_manager.fetch_fresh_data).
+    Return recurring / subscription data from the recurring obligation model.
+    Detection runs incrementally after each sync (see data_manager.fetch_fresh_data)
+    and still maintain legacy merchant subscription fields as a compatibility cache.
     Use POST /api/subscriptions/redetect for a manual full refresh.
 
     Response includes items, events, and dismissed arrays for the frontend bundle.
@@ -913,6 +956,8 @@ def confirm_subscription(body: SubscriptionConfirm, profile: str | None = Query(
     User confirms a detected recurring charge as a subscription.
     Creates a user-sourced seed in the subscription_seeds table.
     """
+    from recurring_obligations import canonical_key as _recurring_canonical_key, record_feedback as _record_feedback
+
     pattern = (body.pattern or body.merchant).upper().strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="Merchant or pattern required.")
@@ -940,6 +985,32 @@ def confirm_subscription(body: SubscriptionConfirm, profile: str | None = Query(
             (body.merchant, pattern, body.frequency_hint, body.category, created_by),
         )
 
+    merchant_key = _recurring_canonical_key(body.merchant)
+    if merchant_key:
+        db.execute(
+            """UPDATE recurring_obligations
+               SET state = 'confirmed',
+                   source = CASE WHEN source = 'user' THEN source ELSE 'user_confirmed' END,
+                   confidence_score = MAX(confidence_score, 100),
+                   confidence_label = 'user',
+                   last_user_action_at = datetime('now'),
+                   updated_at = datetime('now')
+               WHERE profile_id = ? AND merchant_key = ?""",
+            (created_by, merchant_key),
+        )
+        _record_feedback(
+            db,
+            merchant=body.merchant,
+            profile_id=created_by,
+            feedback_type="confirmed",
+            scope="merchant",
+            payload={
+                "pattern": pattern,
+                "frequency_hint": body.frequency_hint,
+                "category": body.category,
+            },
+        )
+
     return {"status": "confirmed", "merchant": body.merchant, "pattern": pattern}
 
 
@@ -950,6 +1021,8 @@ def dismiss_subscription(body: SubscriptionDismiss, profile: str | None = Query(
     Also records in dismissed_recurring table for Enhancement 2.
     If it's a system seed, we create a user-level suppression entry.
     """
+    from recurring_obligations import record_feedback as _record_feedback
+
     pattern = (body.pattern or body.merchant).upper().strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="Merchant or pattern required.")
@@ -982,6 +1055,14 @@ def dismiss_subscription(body: SubscriptionDismiss, profile: str | None = Query(
            VALUES (?, ?)""",
         (body.merchant, created_by),
     )
+    _record_feedback(
+        db,
+        merchant=body.merchant,
+        profile_id=created_by,
+        feedback_type="dismissed",
+        scope="merchant",
+        payload={"pattern": pattern},
+    )
 
     return {"status": "dismissed", "merchant": body.merchant, "pattern": pattern}
 
@@ -992,6 +1073,15 @@ class SubscriptionDeclare(BaseModel):
     merchant: str
     amount: float
     frequency: str = "monthly"
+    category: str = "Subscriptions"
+    expected_day: int | None = None
+    profile: str | None = None
+
+
+class SubscriptionAmountReviewDismiss(BaseModel):
+    merchant: str
+    suggested_amount: float
+    latest_date: str
     profile: str | None = None
 
 
@@ -1009,6 +1099,8 @@ def declare_subscription_endpoint(body: SubscriptionDeclare, db=Depends(get_db_s
         raise HTTPException(status_code=400, detail="Amount must be positive.")
     if body.frequency not in ("monthly", "quarterly", "semi_annual", "annual"):
         raise HTTPException(status_code=400, detail="Frequency must be monthly, quarterly, semi_annual, or annual.")
+    if body.expected_day is not None and not (1 <= int(body.expected_day) <= 31):
+        raise HTTPException(status_code=400, detail="Expected day must be between 1 and 31.")
 
     profile = body.profile or "household"
     result = declare_subscription(
@@ -1016,8 +1108,62 @@ def declare_subscription_endpoint(body: SubscriptionDeclare, db=Depends(get_db_s
         amount=body.amount,
         frequency=body.frequency,
         profile=profile,
+        category=body.category or "Subscriptions",
+        expected_day=body.expected_day,
     )
     return {"status": "ok", "message": "Subscription declared", "subscription": result}
+
+
+@app.post("/api/subscriptions/amount-review/dismiss")
+def dismiss_subscription_amount_review(body: SubscriptionAmountReviewDismiss, db=Depends(get_db_session)):
+    """
+    Suppress the current expected-amount suggestion for a user-declared recurring bill.
+    A newer latest charge or materially different suggested amount can surface again.
+    """
+    if not body.merchant or not body.merchant.strip():
+        raise HTTPException(status_code=400, detail="Merchant name required.")
+    if body.suggested_amount <= 0:
+        raise HTTPException(status_code=400, detail="Suggested amount must be positive.")
+    if not body.latest_date or not body.latest_date.strip():
+        raise HTTPException(status_code=400, detail="Latest date required.")
+
+    from recurring_obligations import canonical_key as _recurring_canonical_key, record_feedback as _record_feedback
+
+    profile_id = body.profile or "household"
+    merchant = body.merchant.strip()
+    result = db.execute(
+        """UPDATE user_declared_subscriptions
+           SET amount_review_dismissed_amount = ?,
+               amount_review_dismissed_latest_date = ?,
+               amount_review_dismissed_at = datetime('now'),
+               updated_at = datetime('now')
+           WHERE profile_id = ?
+             AND is_active = 1
+             AND (merchant_name = ? OR UPPER(merchant_name) = ?)""",
+        (body.suggested_amount, body.latest_date.strip(), profile_id, merchant, merchant.upper()),
+    )
+    merchant_key = _recurring_canonical_key(merchant)
+    v2_exists = db.execute(
+        """SELECT 1
+           FROM recurring_obligations
+           WHERE profile_id = ? AND merchant_key = ?
+           LIMIT 1""",
+        (profile_id, merchant_key),
+    ).fetchone()
+    if result.rowcount == 0 and not v2_exists:
+        raise HTTPException(status_code=404, detail="User-declared subscription not found.")
+    _record_feedback(
+        db,
+        merchant=merchant,
+        profile_id=profile_id,
+        feedback_type="amount_review_dismissed",
+        scope="exact_candidate",
+        payload={
+            "suggested_amount": body.suggested_amount,
+            "latest_date": body.latest_date.strip(),
+        },
+    )
+    return {"status": "dismissed", "merchant": merchant, "suggested_amount": body.suggested_amount}
 
 
 @app.post("/api/subscriptions/{merchant}/cancel")
@@ -1106,6 +1252,13 @@ def redetect_subscriptions(profile: str | None = Depends(validate_profile)):
     from data_manager import trigger_full_redetection
     try:
         result = trigger_full_redetection(profile=profile)
+        status = result.get("status") or "ok"
+        if status == "already_running":
+            return {
+                "status": "already_running",
+                "items_detected": 0,
+                "events_generated": 0,
+            }
         return {
             "status": "ok",
             "items_detected": len(result.get("items", [])),
@@ -1138,6 +1291,41 @@ def sync(profile: str | None = Query(None)):
 @app.get("/api/sync-status")
 def sync_status():
     return get_sync_status()
+
+
+@app.get("/api/data-health")
+def data_health(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return get_data_health_summary(profile=profile, conn=db)
+
+
+@app.get("/api/scheduled-transactions")
+def scheduled_transactions(
+    days: int = Query(45, ge=1, le=180),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    return get_scheduled_transactions_data(days=days, profile=profile, conn=db)
+
+
+@app.post("/api/analytics/explain-month")
+def explain_month(
+    body: MonthExplanationRequest,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    try:
+        return create_month_explanation(body.month, profile=profile, use_llm=body.use_llm, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/analytics/cash-flow-forecast")
+def cash_flow_forecast(
+    days: int = Query(90, ge=7, le=180),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    return get_cash_flow_forecast_data(days=days, profile=profile, conn=db)
 
 
 class CopilotConfirm(BaseModel):
@@ -1897,6 +2085,20 @@ class ManualAccountPayload(BaseModel):
     notes: str | None = ""
 
 
+class InvestmentHoldingPayload(BaseModel):
+    account_id: str | None = None
+    symbol: str | None = ""
+    name: str
+    asset_class: str = "stock"
+    quantity: float = 0
+    cost_basis: float = 0
+    current_price: float = 0
+    manual_value: float | None = None
+    target_percent: float | None = None
+    notes: str | None = ""
+    price_as_of: str | None = None
+
+
 @app.post("/api/manual-accounts")
 def create_manual_account_endpoint(body: ManualAccountPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
     try:
@@ -1922,6 +2124,59 @@ def delete_manual_account_endpoint(account_id: str, profile: str | None = Depend
     if not deactivate_manual_account(account_id, profile=profile, conn=db):
         raise HTTPException(status_code=404, detail="Manual account not found.")
     return {"status": "deleted"}
+
+
+@app.get("/api/investments")
+def investments_endpoint(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return get_investments_summary_data(profile=profile, conn=db)
+
+
+@app.post("/api/investments/holdings")
+def create_investment_holding_endpoint(body: InvestmentHoldingPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    try:
+        holding = upsert_investment_holding(body.model_dump(), profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "created", "holding": holding}
+
+
+@app.patch("/api/investments/holdings/{holding_id}")
+def update_investment_holding_endpoint(holding_id: int, body: InvestmentHoldingPayload, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    try:
+        holding = upsert_investment_holding(body.model_dump(), holding_id=holding_id, profile=profile, conn=db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not holding:
+        raise HTTPException(status_code=404, detail="Holding not found.")
+    return {"status": "updated", "holding": holding}
+
+
+@app.delete("/api/investments/holdings/{holding_id}")
+def delete_investment_holding_endpoint(holding_id: int, profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    if not delete_investment_holding(holding_id, profile=profile, conn=db):
+        raise HTTPException(status_code=404, detail="Holding not found.")
+    return {"status": "deleted"}
+
+
+@app.get("/api/backup/status")
+def backup_status_endpoint(profile: str | None = Depends(validate_profile), db=Depends(get_db_session)):
+    return get_backup_status_data(profile=profile, conn=db)
+
+
+@app.get("/api/backup/export")
+def backup_export_endpoint(
+    include_credentials: bool = Query(False),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    data = create_backup_export_data(profile=profile, include_credentials=include_credentials, conn=db)
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"folio-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/merchant-directory")

@@ -1,6 +1,6 @@
 <script>
     import { scaleLinear, scaleBand, scalePoint } from 'd3-scale';
-    import { line, curveMonotoneX, arc, pie } from 'd3-shape';
+    import { arc, pie } from 'd3-shape';
     import { formatCurrency, formatCompact, CATEGORY_COLORS } from '$lib/utils.js';
     import { privacyMode, darkMode } from '$lib/stores.js';
 

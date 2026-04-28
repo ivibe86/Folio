@@ -21,8 +21,6 @@
     import SimpleFINConnect from '$lib/components/SimpleFINConnect.svelte';
 
     export let data;
-    // Accept (and ignore) the 'params' prop that SvelteKit may pass to pages
-    export let params = {};
     let summary = data.summary;
     let accounts = data.accounts;
     let monthly = data.monthly;
@@ -60,8 +58,11 @@
     let periodSummary = null;
     let periodCategories = [];
     let sankeyCategoryList = [];
+    let sankeyPillList = [];
     let periodCcRepaid = 0;
     let periodExternalTransfers = 0;
+    let periodIncomingTransfers = 0;
+    let periodCreditsRefunds = 0;
 
     // Sankey: separated flows
     let sankeySavingsTotal = 0;
@@ -130,6 +131,8 @@
 
     // Fixed vs Variable spending
     const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const CREDIT_DRILLDOWN_CATEGORY = 'Credits & Refunds';
+    const CREDIT_DRILLDOWN_COLOR = '#059669';
     let editingExpenseType = null;
     let expenseTypeFeedback = '';
 
@@ -150,6 +153,8 @@
         sankeyCategoryList.some((cat) => !cat.isDirectFlow && (cat.total || 0) > 0) ||
         sankeySavingsTotal > 0 ||
         sankeyPersonalTransferTotal > 0 ||
+        (periodSummary?.credits_refunds || 0) > 0 ||
+        (periodSummary?.incoming_transfers || 0) > 0 ||
         (periodSummary?.cc_repaid || 0) > 0;
     $: heroLoading = isRefreshing || enrollmentLoadingActive || forceHeroLoading;
     $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceMetricLoading;
@@ -228,9 +233,32 @@
     let bundlePersonalTransferTotal = data.personalTransferTotal || 0;
     let bundleCcRepaid = data.ccRepaid || 0;
     let bundleExternalTransfers = data.externalTransfers || 0;
+    let bundleIncomingTransfers = data.incomingTransfers || 0;
+    let bundleCreditsRefunds = data.creditsRefunds || summary?.credits_refunds || summary?.refunds || 0;
     let monthlyCategoryBreakdown = data.monthlyCategoryBreakdown || [];
     let planSnapshot = data.planSnapshot || null;
     let reviewQueue = data.reviewQueue || null;
+    let dataHealth = data.dataHealth || null;
+    let scheduled = data.scheduled || null;
+    let cashFlowForecast = data.cashFlowForecast || null;
+    let investments = data.investments || null;
+    let manualQuickBalances = {};
+    let manualQuickSavingId = null;
+    let manualQuickMessage = '';
+    let reviewToastDismissed = false;
+    let expandedUpcomingGroup = '';
+    let upcomingActionKey = '';
+    let expandedUpcomingItemKey = '';
+    let upcomingEditKey = '';
+    let upcomingEditDraft = { category: 'Subscriptions', frequency: 'monthly', expectedDay: '', amount: '' };
+    const ALL_UPCOMING_GROUPS_KEY = '__all__';
+    const upcomingCategoryOptions = ['Subscriptions', 'Insurance', 'Utilities', 'Housing', 'Debt', 'Other'];
+    const upcomingFrequencyOptions = [
+        { key: 'monthly', label: 'Monthly' },
+        { key: 'quarterly', label: 'Quarterly' },
+        { key: 'semi_annual', label: 'Semiannual' },
+        { key: 'annual', label: 'Annual' },
+    ];
     {
         allMonths = [...monthly].sort((a, b) => b.month.localeCompare(a.month)).map(m => m.month);
         if (allMonths.length > 0) selectedCustomMonth = allMonths[0];
@@ -256,6 +284,8 @@
         try {
             // Purge all stale cached data
             invalidateCacheByPrefix('dashboard-bundle');
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('cash-flow-forecast');
             invalidateCacheByPrefix('net-worth');
             invalidateCacheByPrefix('accounts');
             invalidateCacheByPrefix('analytics');
@@ -270,9 +300,15 @@
             bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
             bundleCcRepaid = bundle.ccRepaid || 0;
             bundleExternalTransfers = bundle.externalTransfers || 0;
+            bundleIncomingTransfers = bundle.incomingTransfers || 0;
+            bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
             monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
             planSnapshot = bundle.planSnapshot || null;
             reviewQueue = bundle.reviewQueue || null;
+        dataHealth = bundle.dataHealth || null;
+        scheduled = bundle.scheduled || null;
+        cashFlowForecast = bundle.cashFlowForecast || null;
+        investments = bundle.investments || null;
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -325,20 +361,31 @@
 
     onMount(async () => {
         mounted = true;
+        const refreshDashboardBundle = async (reason) => {
+            try {
+                invalidateCacheByPrefix('dashboard-bundle');
+                invalidateCacheByPrefix('scheduled-transactions');
+                invalidateCacheByPrefix('cash-flow-forecast');
+                const bundle = await api.getDashboardBundle();
+                await applyFreshBundle(bundle);
+            } catch (e) {
+                console.error(`❌ Failed to refresh dashboard after ${reason}:`, e);
+            }
+        };
+
         const handleSyncComplete = async (event) => {
             const detail = event?.detail || {};
             if (detail.status && detail.status !== 'completed') return;
             if (!['enrollment', 'manual-sync', 'simplefin'].includes(detail.source)) return;
-            try {
-                invalidateCacheByPrefix('dashboard-bundle');
-                const bundle = await api.getDashboardBundle();
-                await applyFreshBundle(bundle);
-            } catch (e) {
-                console.error('❌ Failed to refresh dashboard after sync completion:', e);
-            }
+            await refreshDashboardBundle('sync completion');
+        };
+
+        const handleRecurringUpdated = async () => {
+            await refreshDashboardBundle('recurring update');
         };
 
         window.addEventListener('folio:sync-complete', handleSyncComplete);
+        window.addEventListener('folio:recurring-updated', handleRecurringUpdated);
         try {
             // ââ Guard: if the load() data is empty (401 race condition),
             //    retry the dashboard bundle before bootstrapping âââââââââ
@@ -353,7 +400,14 @@
                     bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
                     bundleCcRepaid = bundle.ccRepaid || 0;
                     bundleExternalTransfers = bundle.externalTransfers || 0;
+                    bundleIncomingTransfers = bundle.incomingTransfers || 0;
+                    bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
                     monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
+                    planSnapshot = bundle.planSnapshot || null;
+                    reviewQueue = bundle.reviewQueue || null;
+                    dataHealth = bundle.dataHealth || null;
+                    scheduled = bundle.scheduled || null;
+                    cashFlowForecast = bundle.cashFlowForecast || null;
                     netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                         ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                         : [];
@@ -405,6 +459,7 @@
 
         return () => {
             window.removeEventListener('folio:sync-complete', handleSyncComplete);
+            window.removeEventListener('folio:recurring-updated', handleRecurringUpdated);
         };
     });
 
@@ -433,6 +488,270 @@
     function handleSimpleFINConnected() {
         invalidateCacheByPrefix('profiles');
         loadProfiles();
+    }
+
+    $: dataHealthWarnings = Array.isArray(dataHealth?.warnings) ? dataHealth.warnings.slice(0, 4) : [];
+    $: staleManualAccounts = Array.isArray(accounts)
+        ? accounts.filter((account) => account.provider === 'manual' && (account.manual_is_stale || (account.manual_stale_days ?? 0) > 30)).slice(0, 4)
+        : [];
+    $: upcomingScheduledItems = Array.isArray(scheduled?.items)
+        ? scheduled.items.filter((item) => item.next_date)
+        : [];
+    $: upcomingGroups = Array.isArray(scheduled?.groups) ? scheduled.groups : [];
+    $: displayedUpcomingGroups = upcomingGroups.slice(0, 2);
+    $: expandedUpcomingItems = expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY
+        ? upcomingScheduledItems
+        : upcomingScheduledItems.filter((item) => item.group === expandedUpcomingGroup);
+    $: expandedUpcomingTitle = expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY
+        ? 'All upcoming'
+        : (upcomingGroups.find((group) => group.key === expandedUpcomingGroup)?.label || 'Upcoming');
+    $: unscheduledRecurringCount = scheduled?.needs_date_count || 0;
+    $: confirmedUpcomingTotal = scheduled?.confirmed_upcoming_total ?? scheduled?.upcoming_total ?? 0;
+    $: inferredUpcomingTotal = scheduled?.inferred_upcoming_total || 0;
+    $: needsReviewUpcomingTotal = scheduled?.needs_review_total || 0;
+
+    function progressPct(actual, target) {
+        const base = Math.max(Number(target || 0), 0);
+        if (base <= 0) return 0;
+        return Math.max(0, Math.min(100, (Number(actual || 0) / base) * 100));
+    }
+
+    function upcomingIcon(item) {
+        if (item.status === 'overdue') return 'priority_high';
+        if (item.group === 'housing') return 'home';
+        if (item.group === 'utilities') return 'bolt';
+        if (item.group === 'debt') return 'credit_card';
+        if (item.group === 'insurance') return 'shield';
+        if (item.group === 'subscriptions') return 'subscriptions';
+        return 'event';
+    }
+
+    function upcomingGroupIcon(groupKey) {
+        if (groupKey === 'housing') return 'home';
+        if (groupKey === 'utilities') return 'bolt';
+        if (groupKey === 'debt') return 'credit_card';
+        if (groupKey === 'insurance') return 'shield';
+        if (groupKey === 'subscriptions') return 'subscriptions';
+        return 'event';
+    }
+
+    function upcomingItemKey(item) {
+        return `${item.profile || 'household'}::${item.merchant || ''}::${item.group || ''}`;
+    }
+
+    function isUpcomingCandidate(item) {
+        return item?.source === 'recurring_candidate' || item?.state === 'candidate' || item?.confirmed === false;
+    }
+
+    function isUpcomingEditable(item) {
+        return item?.source === 'user' || item?.confirmed === true;
+    }
+
+    function upcomingSourceLabel(item) {
+        return item?.source_label || item?.evidence?.source_label || (isUpcomingCandidate(item) ? 'Inferred' : 'Detected');
+    }
+
+    function upcomingAmountRange(item) {
+        const min = Number(item?.evidence?.amount_min ?? item?.amount ?? 0);
+        const max = Number(item?.evidence?.amount_max ?? item?.amount ?? 0);
+        if (Math.abs(max - min) < 0.01) return formatCurrency(min);
+        return `${formatCurrency(min)}-${formatCurrency(max)}`;
+    }
+
+    function upcomingRestartDetail(item) {
+        const current = Number(item?.evidence?.seen_count || item?.charge_count || 0);
+        const historical = Number(item?.evidence?.historical_seen_count || current);
+        const gapDays = Number(item?.evidence?.history_gap_days || 0);
+        const gapText = gapDays > 0 ? ` · ${Math.round(gapDays / 30)} mo gap` : '';
+        return `${current} current · ${historical} historical${gapText}`;
+    }
+
+    function upcomingAmountReviewTitle(item) {
+        const review = item?.amount_review || {};
+        if (review.type === 'same_cycle_adjustment') return 'Plan change or adjustment detected';
+        return `Recent charge looks ${review.direction === 'down' ? 'lower' : 'higher'}`;
+    }
+
+    function upcomingAmountReviewDetail(item) {
+        const review = item?.amount_review || {};
+        if (review.type === 'same_cycle_adjustment') {
+            return `Cycle total ${formatCurrency(review.cycle_net_amount || review.suggested_amount || 0)} · latest ${formatCurrency(review.latest_amount || 0)} after ${formatCurrency(review.previous_amount || 0)}`;
+        }
+        return `Expected ${formatCurrency(review.current_amount || item?.amount || 0)} · latest ${formatCurrency(review.suggested_amount || review.latest_amount || 0)}`;
+    }
+
+    function normalizeUpcomingCategory(value, fallback = 'Subscriptions') {
+        const text = String(value || '').trim();
+        const match = upcomingCategoryOptions.find(option => option.toLowerCase() === text.toLowerCase());
+        return match || fallback;
+    }
+
+    function toggleUpcomingItem(item) {
+        const key = upcomingItemKey(item);
+        expandedUpcomingItemKey = expandedUpcomingItemKey === key ? '' : key;
+        if (expandedUpcomingItemKey !== key) {
+            upcomingEditKey = '';
+        }
+    }
+
+    function startUpcomingEdit(item, amountOverride = null) {
+        upcomingEditKey = upcomingItemKey(item);
+        upcomingEditDraft = {
+            category: normalizeUpcomingCategory(item.category || item.group_label || item.group),
+            frequency: item.frequency || 'monthly',
+            expectedDay: item.expected_day || (item.next_date ? Number(String(item.next_date).slice(8, 10)) : ''),
+            amount: amountOverride ?? item.amount ?? '',
+        };
+    }
+
+    async function saveUpcomingEdit(item) {
+        if (!item?.merchant || upcomingActionKey) return;
+        const key = upcomingItemKey(item);
+        upcomingActionKey = key;
+        try {
+            await api.declareSubscription(
+                item.merchant,
+                Math.abs(Number(upcomingEditDraft.amount || item.amount || 0)),
+                upcomingEditDraft.frequency || item.frequency || 'monthly',
+                item.profile || null,
+                normalizeUpcomingCategory(upcomingEditDraft.category || item.category),
+                upcomingEditDraft.expectedDay || null
+            );
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            await refreshScheduledData();
+            upcomingEditKey = '';
+        } catch (e) {
+            console.error('Failed to update upcoming item:', e);
+        } finally {
+            upcomingActionKey = '';
+        }
+    }
+
+    async function deactivateUpcomingItem(item) {
+        await dismissUpcomingCandidate(item);
+        if (expandedUpcomingItemKey === upcomingItemKey(item)) {
+            expandedUpcomingItemKey = '';
+        }
+    }
+
+    async function refreshScheduledData() {
+        scheduled = await api.getScheduledTransactions(45);
+    }
+
+    async function confirmUpcomingCandidate(item) {
+        if (!item?.merchant || upcomingActionKey) return;
+        const key = upcomingItemKey(item);
+        upcomingActionKey = key;
+        try {
+            await api.declareSubscription(
+                item.merchant,
+                Math.abs(Number(item.amount || 0)),
+                item.frequency || 'monthly',
+                item.profile || null,
+                item.category || item.group_label || 'Subscriptions'
+            );
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            await refreshScheduledData();
+        } catch (e) {
+            console.error('Failed to confirm upcoming candidate:', e);
+        } finally {
+            upcomingActionKey = '';
+        }
+    }
+
+    async function dismissUpcomingCandidate(item) {
+        if (!item?.merchant || upcomingActionKey) return;
+        const key = upcomingItemKey(item);
+        upcomingActionKey = key;
+        try {
+            await api.dismissSubscription(item.merchant, item.merchant, item.profile || null);
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            await refreshScheduledData();
+        } catch (e) {
+            console.error('Failed to dismiss upcoming candidate:', e);
+        } finally {
+            upcomingActionKey = '';
+        }
+    }
+
+    async function confirmUpcomingAmountReview(item) {
+        const review = item?.amount_review;
+        if (!item?.merchant || !review || upcomingActionKey) return;
+        if (review.type === 'same_cycle_adjustment') {
+            startUpcomingEdit(item, review.suggested_amount || item.amount || '');
+            return;
+        }
+        const key = upcomingItemKey(item);
+        upcomingActionKey = key;
+        try {
+            await api.declareSubscription(
+                item.merchant,
+                Math.abs(Number(review.suggested_amount || item.amount || 0)),
+                item.frequency || 'monthly',
+                item.profile || null,
+                item.category || item.group_label || 'Subscriptions',
+                item.expected_day || (item.next_date ? Number(String(item.next_date).slice(8, 10)) : null)
+            );
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            await refreshScheduledData();
+        } catch (e) {
+            console.error('Failed to confirm amount review:', e);
+        } finally {
+            upcomingActionKey = '';
+        }
+    }
+
+    async function dismissUpcomingAmountReview(item) {
+        const review = item?.amount_review;
+        if (!item?.merchant || !review || upcomingActionKey) return;
+        const key = upcomingItemKey(item);
+        upcomingActionKey = key;
+        try {
+            await api.dismissSubscriptionAmountReview(
+                item.merchant,
+                Number(review.suggested_amount || 0),
+                review.latest_date,
+                item.profile || null
+            );
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            await refreshScheduledData();
+        } catch (e) {
+            console.error('Failed to dismiss amount review:', e);
+        } finally {
+            upcomingActionKey = '';
+        }
+    }
+    $: investmentSummary = investments?.summary || null;
+    $: investmentAllocation = Array.isArray(investments?.allocation) ? investments.allocation.slice(0, 4) : [];
+
+    async function quickUpdateManualAccount(account) {
+        const raw = manualQuickBalances[account.id];
+        if (raw === undefined || raw === '' || manualQuickSavingId) return;
+        manualQuickSavingId = account.id;
+        manualQuickMessage = '';
+        try {
+            await api.updateManualAccount(account.id, {
+                name: account.name,
+                account_type: account.account_type || (account.is_credit ? 'loan' : 'investment'),
+                account_subtype: account.type || 'manual',
+                balance: Number(raw),
+                notes: account.manual_notes || ''
+            }, account.profile || null);
+            manualQuickBalances = { ...manualQuickBalances, [account.id]: '' };
+            invalidateCache();
+            const bundle = await api.getDashboardBundle();
+            await applyFreshBundle(bundle);
+            manualQuickMessage = `${account.name} updated.`;
+        } catch (e) {
+            manualQuickMessage = e?.message || 'Could not update manual account.';
+        } finally {
+            manualQuickSavingId = null;
+        }
     }
 
     function openConnectionChooser() {
@@ -537,7 +856,9 @@
         // Use bundle-level CC repaid and external transfers for initial period
         periodCcRepaid = bundleCcRepaid;
         periodExternalTransfers = bundleExternalTransfers;
-        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
+        periodIncomingTransfers = bundleIncomingTransfers;
+        periodCreditsRefunds = bundleCreditsRefunds;
+        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
         periodLoading = false;
     }
 
@@ -563,8 +884,10 @@
             const monthData = monthly.find(m => m.month === targetMonth);
             periodCcRepaid = monthData?.cc_repaid || 0;
             periodExternalTransfers = monthData?.external_transfers || 0;
+            periodIncomingTransfers = monthData?.incoming_transfers || 0;
+            periodCreditsRefunds = monthData?.credits_refunds ?? monthData?.refunds ?? 0;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
+            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
         } catch (_) {}
     }
 
@@ -674,11 +997,13 @@
 
     function buildSankeyCategoryList(cats, savingsTotal, personalTransferTotal) {
         const expenseCats = cats.filter(c => !DIRECT_FLOW_CATEGORIES.includes(c.category));
-        const expenseTotal = expenseCats.reduce((s, c) => s + (c.total || 0), 0);
+        const expenseTotal = expenseCats.reduce((s, c) => s + (c.gross ?? c.total ?? 0), 0);
 
         const combined = expenseCats.map(c => ({
             ...c,
-            percent: expenseTotal > 0 ? (c.total / expenseTotal) * 100 : 0
+            netTotal: c.total || 0,
+            total: c.gross ?? c.total ?? 0,
+            percent: expenseTotal > 0 ? ((c.gross ?? c.total ?? 0) / expenseTotal) * 100 : 0
         }));
 
         if (savingsTotal > 0) {
@@ -697,12 +1022,36 @@
         return combined;
     }
 
-    function buildPeriodSummary(income, cats, savingsTotal, personalTransferTotal, ccRepaid = 0, externalTransfers = 0) {
+    $: sankeyPillList = (() => {
+        const flows = [...sankeyCategoryList];
+        const creditsTotal = periodSummary?.credits_refunds || 0;
+        if (creditsTotal > 0) {
+            flows.unshift({
+                category: CREDIT_DRILLDOWN_CATEGORY,
+                total: creditsTotal,
+                percent: 0,
+                isCreditFlow: true
+            });
+        }
+        return flows;
+    })();
+
+    function getSankeyFlowColor(category) {
+        if (category === CREDIT_DRILLDOWN_CATEGORY) return CREDIT_DRILLDOWN_COLOR;
+        return CATEGORY_COLORS[category] || '#627d98';
+    }
+
+    function getSankeyFlowIcon(category) {
+        if (category === CREDIT_DRILLDOWN_CATEGORY) return 'payments';
+        return CATEGORY_ICONS[category] || 'label';
+    }
+
+    function buildPeriodSummary(income, cats, savingsTotal, personalTransferTotal, ccRepaid = 0, externalTransfers = 0, creditsRefunds = 0, incomingTransfers = 0) {
         const expenseCats = (cats || []).filter(c => !DIRECT_FLOW_CATEGORIES.includes(c.category));
-        const expenses = expenseCats.reduce((s, c) => s + (c.total || 0), 0);
-        // Accrual-basis Net Flow: Income - Spending - External Transfers
+        const expenses = expenseCats.reduce((s, c) => s + (c.gross ?? c.total ?? 0), 0);
+        // Cash-flow Net Flow: Income + credits + incoming transfers - Spending - outgoing transfers
         // CC payments and internal transfers are excluded
-        const netFlow = income - expenses - externalTransfers;
+        const netFlow = income + creditsRefunds + incomingTransfers - expenses - externalTransfers;
         const savings = Math.max(income - expenses, 0);
         return {
             income, expenses, savings,
@@ -710,6 +1059,8 @@
             personalTransfer: personalTransferTotal,
             cc_repaid: ccRepaid,
             external_transfers: externalTransfers,
+            incoming_transfers: incomingTransfers,
+            credits_refunds: creditsRefunds,
             net_flow: netFlow,
             savings_rate: sanitizeSavingsRate(income, expenses, savings)
         };
@@ -744,8 +1095,10 @@
             } catch (e) { periodCategories = categories; sankeySavingsTotal = 0; sankeyPersonalTransferTotal = 0; }
             periodCcRepaid = summary?.cc_repaid || bundleCcRepaid;
             periodExternalTransfers = summary?.external_transfers || bundleExternalTransfers;
+            periodIncomingTransfers = summary?.incoming_transfers || bundleIncomingTransfers;
+            periodCreditsRefunds = summary?.credits_refunds ?? summary?.refunds ?? bundleCreditsRefunds;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
         } else if (selectedPeriod === 'ytd') {
             const year = new Date().getFullYear().toString();
             const ytdMonths = monthly.filter(m => m.month.startsWith(year));
@@ -769,8 +1122,10 @@
             } catch (e) { periodCategories = categories; sankeySavingsTotal = 0; sankeyPersonalTransferTotal = 0; }
             periodCcRepaid = ytdMonths.reduce((s, m) => s + (m.cc_repaid || 0), 0);
             periodExternalTransfers = ytdMonths.reduce((s, m) => s + (m.external_transfers || 0), 0);
+            periodIncomingTransfers = ytdMonths.reduce((s, m) => s + (m.incoming_transfers || 0), 0);
+            periodCreditsRefunds = ytdMonths.reduce((s, m) => s + (m.credits_refunds ?? m.refunds ?? 0), 0);
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
         } else {
             const targetMonth = getMonthForPeriod(selectedPeriod);
             if (targetMonth) {
@@ -795,10 +1150,12 @@
                     const monthData = monthly.find(m => m.month === targetMonth);
                     periodCcRepaid = monthData?.cc_repaid || 0;
                     periodExternalTransfers = monthData?.external_transfers || 0;
+                    periodIncomingTransfers = monthData?.incoming_transfers || 0;
+                    periodCreditsRefunds = monthData?.credits_refunds ?? monthData?.refunds ?? 0;
                     sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers);
+                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
             } else {
-                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, cc_repaid: 0, external_transfers: 0, net_flow: 0, savings_rate: 0 };
+                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, cc_repaid: 0, external_transfers: 0, incoming_transfers: 0, credits_refunds: 0, net_flow: 0, savings_rate: 0 };
                 periodCategories = [];
                 sankeyCategoryList = [];
                 sankeySavingsTotal = 0;
@@ -886,7 +1243,14 @@
             bundlePersonalTransferTotal = bundle.personalTransferTotal || 0;
             bundleCcRepaid = bundle.ccRepaid || 0;
             bundleExternalTransfers = bundle.externalTransfers || 0;
+            bundleIncomingTransfers = bundle.incomingTransfers || 0;
+            bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
             monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
+            planSnapshot = bundle.planSnapshot || null;
+            reviewQueue = bundle.reviewQueue || null;
+            dataHealth = bundle.dataHealth || null;
+            scheduled = bundle.scheduled || null;
+            cashFlowForecast = bundle.cashFlowForecast || null;
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -1228,6 +1592,26 @@
     }
 
     // Sankey drill-down
+    function isCreditRefundTransaction(tx) {
+        const amount = parseFloat(tx?.amount || 0);
+        return amount > 0 && tx?.category !== 'Income' && !NON_SPENDING_CATEGORIES_SET.has(tx?.category);
+    }
+
+    async function fetchSankeyPeriodTransactions(targetMonth) {
+        if (selectedPeriod === 'ytd') {
+            const year = new Date().getFullYear().toString();
+            const ytdMonthKeys = monthly.filter(m => m.month.startsWith(year)).map(m => m.month);
+            const results = await Promise.all(ytdMonthKeys.map(m => api.getTransactions({ month: m, limit: 1000 }).then(r => r.data)));
+            return results.flat();
+        }
+        if (selectedPeriod === 'all') {
+            return (await api.getTransactions({ limit: 1000 })).data;
+        }
+        const params = { limit: 1000 };
+        if (targetMonth) params.month = targetMonth;
+        return (await api.getTransactions(params)).data;
+    }
+
     async function handleSankeySelect(event) {
         const cat = event.detail;
         cancelDrillEditing();
@@ -1246,7 +1630,9 @@
 
         try {
             let allTxns = [];
-            if (selectedPeriod === 'ytd') {
+            if (cat === CREDIT_DRILLDOWN_CATEGORY) {
+                allTxns = (await fetchSankeyPeriodTransactions(targetMonth)).filter(isCreditRefundTransaction);
+            } else if (selectedPeriod === 'ytd') {
                 const year = new Date().getFullYear().toString();
                 const ytdMonthKeys = monthly.filter(m => m.month.startsWith(year)).map(m => m.month);
                 const results = await Promise.all(ytdMonthKeys.map(m => api.getTransactions({ month: m, category: cat, limit: 1000 }).then(r => r.data)));
@@ -1266,6 +1652,9 @@
     }
 
     function getDrillDownTotal(category) {
+        if (category === CREDIT_DRILLDOWN_CATEGORY) {
+            return sankeyDrillTxns.reduce((s, t) => s + Math.max(parseFloat(t.amount || 0), 0), 0);
+        }
         const catEntry = sankeyCategoryList.find(c => c.category === category);
         if (catEntry) return catEntry.total;
         return sankeyDrillTxns.reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
@@ -1427,6 +1816,9 @@
         }
         if (editingExpenseType) {
             cancelEditingExpenseType();
+        }
+        if (expandedUpcomingGroup) {
+            expandedUpcomingGroup = '';
         }
     }
 
@@ -1819,6 +2211,64 @@
         </div>
     {/if}
 
+    {#if dataHealthWarnings.length > 0 || staleManualAccounts.length > 0}
+        <section class="mb-6 fade-in-up" style="animation-delay: 48ms">
+            <div class="card" style="padding: 1rem; border-color: color-mix(in srgb, var(--warning) 36%, var(--card-border)); background: color-mix(in srgb, var(--warning) 7%, var(--card-bg));">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div style="min-width: 220px;">
+                        <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--warning)">Data Confidence</p>
+                        <h3 class="folio-section-title" style="margin:0.15rem 0 0">
+                            {dataHealth?.summary?.warnings || dataHealthWarnings.length} item{(dataHealth?.summary?.warnings || dataHealthWarnings.length) === 1 ? '' : 's'} need attention
+                        </h3>
+                        <p class="text-xs mt-1" style="color: var(--text-muted)">
+                            {dataHealth?.summary?.stale_accounts || staleManualAccounts.length} stale account{(dataHealth?.summary?.stale_accounts || staleManualAccounts.length) === 1 ? '' : 's'} · latest update {dataHealth?.summary?.latest_account_update ? formatDate(dataHealth.summary.latest_account_update) : 'unknown'}
+                        </p>
+                    </div>
+
+                    <div class="grid gap-2" style="flex: 1; min-width: 0;">
+                        {#each dataHealthWarnings as warning}
+                            <div class="flex items-center gap-2 text-xs" style="color: var(--text-primary);">
+                                <span class="material-symbols-outlined text-[15px]" style="color: var(--warning)">error</span>
+                                <span>{warning.message}</span>
+                            </div>
+                        {/each}
+                        {#if manualQuickMessage}
+                            <p class="text-xs" style="color: var(--positive)">{manualQuickMessage}</p>
+                        {/if}
+                    </div>
+
+                    {#if staleManualAccounts.length > 0}
+                        <div class="grid gap-2" style="min-width: min(360px, 100%);">
+                            {#each staleManualAccounts as account}
+                                <div class="flex items-center gap-2" style="background: color-mix(in srgb, var(--card-bg) 82%, transparent); border: 1px solid var(--card-border); border-radius: 0.75rem; padding: 0.5rem;">
+                                    <div class="min-w-0 flex-1">
+                                        <p class="text-[11px] font-semibold truncate" style="color: var(--text-primary)">{account.name}</p>
+                                        <p class="text-[9px]" style="color: var(--text-muted)">updated {account.manual_updated_at ? formatDate(account.manual_updated_at) : 'never'}</p>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        placeholder={Math.abs(Number(account.balance || 0)).toFixed(2)}
+                                        bind:value={manualQuickBalances[account.id]}
+                                        class="text-xs"
+                                        style="width: 104px; border: 1px solid var(--card-border); border-radius: 0.6rem; background: var(--surface-100); color: var(--text-primary); padding: 0.45rem 0.55rem;"
+                                    />
+                                    <button
+                                        class="dashboard-plan-link"
+                                        disabled={manualQuickSavingId === account.id}
+                                        on:click={() => quickUpdateManualAccount(account)}
+                                    >
+                                        {manualQuickSavingId === account.id ? 'Saving...' : 'Update'}
+                                    </button>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        </section>
+    {/if}
+
     <!-- ═══ HEADER ═══ -->
     <div class="dashboard-hero-header mb-8 fade-in">
         <div class="dashboard-hero-meta-row">
@@ -1855,6 +2305,22 @@
         {/if}
     </div>
 
+    {#if reviewQueue && reviewQueue.unreviewed_count > 0 && !reviewToastDismissed}
+        <aside class="dashboard-review-toast fade-in">
+            <div class="dashboard-review-toast-icon">
+                <span class="material-symbols-outlined">fact_check</span>
+            </div>
+            <div class="dashboard-review-toast-copy">
+                <strong>{reviewQueue.unreviewed_count} to review</strong>
+                <span>{(void privacyKey, formatCurrency(reviewQueue.unreviewed_spending || 0))} new spending</span>
+            </div>
+            <a href="/transactions?review=unreviewed">Review</a>
+            <button type="button" on:click={() => reviewToastDismissed = true} aria-label="Dismiss review reminder">
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        </aside>
+    {/if}
+
     <!-- ═══════════════════════════════════════════════════════
          S1: UNIFIED HERO CARD (Net Worth + Accounts + Credit Cards)
          ═══════════════════════════════════════════════════════ -->
@@ -1870,6 +2336,8 @@
                 {#if netWorthTrendData.length > 1}
                     <div class="hero-chart-bg" style="pointer-events: auto; width: 100%; margin-top: auto; z-index: 0;">
                         <svg width="100%" height="100%" viewBox="0 0 600 160" preserveAspectRatio="none" style="overflow: visible"
+                            role="img"
+                            aria-label="Net worth trend"
                             on:mousemove={handleChartHover}
                             on:mouseleave={handleChartLeave}>
                             <defs>
@@ -2094,53 +2562,314 @@
     </section>
 
     <!-- ═══════════════════════════════════════════════════════
-         PLAN SNAPSHOT
+         MONTHLY PLAN ISLAND
          â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
     {#if planSnapshot}
         <section class="mb-6 fade-in-up" style="animation-delay: 88ms">
-            <div class="dashboard-plan-strip card">
-                <div>
-                    <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--text-muted)">Plan Snapshot</p>
-                    <h3 class="folio-section-title" style="margin:0.15rem 0 0">Budgets, goals, and commitments</h3>
-                </div>
-                <div class="dashboard-plan-metrics">
+            <div class="dashboard-monthly-island card" class:dashboard-monthly-island-expanded={!!expandedUpcomingGroup}>
+                <div class="dashboard-monthly-header">
                     <div>
-                        <span>Plan remaining</span>
-                        <strong class:text-negative={planSnapshot.remaining < 0}>{(void privacyKey, formatCurrency(planSnapshot.remaining || 0))}</strong>
+                        <p>{formatMonth(planSnapshot.month)} · This month</p>
+                        <h3 class="folio-section-title">Monthly plan</h3>
                     </div>
-                    <div>
-                        <span>Recurring / mo</span>
-                        <strong>{(void privacyKey, formatCurrency(planSnapshot.recurring_monthly || 0))}</strong>
-                    </div>
-                    <div>
-                        <span>Goals</span>
-                        <strong>{planSnapshot.active_goal_count || 0} active</strong>
-                    </div>
-                    <div>
-                        <span>Goal gap</span>
-                        <strong>{(void privacyKey, formatCurrency(planSnapshot.goal_gap || 0))}</strong>
+                    <div class="dashboard-monthly-header-meta">
+                        <span>{scheduled?.scheduled_count || 0} due in {scheduled?.window_days || 45} days</span>
+                        <a href="/budget" class="dashboard-plan-link">Open plan</a>
                     </div>
                 </div>
-                <a href="/budget" class="dashboard-plan-link">Open plan</a>
+
+                <div class="dashboard-monthly-rule" aria-hidden="true">
+                    <div
+                        class="dashboard-monthly-rule-save"
+                        style="width: {Math.max(2, Math.min(100, ((planSnapshot.save_first_target || 0) / Math.max(planSnapshot.planned_income || 0, 1)) * 100))}%;">
+                    </div>
+                    <div
+                        class="dashboard-monthly-rule-fixed"
+                        style="width: {Math.max(2, Math.min(100, ((planSnapshot.mandatory_projected || planSnapshot.mandatory_spend || 0) / Math.max(planSnapshot.planned_income || 0, 1)) * 100))}%;">
+                    </div>
+                    <div
+                        class="dashboard-monthly-rule-used"
+                        style="width: {Math.max(2, Math.min(100, ((planSnapshot.variable_spend || 0) / Math.max(planSnapshot.planned_income || 0, 1)) * 100))}%;">
+                    </div>
+                    <div
+                        class="dashboard-monthly-rule-open"
+                        style="width: {Math.max(0, Math.min(100, ((planSnapshot.safe_to_spend || 0) / Math.max(planSnapshot.planned_income || 0, 1)) * 100))}%;">
+                    </div>
+                </div>
+                <div class="dashboard-monthly-legend">
+                    <span><i class="dashboard-monthly-legend-save"></i>Save target</span>
+                    <span><i class="dashboard-monthly-legend-fixed"></i>Mandatory</span>
+                    <span><i class="dashboard-monthly-legend-used"></i>Variable used</span>
+                    <span><i class="dashboard-monthly-legend-open"></i>Remaining</span>
+                </div>
+
+                <div class="dashboard-monthly-cells">
+                    <div class="dashboard-monthly-cell">
+                        <span>Save first</span>
+                        <strong>{(void privacyKey, formatCurrency(planSnapshot.save_first_target || 0))}</strong>
+                        <small>{(void privacyKey, formatCurrency(planSnapshot.save_first_actual || 0))} saved · {(void privacyKey, formatCurrency(planSnapshot.save_first_remaining || 0))} left</small>
+                        <div class="dashboard-monthly-progress" aria-hidden="true">
+                            <i style="width: {progressPct(planSnapshot.save_first_actual, planSnapshot.save_first_target)}%; background: var(--positive);"></i>
+                        </div>
+                        <em>{Math.round((planSnapshot.save_first_rate || 0.2) * 100)}% target</em>
+                    </div>
+                    <div class="dashboard-monthly-cell">
+                        <span>Mandatory</span>
+                        <strong>{(void privacyKey, formatCurrency(planSnapshot.mandatory_spend || 0))}</strong>
+                        <small>
+                            spent of {(void privacyKey, formatCurrency(planSnapshot.mandatory_projected || planSnapshot.mandatory_spend || 0))}
+                            {#if (planSnapshot.mandatory_remaining || 0) > 0} · {(void privacyKey, formatCurrency(planSnapshot.mandatory_remaining || 0))} left{/if}
+                        </small>
+                        <div class="dashboard-monthly-progress" aria-hidden="true">
+                            <i style="width: {progressPct(planSnapshot.mandatory_spend, planSnapshot.mandatory_projected || planSnapshot.mandatory_spend)}%; background: var(--monthly-fixed-color, #687487);"></i>
+                        </div>
+                        <em>Fixed spend</em>
+                    </div>
+	                    <div class="dashboard-monthly-cell dashboard-monthly-upcoming">
+	                        <div>
+	                            <span>Upcoming bills</span>
+	                            <strong>{(void privacyKey, formatCurrency(confirmedUpcomingTotal || 0))}</strong>
+	                            <small>
+	                                confirmed in {scheduled?.window_days || 45} days
+	                                {#if inferredUpcomingTotal > 0} · {(void privacyKey, formatCurrency(inferredUpcomingTotal))} inferred{/if}
+	                                {#if needsReviewUpcomingTotal > 0} · {(void privacyKey, formatCurrency(needsReviewUpcomingTotal))} review{/if}
+	                                {#if unscheduledRecurringCount > 0} · {unscheduledRecurringCount} need dates{/if}
+	                            </small>
+	                        </div>
+                        {#if upcomingGroups.length > 0}
+                            <div class="dashboard-upcoming-chips">
+                                {#each displayedUpcomingGroups as group}
+                                    <button
+                                        class="dashboard-upcoming-chip dashboard-upcoming-group-chip"
+                                        class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === group.key}
+                                        type="button"
+                                        on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === group.key ? '' : group.key}
+                                        aria-expanded={expandedUpcomingGroup === group.key}>
+                                        <span class="material-symbols-outlined">
+                                            {upcomingGroupIcon(group.key)}
+                                        </span>
+                                        <div>
+                                            <strong>{group.label}</strong>
+                                            <small>{group.scheduled_count} · {(void privacyKey, formatCurrency(group.amount || 0))}</small>
+                                        </div>
+                                    </button>
+                                {/each}
+                                {#if upcomingGroups.length > 2}
+                                    <button
+                                        class="dashboard-upcoming-chip dashboard-upcoming-group-chip dashboard-upcoming-more-chip"
+                                        class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}
+                                        type="button"
+                                        on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? '' : ALL_UPCOMING_GROUPS_KEY}
+                                        aria-expanded={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}>
+                                        <span class="material-symbols-outlined">{expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? 'unfold_less' : 'unfold_more'}</span>
+                                        <div>
+                                            <strong>+{upcomingGroups.length - 2} more</strong>
+                                            <small>groups</small>
+                                        </div>
+                                    </button>
+                                {/if}
+                            </div>
+                        {/if}
+                        <a class="dashboard-upcoming-add-link" href="/transactions">Add from transactions</a>
+                    </div>
+                    <div class="dashboard-monthly-cell dashboard-monthly-safe-cell">
+                        <span>Safe to spend</span>
+                        <strong class:text-negative={(planSnapshot.safe_to_spend || 0) < 0}>{(void privacyKey, formatCurrency(planSnapshot.safe_to_spend || 0))}</strong>
+                        <small>
+                            {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_spent || 0))} used
+                            {#if (planSnapshot.safe_to_spend_limit || 0) > 0} of {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_limit || 0))}{/if}
+                        </small>
+                        <div class="dashboard-monthly-progress dashboard-monthly-progress-dark" aria-hidden="true">
+                            <i style="width: {progressPct(planSnapshot.safe_to_spend_spent, planSnapshot.safe_to_spend_limit)}%; background: var(--warning);"></i>
+                        </div>
+                        <small>{planSnapshot.income_basis === 'trailing_average' ? 'Avg income basis' : 'Income basis'}</small>
+                        <em>{planSnapshot.active_goal_count || 0} goal{(planSnapshot.active_goal_count || 0) === 1 ? '' : 's'} active</em>
+                    </div>
+                </div>
+
+                {#if expandedUpcomingGroup}
+                    <div class="dashboard-upcoming-details">
+                        <div class="dashboard-upcoming-details-header">
+                            <span>{expandedUpcomingTitle}</span>
+                            <strong>{expandedUpcomingItems.length} item{expandedUpcomingItems.length === 1 ? '' : 's'}</strong>
+                        </div>
+                        {#each expandedUpcomingItems as item}
+                            <div class="dashboard-upcoming-item">
+                                <button
+                                    type="button"
+                                    class="dashboard-upcoming-detail-row"
+                                    class:dashboard-upcoming-detail-candidate={isUpcomingCandidate(item)}
+                                    class:dashboard-upcoming-detail-stale={item.evidence?.stale}
+                                    on:click|stopPropagation={() => toggleUpcomingItem(item)}
+                                    aria-expanded={expandedUpcomingItemKey === upcomingItemKey(item)}>
+                                    <span class="material-symbols-outlined dashboard-upcoming-detail-icon">{upcomingIcon(item)}</span>
+                                    <div class="dashboard-upcoming-detail-copy">
+                                        <strong>{item.merchant}</strong>
+                                        <small>
+                                            {upcomingSourceLabel(item)} · {item.next_date ? formatDate(item.next_date) : 'Needs date'} · {(void privacyKey, formatCurrency(item.amount || 0))}
+                                            {#if item.evidence?.stale} · stale{/if}
+                                        </small>
+                                    </div>
+                                    {#if isUpcomingCandidate(item)}
+                                        <span class="dashboard-upcoming-badge">Inferred</span>
+                                    {/if}
+                                </button>
+                                {#if expandedUpcomingItemKey === upcomingItemKey(item)}
+                                    <div class="dashboard-upcoming-drawer">
+                                        <div class="dashboard-upcoming-evidence">
+                                            <div>
+                                                <span>Source</span>
+                                                <strong>{upcomingSourceLabel(item)}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Seen</span>
+                                                <strong>{item.evidence?.seen_count || item.charge_count || 0} time{(item.evidence?.seen_count || item.charge_count || 0) === 1 ? '' : 's'}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Last paid</span>
+                                                <strong>{item.evidence?.last_paid ? formatDate(item.evidence.last_paid) : 'Unknown'}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Amount range</span>
+                                                <strong>{(void privacyKey, upcomingAmountRange(item))}</strong>
+                                            </div>
+                                        </div>
+
+	                                        {#if Array.isArray(item.recent_transactions) && item.recent_transactions.length > 0}
+	                                            <div class="dashboard-upcoming-recent">
+	                                                {#each item.recent_transactions.slice(0, 3) as tx}
+	                                                    <div>
+	                                                        <span>{formatDate(tx.date)} · {tx.category || 'Uncategorized'}</span>
+	                                                        <strong>{(void privacyKey, formatCurrency(tx.amount || 0))}</strong>
+	                                                    </div>
+	                                                {/each}
+	                                            </div>
+	                                        {/if}
+
+                                        {#if item.evidence?.restart_detected}
+                                            <div class="dashboard-upcoming-review">
+                                                <span class="material-symbols-outlined">restart_alt</span>
+                                                <div>
+                                                    <strong>Restarted after a gap</strong>
+                                                    <small>{upcomingRestartDetail(item)}</small>
+                                                </div>
+                                            </div>
+                                        {/if}
+
+                                        {#if item.amount_review}
+                                            <div class="dashboard-upcoming-review">
+                                                <span class="material-symbols-outlined">trending_{item.amount_review.direction === 'down' ? 'down' : 'up'}</span>
+                                                <div>
+                                                    <strong>{upcomingAmountReviewTitle(item)}</strong>
+                                                    <small>{(void privacyKey, upcomingAmountReviewDetail(item))}</small>
+                                                </div>
+                                            </div>
+                                            <div class="dashboard-upcoming-actions">
+                                                {#if item.amount_review.type === 'same_cycle_adjustment'}
+                                                    <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => startUpcomingEdit(item, item.amount_review.suggested_amount || item.amount || '')}>
+                                                        Review amount
+                                                    </button>
+                                                {:else}
+                                                    <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => confirmUpcomingAmountReview(item)}>
+                                                        Update amount
+                                                    </button>
+                                                {/if}
+                                                <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => dismissUpcomingAmountReview(item)}>
+                                                    Dismiss
+                                                </button>
+                                            </div>
+                                        {/if}
+
+                                        {#if upcomingEditKey === upcomingItemKey(item)}
+                                            <div class="dashboard-upcoming-edit-grid">
+                                                <label>
+                                                    <span>Group</span>
+                                                    <select bind:value={upcomingEditDraft.category} on:click|stopPropagation on:mousedown|stopPropagation>
+                                                        {#each upcomingCategoryOptions as option}
+                                                            <option value={option}>{option}</option>
+                                                        {/each}
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    <span>Cadence</span>
+                                                    <select bind:value={upcomingEditDraft.frequency} on:click|stopPropagation on:mousedown|stopPropagation>
+                                                        {#each upcomingFrequencyOptions as option}
+                                                            <option value={option.key}>{option.label}</option>
+                                                        {/each}
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    <span>Expected day</span>
+                                                    <input type="number" min="1" max="31" bind:value={upcomingEditDraft.expectedDay} on:click|stopPropagation on:mousedown|stopPropagation>
+                                                </label>
+                                                <label>
+                                                    <span>Amount</span>
+                                                    <input type="number" min="0" step="0.01" bind:value={upcomingEditDraft.amount} on:click|stopPropagation on:mousedown|stopPropagation>
+                                                </label>
+                                            </div>
+                                            <div class="dashboard-upcoming-actions">
+                                                <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => saveUpcomingEdit(item)}>Save</button>
+                                                <button type="button" on:click|stopPropagation={() => upcomingEditKey = ''}>Cancel</button>
+                                            </div>
+                                        {:else if isUpcomingCandidate(item)}
+                                            <div class="dashboard-upcoming-actions">
+                                                <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => confirmUpcomingCandidate(item)}>Confirm</button>
+                                                <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => dismissUpcomingCandidate(item)}>Dismiss</button>
+                                            </div>
+                                        {:else if isUpcomingEditable(item)}
+                                            <div class="dashboard-upcoming-actions">
+                                                <button type="button" on:click|stopPropagation={() => startUpcomingEdit(item)}>Edit</button>
+                                                <button type="button" disabled={upcomingActionKey === upcomingItemKey(item)} on:click|stopPropagation={() => deactivateUpcomingItem(item)}>Deactivate</button>
+                                            </div>
+                                        {/if}
+                                    </div>
+                                {/if}
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
             </div>
         </section>
     {/if}
 
-    {#if reviewQueue && reviewQueue.unreviewed_count > 0}
-        <section class="mb-6 fade-in-up" style="animation-delay: 94ms">
-            <div class="dashboard-review-strip card">
-                <div class="dashboard-review-icon">
-                    <span class="material-symbols-outlined">fact_check</span>
-                </div>
+    {#if investmentSummary && investmentSummary.holding_count > 0}
+        <section class="mb-6 fade-in-up" style="animation-delay: 97ms">
+            <div class="dashboard-plan-strip card" style="border-color: color-mix(in srgb, var(--positive) 22%, var(--card-border));">
                 <div>
-                    <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--text-muted)">Review Queue</p>
-                    <h3 class="folio-section-title" style="margin:0.15rem 0 0">{reviewQueue.unreviewed_count} transaction{reviewQueue.unreviewed_count === 1 ? '' : 's'} to review</h3>
+                    <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--positive)">Investments</p>
+                    <h3 class="folio-section-title" style="margin:0.15rem 0 0">{(void privacyKey, formatCurrency(investmentSummary.total_value || 0))}</h3>
+                    <p class="text-xs mt-1" style="color: var(--text-muted)">
+                        {investmentSummary.holding_count} manual holding{investmentSummary.holding_count === 1 ? '' : 's'} · prices are local/manual
+                    </p>
                 </div>
-                <div class="dashboard-review-copy">
-                    <span>New spending</span>
-                    <strong>{(void privacyKey, formatCurrency(reviewQueue.unreviewed_spending || 0))}</strong>
+                <div class="dashboard-plan-metrics">
+                    <div>
+                        <span>Cost basis</span>
+                        <strong>{(void privacyKey, formatCurrency(investmentSummary.total_cost || 0))}</strong>
+                    </div>
+                    <div>
+                        <span>Gain / loss</span>
+                        <strong class:text-positive={(investmentSummary.gain_loss || 0) >= 0} class:text-negative={(investmentSummary.gain_loss || 0) < 0}>
+                            {(void privacyKey, formatCurrency(investmentSummary.gain_loss || 0))}
+                        </strong>
+                    </div>
+                    <div>
+                        <span>Return</span>
+                        <strong>{investmentSummary.gain_loss_percent == null ? '—' : `${investmentSummary.gain_loss_percent.toFixed(1)}%`}</strong>
+                    </div>
                 </div>
-                <a href="/transactions?review=unreviewed" class="dashboard-plan-link">Review now</a>
+                <div class="grid gap-2" style="min-width: min(360px, 100%);">
+                    {#each investmentAllocation as bucket}
+                        <div class="flex items-center gap-2 text-xs">
+                            <span style="width: 78px; color: var(--text-muted)">{bucket.label}</span>
+                            <div style="height: 7px; flex: 1; border-radius: 999px; background: var(--surface-100); overflow: hidden;">
+                                <div style="height: 100%; width: {Math.max(3, Math.min(100, bucket.actual_percent || 0))}%; background: var(--positive);"></div>
+                            </div>
+                            <strong class="font-mono" style="width: 48px; text-align: right; color: var(--text-primary)">{(bucket.actual_percent || 0).toFixed(1)}%</strong>
+                        </div>
+                    {/each}
+                </div>
+                <a href="/control-center?tab=investments" class="dashboard-plan-link">Update holdings</a>
             </div>
         </section>
     {/if}
@@ -2177,8 +2906,7 @@
                     </button>
 
                     {#if monthDropdownOpen}
-                        <!-- svelte-ignore a11y-click-events-have-key-events -->
-                        <div class="month-dropdown-backdrop" on:click={() => monthDropdownOpen = false}></div>
+                        <button type="button" class="month-dropdown-backdrop" aria-label="Close month picker" on:click={() => monthDropdownOpen = false}></button>
                         <div class="month-dropdown-menu" role="listbox">
                             {#each allMonths as m}
                                 <button
@@ -2219,6 +2947,17 @@
                         </span>
                     {/if}
                 </div>
+                {#if (periodSummary.credits_refunds || 0) > 0 || (periodSummary.incoming_transfers || 0) > 0}
+                    <div class="metric-ribbon-item metric-derived">
+                        <span class="metric-ribbon-label" style="display: flex; align-items: center; gap: 4px;">
+                            Credits In
+                            <span class="material-symbols-outlined text-[10px]" style="color: var(--text-muted); opacity: 0.5" title="Refunds, credits, and incoming personal transfers. Counted in Net Flow, separate from recurring income.">info</span>
+                        </span>
+                        <span class="metric-ribbon-value text-positive">
+                            +{formatCurrency((periodSummary.credits_refunds || 0) + (periodSummary.incoming_transfers || 0))}
+                        </span>
+                    </div>
+                {/if}
                 <div class="metric-ribbon-item">
                     <span class="metric-ribbon-label">Spending</span>
                     <span class="metric-ribbon-value text-negative">
@@ -2301,6 +3040,8 @@
         </div>
 
         <div class="sankey-theater"
+             role="region"
+             aria-label="Cash flow Sankey chart"
              class:sankey-loading={sankeyLoading}
              bind:this={sankeyTheaterEl}
              on:mousemove={handleTheaterMouseMove}
@@ -2317,6 +3058,8 @@
                     <SankeyChart
                         income={periodSummary.income}
                         expenses={periodSummary.expenses}
+                        creditsRefunds={periodSummary.credits_refunds || 0}
+                        incomingTransfers={periodSummary.incoming_transfers || 0}
                         savingsTransfer={sankeySavingsTotal}
                         personalTransfer={sankeyPersonalTransferTotal}
                         ccRepaid={periodSummary.cc_repaid || 0}
@@ -2333,16 +3076,16 @@
             {/if}
         </div>
 
-        {#if sankeyCategoryList.length > 0}
+        {#if sankeyPillList.length > 0}
             <div class="sankey-pill-card">
                 <div class="sankey-pill-card-header">
                     <span class="material-symbols-outlined text-[13px]" style="color: var(--text-muted); opacity: 0.7">category</span>
                     <span class="sankey-pill-card-title">Categories</span>
-                    <span class="sankey-pill-card-count">{sankeyCategoryList.slice(0, 12).length} flows</span>
+                    <span class="sankey-pill-card-count">{sankeyPillList.slice(0, 12).length} flows</span>
                 </div>
                 <div bind:this={drillDownSection} class="sankey-pill-grid">
-                    {#each sankeyCategoryList.slice(0, 12) as cat}
-                        {@const catColor = CATEGORY_COLORS[cat.category] || '#627d98'}
+                    {#each sankeyPillList.slice(0, 12) as cat}
+                        {@const catColor = getSankeyFlowColor(cat.category)}
                         {@const isActive = selectedSankeyCategory === cat.category}
                         {@const isDimmed = selectedSankeyCategory && !isActive}
                         <button
@@ -2353,7 +3096,7 @@
                             style="color: {catColor};
                                    background: color-mix(in srgb, {catColor} {isActive ? 'var(--pill-bg-active)' : '6'}%, transparent);
                                    border-color: color-mix(in srgb, {catColor} {isActive ? 'var(--pill-border-active)' : '12'}%, transparent);">
-                            <span class="material-symbols-outlined text-[13px]">{CATEGORY_ICONS[cat.category] || 'label'}</span>
+                            <span class="material-symbols-outlined text-[13px]">{getSankeyFlowIcon(cat.category)}</span>
                             {cat.category}
                             <span class="sankey-cat-pill-value">{formatCompact(cat.total)}</span>
                             {#if cat.isDirectFlow}
@@ -2369,19 +3112,20 @@
         <div style="position: relative; z-index: 50;">
             {#if selectedSankeyCategory && sankeyDrillTxns.length > 0}
                 {@const drillTotal = getDrillDownTotal(selectedSankeyCategory)}
+                {@const isCreditDrilldown = selectedSankeyCategory === CREDIT_DRILLDOWN_CATEGORY}
                 <div class="card mt-3 fade-in" style="padding: 0; overflow: visible">
                     <div class="flex items-center gap-3 px-5 py-2.5" style="border-bottom: 1px solid var(--card-border); background: var(--surface-100)">
                         <div class="w-6 h-6 rounded-lg flex items-center justify-center"
-                            style="background: color-mix(in srgb, {CATEGORY_COLORS[selectedSankeyCategory] || '#627d98'} 15%, transparent)">
-                            <span class="material-symbols-outlined text-[14px]" style="color: {CATEGORY_COLORS[selectedSankeyCategory] || '#627d98'}">
-                                {CATEGORY_ICONS[selectedSankeyCategory] || 'label'}
+                            style="background: color-mix(in srgb, {getSankeyFlowColor(selectedSankeyCategory)} 15%, transparent)">
+                            <span class="material-symbols-outlined text-[14px]" style="color: {getSankeyFlowColor(selectedSankeyCategory)}">
+                                {getSankeyFlowIcon(selectedSankeyCategory)}
                             </span>
                         </div>
                         <div>
                             <p class="text-[13px] font-semibold" style="color: var(--text-primary)">{selectedSankeyCategory}</p>
                             <p class="text-[10px]" style="color: var(--text-muted)">{sankeyDrillTxns.length} transactions · by amount</p>
                         </div>
-                        <p class="ml-auto folio-amount" style="color: var(--negative)">{formatCurrency(drillTotal)}</p>
+                        <p class="ml-auto folio-amount" style="color: {isCreditDrilldown ? 'var(--positive)' : 'var(--negative)'}">{isCreditDrilldown ? '+' : ''}{formatCurrency(drillTotal)}</p>
                     </div>
                     {#if drillUpdateFeedback}
                         <div class="drill-feedback-toast fade-in">
@@ -2420,7 +3164,8 @@
                                 {/if}
 
                                 <!-- Category re-tag pill -->
-                                <div class="relative tx-cat-pill-wrapper drill-cat-pill-wrapper" on:click|stopPropagation>
+                                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                <div class="relative tx-cat-pill-wrapper drill-cat-pill-wrapper" role="presentation" on:click|stopPropagation>
                                     <button
                                         class="tx-cat-pill drill-cat-pill"
                                         class:tx-cat-pill-editing={drillCatDropdownOpenForTx === tx.original_id}
@@ -2444,7 +3189,8 @@
                                     </button>
 
                                     {#if drillCatDropdownOpenForTx === tx.original_id}
-                                        <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" on:click|stopPropagation>
+                                        <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                        <div class="txn-filter-dropdown tx-cat-dropdown drill-cat-dropdown" role="presentation" on:click|stopPropagation>
                                             <div class="tx-cat-apply-toggle">
                                                 <div class="tx-cat-apply-toggle-copy">
                                                     <span class="tx-cat-apply-toggle-label">Apply</span>
@@ -2572,65 +3318,104 @@
          âââââââââââââââââââââââââââââââââââââââââââââââââââââââ -->
     {#if fixedVsVariable && fixedVsVariable.grandTotal > 0}
         <section class="mb-10 fade-in-up" style="animation-delay: 155ms">
-            <div class="flex items-center gap-2 mb-4">
-                <h3 class="folio-section-title">Fixed vs Variable</h3>
-            </div>
-
-            <div class="card analytics-fv-card">
+            <div class="card analytics-fv-card analytics-fv-stage">
                 <div class="analytics-fv-card-header">
+                    <div>
+                        <p>{getMonthForPeriod(selectedPeriod) ? formatMonth(getMonthForPeriod(selectedPeriod)) : 'Selected period'} · Spending split</p>
+                        <h3 class="folio-section-title">Fixed vs variable</h3>
+                    </div>
                     <span class="analytics-fv-reclassify-hint">
                         <span class="material-symbols-outlined">swap_horiz</span>
                         Click any category to reclassify
                     </span>
                 </div>
 
-                <!-- Stacked bar -->
-                <div class="flex items-center gap-4 mb-4">
-                    <div class="flex-1">
-                        <div class="flex h-3 rounded-full overflow-hidden" style="background: var(--surface-200)">
-                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.fixedPct}%; background: var(--accent); border-radius: 8px 0 0 8px;"></div>
-                            <div class="h-full transition-all duration-700" style="width: {fixedVsVariable.variablePct}%; background: var(--warning);"></div>
-                        </div>
+                <div class="analytics-fv-totals">
+                    <div>
+                        <span><i class="analytics-fv-dot analytics-fv-dot-fixed"></i>Fixed</span>
+                        <strong>{formatCurrency(fixedVsVariable.fixedTotal)}</strong>
+                        <small>
+                            {formatPercent(fixedVsVariable.fixedPct)} of spending ·
+                            {fixedVsVariable.fixedDeltaPct > 0 ? 'up' : fixedVsVariable.fixedDeltaPct < 0 ? 'down' : 'flat'}
+                            {formatPercent(Math.abs(fixedVsVariable.fixedDeltaPct))} vs avg
+                        </small>
                     </div>
+                    <div>
+                        <span><i class="analytics-fv-dot analytics-fv-dot-variable"></i>Variable</span>
+                        <strong>{formatCurrency(fixedVsVariable.variableTotal)}</strong>
+                        <small>
+                            {formatPercent(fixedVsVariable.variablePct)} of spending ·
+                            {fixedVsVariable.variableDeltaPct > 0 ? 'up' : fixedVsVariable.variableDeltaPct < 0 ? 'down' : 'flat'}
+                            {formatPercent(Math.abs(fixedVsVariable.variableDeltaPct))} vs avg
+                        </small>
+                    </div>
+                </div>
+
+                <div class="analytics-fv-stacked-bar" aria-label="Fixed and variable spending split">
+                    {#each fixedVsVariable.fixedCats as cat}
+                        <button
+                            type="button"
+                            class="analytics-fv-bar-segment analytics-fv-bar-fixed"
+                            style="width: {Math.max(4, (cat.total / fixedVsVariable.grandTotal) * 100)}%;"
+                            title="{cat.category} · {formatCurrency(cat.total)}"
+                            on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                            <span>{cat.category}</span>
+                            <small>{formatCurrency(cat.total)}</small>
+                        </button>
+                    {/each}
+                    {#each fixedVsVariable.variableCats as cat}
+                        <button
+                            type="button"
+                            class="analytics-fv-bar-segment analytics-fv-bar-variable"
+                            style="width: {Math.max(4, (cat.total / fixedVsVariable.grandTotal) * 100)}%;"
+                            title="{cat.category} · {formatCurrency(cat.total)}"
+                            on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                            <span>{cat.category}</span>
+                            <small>{formatCurrency(cat.total)}</small>
+                        </button>
+                    {/each}
+                </div>
+                <div class="analytics-fv-bar-foot">
+                    <span>Fixed · {formatPercent(fixedVsVariable.fixedPct)}</span>
+                    <span>Flexible split at {formatCurrency(fixedVsVariable.fixedTotal)}</span>
+                    <span>Variable · {formatPercent(fixedVsVariable.variablePct)}</span>
                 </div>
 
                 <div class="analytics-fv-split">
                     <!-- Fixed side -->
                     <div class="analytics-fv-column">
-                        <div class="flex items-center gap-2 mb-3">
-                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--accent)"></span>
-                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Fixed (Recurring)</span>
-                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--accent)">
-                                {formatCurrency(fixedVsVariable.fixedTotal)}
-                            </span>
-                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.fixedPct)}</span>
+                        <div class="analytics-fv-column-header">
+                            <span>Fixed · recurring</span>
+                            <strong>{formatCurrency(fixedVsVariable.fixedTotal)} · {formatPercent(fixedVsVariable.fixedPct)}</strong>
                         </div>
-                        {#each fixedVsVariable.fixedCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row">
-                                {#if editingExpenseType === cat.category}
-                                    <div class="analytics-fv-toggle-controls">
-                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
-                                        <div class="analytics-fv-toggle-btns">
-                                            <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
-                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Fixed</button>
-                                            <button type="button" class="analytics-fv-toggle-btn"
-                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'variable')}>Variable</button>
+                        <div class="analytics-fv-row-scroll">
+                            {#each fixedVsVariable.fixedCats as cat}
+                                <div class="analytics-fv-row">
+                                    {#if editingExpenseType === cat.category}
+                                        <div class="analytics-fv-toggle-controls">
+                                            <span class="analytics-fv-edit-label">{cat.category}</span>
+                                            <div class="analytics-fv-toggle-btns">
+                                                <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                                    on:click|stopPropagation={() => cancelEditingExpenseType()}>Fixed</button>
+                                                <button type="button" class="analytics-fv-toggle-btn"
+                                                    on:click|stopPropagation={() => toggleExpenseType(cat.category, 'variable')}>Variable</button>
+                                            </div>
                                         </div>
-                                    </div>
-                                {:else}
-                                    <button
-                                        type="button"
-                                        class="analytics-fv-cat-btn"
-                                        aria-label="Reclassify {cat.category} as variable"
-                                        title="Click to reclassify"
-                                        on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
-                                        <span class="analytics-fv-row-action">Move to Variable</span>
-                                    </button>
-                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
-                                {/if}
-                            </div>
-                        {/each}
+                                    {:else}
+                                        <button
+                                            type="button"
+                                            class="analytics-fv-cat-btn"
+                                            aria-label="Reclassify {cat.category} as variable"
+                                            title="Click to reclassify"
+                                            on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                            <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
+                                            <span class="analytics-fv-row-action">Move to Variable</span>
+                                        </button>
+                                        <span class="analytics-fv-row-amount">{formatCurrency(cat.total)}</span>
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
                         {#if fixedVsVariable.fixedCats.length === 0}
                             <p class="text-[10px]" style="color: var(--text-muted)">No fixed expenses detected</p>
                         {/if}
@@ -2641,70 +3426,46 @@
 
                     <!-- Variable side -->
                     <div class="analytics-fv-column">
-                        <div class="flex items-center gap-2 mb-3">
-                            <span class="w-2.5 h-2.5 rounded-full" style="background: var(--warning)"></span>
-                            <span class="text-[10px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">Variable (Discretionary)</span>
-                            <span class="ml-auto text-[12px] font-bold font-mono" style="color: var(--warning)">
-                                {formatCurrency(fixedVsVariable.variableTotal)}
-                            </span>
-                            <span class="text-[10px] font-mono" style="color: var(--text-muted)">{formatPercent(fixedVsVariable.variablePct)}</span>
+                        <div class="analytics-fv-column-header">
+                            <span>Variable · discretionary</span>
+                            <strong>{formatCurrency(fixedVsVariable.variableTotal)} · {formatPercent(fixedVsVariable.variablePct)}</strong>
                         </div>
-                        {#each fixedVsVariable.variableCats.slice(0, 5) as cat}
-                            <div class="analytics-fv-row">
-                                {#if editingExpenseType === cat.category}
-                                    <div class="analytics-fv-toggle-controls">
-                                        <span class="text-[11px] font-medium truncate" style="color: var(--text-primary)">{cat.category}</span>
-                                        <div class="analytics-fv-toggle-btns">
-                                            <button type="button" class="analytics-fv-toggle-btn"
-                                                on:click|stopPropagation={() => toggleExpenseType(cat.category, 'fixed')}>Fixed</button>
-                                            <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
-                                                on:click|stopPropagation={() => cancelEditingExpenseType()}>Variable</button>
+                        <div class="analytics-fv-row-scroll">
+                            {#each fixedVsVariable.variableCats as cat}
+                                <div class="analytics-fv-row">
+                                    {#if editingExpenseType === cat.category}
+                                        <div class="analytics-fv-toggle-controls">
+                                            <span class="analytics-fv-edit-label">{cat.category}</span>
+                                            <div class="analytics-fv-toggle-btns">
+                                                <button type="button" class="analytics-fv-toggle-btn"
+                                                    on:click|stopPropagation={() => toggleExpenseType(cat.category, 'fixed')}>Fixed</button>
+                                                <button type="button" class="analytics-fv-toggle-btn analytics-fv-toggle-active"
+                                                    on:click|stopPropagation={() => cancelEditingExpenseType()}>Variable</button>
+                                            </div>
                                         </div>
-                                    </div>
-                                {:else}
-                                    <button
-                                        type="button"
-                                        class="analytics-fv-cat-btn"
-                                        aria-label="Reclassify {cat.category} as fixed"
-                                        title="Click to reclassify"
-                                        on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
-                                        <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
-                                        <span class="analytics-fv-row-action">Move to Fixed</span>
-                                    </button>
-                                    <span class="text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(cat.total)}</span>
-                                {/if}
-                            </div>
-                        {/each}
-                    </div>
-                </div>
-
-                <!-- Temporal context -->
-                <div class="flex gap-4 mt-3 mb-2 px-1">
-                    <div class="flex items-center gap-2 flex-1">
-                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--accent)"></span>
-                        <span class="text-[11px]" style="color: var(--text-secondary)">
-                            Fixed: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.fixedTotal)}</span>
-                        </span>
-                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.fixedDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                            {fixedVsVariable.fixedDeltaPct > 0 ? '↑' : fixedVsVariable.fixedDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.fixedDeltaPct))} vs avg
-                        </span>
-                    </div>
-                    <div class="flex items-center gap-2 flex-1">
-                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--warning)"></span>
-                        <span class="text-[11px]" style="color: var(--text-secondary)">
-                            Variable: <span class="font-bold font-mono" style="color: var(--text-primary)">{formatCurrency(fixedVsVariable.variableTotal)}</span>
-                        </span>
-                        <span class="text-[10px] font-mono font-semibold" style="color: {fixedVsVariable.variableDeltaPct <= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                            {fixedVsVariable.variableDeltaPct > 0 ? '↑' : fixedVsVariable.variableDeltaPct < 0 ? '↓' : '→'}{formatPercent(Math.abs(fixedVsVariable.variableDeltaPct))} vs avg
-                        </span>
+                                    {:else}
+                                        <button
+                                            type="button"
+                                            class="analytics-fv-cat-btn"
+                                            aria-label="Reclassify {cat.category} as fixed"
+                                            title="Click to reclassify"
+                                            on:click|stopPropagation={() => startEditingExpenseType(cat.category)}>
+                                            <span class="analytics-fv-cat-label text-[11px]">{cat.category}</span>
+                                            <span class="analytics-fv-row-action">Move to Fixed</span>
+                                        </button>
+                                        <span class="analytics-fv-row-amount">{formatCurrency(cat.total)}</span>
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
                     </div>
                 </div>
 
                 <!-- Insight footer -->
                 <div class="analytics-fv-insight">
-                    <span class="material-symbols-outlined text-[14px]" style="color: var(--accent)">lightbulb</span>
-                    <p class="text-[11px]" style="color: var(--text-secondary)">
-                        Your fixed costs are <span class="font-bold" style="color: var(--text-primary)">{formatPercent(fixedVsVariable.fixedPct)}</span> of spending.
+                    <span class="material-symbols-outlined text-[14px]">lightbulb</span>
+                    <p>
+                        Your fixed costs are <strong>{formatPercent(fixedVsVariable.fixedPct)} of spending</strong>.
                         {#if fixedVsVariable.variablePct > 50}
                             You have significant room to optimize discretionary spend.
                         {:else}

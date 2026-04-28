@@ -69,7 +69,7 @@
 
 .tx-story-metrics {
     display: grid;
-    grid-template-columns: minmax(220px, 1.3fr) repeat(5, minmax(118px, 1fr));
+    grid-template-columns: minmax(220px, 1.25fr) repeat(auto-fit, minmax(118px, 1fr));
     gap: 1.25rem;
 }
 
@@ -247,14 +247,14 @@
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    min-height: 2.35rem;
-    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--card-border));
-    border-radius: 10px;
-    padding: 0 0.78rem;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    color: var(--accent);
-    font-size: 0.74rem;
-    font-weight: 800;
+    min-height: 2.15rem;
+    border: 1px solid color-mix(in srgb, var(--card-border) 82%, transparent);
+    border-radius: 9px;
+    padding: 0 0.62rem;
+    background: color-mix(in srgb, var(--surface-100) 72%, transparent);
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-weight: 750;
 }
 
 .tx-export-btn .material-symbols-outlined {
@@ -262,6 +262,29 @@
 }
 
 .tx-export-btn:disabled {
+    opacity: 0.6;
+}
+
+.tx-bulk-review-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 2.35rem;
+    border: 1px solid color-mix(in srgb, var(--positive) 40%, var(--card-border));
+    border-radius: 10px;
+    padding: 0 0.9rem;
+    background: var(--positive);
+    color: white;
+    font-size: 0.74rem;
+    font-weight: 800;
+    box-shadow: 0 8px 18px color-mix(in srgb, var(--positive) 18%, transparent);
+}
+
+.tx-bulk-review-btn .material-symbols-outlined {
+    font-size: 16px;
+}
+
+.tx-bulk-review-btn:disabled {
     opacity: 0.6;
 }
 

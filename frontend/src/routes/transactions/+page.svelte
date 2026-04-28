@@ -31,6 +31,7 @@
     let savingMetadataFor = null;
     let savingSplitsFor = null;
     let exportingCsv = false;
+    let bulkReviewing = false;
     let months = [];
     let accountNames = [];
 
@@ -131,6 +132,7 @@
     let subscriptionPromptMerchant = '';
     let subscriptionPromptAmount = 0;
     let subscriptionPromptFrequency = '';
+    let subscriptionPromptCategory = 'Subscriptions';
     let subscriptionDeclareLoading = false;
 
     const frequencyOptions = [
@@ -144,8 +146,8 @@
         subscriptionDeclareLoading = true;
         try {
             const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
-            await api.declareSubscription(subscriptionPromptMerchant, subscriptionPromptAmount, frequency, profile);
-            updateFeedback = `✓ Tracking ${subscriptionPromptMerchant} as ${frequency} subscription`;
+            await api.declareSubscription(subscriptionPromptMerchant, subscriptionPromptAmount, frequency, profile, subscriptionPromptCategory);
+            updateFeedback = `✓ Tracking ${subscriptionPromptMerchant} as ${frequency} ${subscriptionPromptCategory.toLowerCase()}`;
             recentlyUpdatedTxId = subscriptionPromptTxId;
             setTimeout(() => {
                 if (recentlyUpdatedTxId === subscriptionPromptTxId) {
@@ -168,6 +170,7 @@
         subscriptionPromptMerchant = '';
         subscriptionPromptAmount = 0;
         subscriptionPromptFrequency = '';
+        subscriptionPromptCategory = 'Subscriptions';
     }
 
     function ensureMetadataDraft(tx) {
@@ -640,7 +643,17 @@
     $: txExternalTransfers = summaryTxns
         .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0)
         .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
-    $: txNetFlow = totalIncome - totalSpending - txExternalTransfers;
+    $: txCreditsRefunds = summaryTxns
+        .filter(t => {
+            const amount = parseFloat(t.amount);
+            if (amount <= 0) return false;
+            if (t.category === 'Income') return false;
+            if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
+            if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
+            return true;
+        })
+        .reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: txNetFlow = totalIncome + txCreditsRefunds - totalSpending - txExternalTransfers;
     $: largestSpendTx = summaryTxns
         .filter(t => parseFloat(t.amount) < 0)
         .filter(t => !NON_SPENDING_CATEGORIES.has(t.category))
@@ -684,6 +697,7 @@
                 subscriptionPromptTxId = txId;
                 subscriptionPromptMerchant = result.merchant || tx?.description || '';
                 subscriptionPromptAmount = result.amount || Math.abs(parseFloat(tx?.amount || 0));
+                subscriptionPromptCategory = result.category || newCategory || 'Subscriptions';
             }
 
             // Show feedback — one-off gets a distinct message
@@ -819,6 +833,31 @@
             updateFeedback = 'Failed to export transactions';
         } finally {
             exportingCsv = false;
+        }
+    }
+
+    async function markFilteredReviewed() {
+        if (bulkReviewing || totalCount <= 0) return;
+        const label = reviewFilter === 'unreviewed' ? 'unreviewed' : 'filtered';
+        const confirmed = window.confirm(`Mark all ${totalCount.toLocaleString()} ${label} transaction${totalCount === 1 ? '' : 's'} as reviewed?`);
+        if (!confirmed) return;
+
+        bulkReviewing = true;
+        try {
+            const params = buildSummaryParams(0);
+            delete params.limit;
+            delete params.offset;
+            if (reviewFilter === 'all') params.reviewed = false;
+            const result = await api.bulkReviewTransactions(params, true);
+            invalidateCache();
+            await Promise.all([fetchTransactions(), fetchSummaryTransactions()]);
+            updateFeedback = `Marked ${(result.updated_count || 0).toLocaleString()} transaction${result.updated_count === 1 ? '' : 's'} reviewed`;
+            setTimeout(() => { updateFeedback = ''; }, 3000);
+        } catch (e) {
+            console.error('Failed to bulk review transactions:', e);
+            updateFeedback = 'Failed to mark transactions reviewed';
+        } finally {
+            bulkReviewing = false;
         }
     }
 
@@ -1123,6 +1162,13 @@
             <strong class="tx-story-positive">{formatCurrency(totalIncome, 0)}</strong>
             <small>Actual income only</small>
         </div>
+        {#if txCreditsRefunds > 0}
+            <div class="tx-story-metric">
+                <span class="tx-story-label">Credits & refunds</span>
+                <strong class="tx-story-positive">+{formatCurrency(txCreditsRefunds, 0)}</strong>
+                <small>Refunds and credits counted in flow</small>
+            </div>
+        {/if}
         <div class="tx-story-metric">
             <span class="tx-story-label">Ext. transfers</span>
             <strong class="tx-story-warning">{formatCurrency(txExternalTransfers, 0)}</strong>
@@ -1138,7 +1184,7 @@
             <strong class:tx-story-positive={txNetFlow >= 0} class:tx-story-negative={txNetFlow < 0}>
                 {txNetFlow >= 0 ? '+' : ''}{formatCurrency(txNetFlow, 0)}
             </strong>
-            <small>Income minus spending and external transfers</small>
+            <small>Income plus credits minus spending and external transfers</small>
         </div>
         <div class="tx-story-metric">
             <span class="tx-story-label">Largest spend</span>
@@ -1195,7 +1241,7 @@
             </button>
 
             {#if monthDropdownOpen}
-                <div class="month-dropdown-backdrop" on:click={() => monthDropdownOpen = false}></div>
+                <button type="button" class="month-dropdown-backdrop" aria-label="Close month picker" on:click={() => monthDropdownOpen = false}></button>
                 <div class="month-dropdown-menu" role="listbox" style="bottom: auto; top: calc(100% + 6px);">
                     {#each months as m}
                         <button
@@ -1228,7 +1274,8 @@
                 </span>
             </button>
             {#if categoryPickerOpen}
-                <div class="txn-filter-dropdown" on:click|stopPropagation>
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <div class="txn-filter-dropdown" role="presentation" on:click|stopPropagation>
                     <button
                         class="txn-filter-option"
                         class:active={filterCategory === ''}
@@ -1276,7 +1323,8 @@
                 </span>
             </button>
             {#if accountPickerOpen}
-                <div class="txn-filter-dropdown" on:click|stopPropagation>
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <div class="txn-filter-dropdown" role="presentation" on:click|stopPropagation>
                     <button
                         class="txn-filter-option"
                         class:active={filterAccount === ''}
@@ -1307,9 +1355,16 @@
             <button class:active={reviewFilter === 'reviewed'} on:click={() => reviewFilter = 'reviewed'}>Reviewed</button>
         </div>
 
-        <button class="tx-export-btn" disabled={exportingCsv} on:click={exportCurrentTransactions}>
+        {#if reviewFilter !== 'reviewed' && totalCount > 0}
+            <button class="tx-bulk-review-btn" disabled={bulkReviewing} on:click={markFilteredReviewed}>
+                <span class="material-symbols-outlined">done_all</span>
+                {bulkReviewing ? 'Marking...' : `Mark ${reviewFilter === 'unreviewed' ? 'all' : 'unreviewed'} reviewed`}
+            </button>
+        {/if}
+
+        <button class="tx-export-btn" disabled={exportingCsv} on:click={exportCurrentTransactions} title="Export the current filtered transaction list as CSV">
             <span class="material-symbols-outlined">download</span>
-            {exportingCsv ? 'Exporting...' : 'Export CSV'}
+            {exportingCsv ? 'Exporting...' : 'CSV'}
         </button>
 
         {#if hasActiveFilters}
@@ -1474,7 +1529,8 @@
                                 </button>
 
                                 {#if catDropdownOpenForTx === tx.original_id}
-                                    <div class="txn-filter-dropdown tx-cat-dropdown" on:click|stopPropagation>
+                                    <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                    <div class="txn-filter-dropdown tx-cat-dropdown" role="presentation" on:click|stopPropagation>
                                         <div class="tx-cat-apply-toggle">
                                             <div class="tx-cat-apply-toggle-copy">
                                                 <span class="tx-cat-apply-toggle-label">Apply</span>
@@ -1742,7 +1798,8 @@
 
                     <!-- Subscription Declaration Prompt -->
                     {#if subscriptionPromptTxId === tx.original_id}
-                        <div class="tx-subscription-prompt fade-in" on:click|stopPropagation
+                        <!-- svelte-ignore a11y-click-events-have-key-events -->
+                        <div class="tx-subscription-prompt fade-in" role="presentation" on:click|stopPropagation
                             style="border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent)">
                             <div class="tx-subscription-prompt-inner">
                                 <div class="flex items-center gap-2.5 flex-1 min-w-0">
@@ -1755,7 +1812,7 @@
                                             Track <span style="color: var(--accent)">{subscriptionPromptMerchant}</span> as recurring?
                                         </p>
                                         <p class="text-[10px]" style="color: var(--text-muted)">
-                                            {formatCurrency(subscriptionPromptAmount)} · Select frequency
+                                            {subscriptionPromptCategory} · {formatCurrency(subscriptionPromptAmount)} · Select frequency
                                         </p>
                                     </div>
                                 </div>

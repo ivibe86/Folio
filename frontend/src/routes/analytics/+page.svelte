@@ -23,6 +23,9 @@
     let selectedMonth = '';
     let monthPickerOpen = false;
     let pulseExpanded = false;
+    let explainingMonth = false;
+    let monthExplanation = null;
+    let explanationError = '';
     
     // iOS-style period toggle
     const analyticsPeriods = ['This Month', 'Last Month', 'Custom'];
@@ -43,17 +46,46 @@
     // Recurring / Subscriptions
     let recurringData = null;
     let recurringLoading = true;
+    let visibleRecurringItems = [];
     let activeRecurring = [];
+    let candidateRecurring = [];
     let inactiveRecurring = [];
     let cancelledRecurring = [];
-    // Split recurring items into active/inactive/cancelled whenever recurringData changes
+    const FIXED_OBLIGATION_RECURRING_CATEGORIES = new Set([
+        'Insurance', 'Auto Insurance', 'Home Insurance', 'Health Insurance', 'Renters Insurance', 'Life Insurance',
+        'Housing', 'Rent Payment', 'Mortgage', 'Utilities', 'Electric', 'Gas', 'Water',
+        'Internet', 'Wireless', 'Cable', 'Debt', 'Loan', 'Taxes', 'Healthcare', 'Therapy', 'Pharmacy'
+    ]);
+
+    function isSubscriptionService(item) {
+        const category = (item?.category || '').trim();
+        const text = `${item?.merchant || ''} ${item?.clean_name || ''} ${category}`.toLowerCase();
+        if (FIXED_OBLIGATION_RECURRING_CATEGORIES.has(category)) return false;
+        if (/\b(geico|progressive|state farm|allstate|anthem|kaiser|insurance)\b/.test(text)) return false;
+        return true;
+    }
+
+    // Split recurring service items into active/inactive/cancelled whenever recurringData changes.
+    // The backend also feeds Upcoming Bills, so fixed obligations are filtered at this UI boundary.
     $: {
         if (recurringData && recurringData.items) {
-            activeRecurring = recurringData.items.filter(i => i.status === 'active' && !i.cancelled);
-            cancelledRecurring = recurringData.items.filter(i => i.cancelled);
-            inactiveRecurring = recurringData.items.filter(i => i.status === 'inactive' && !i.cancelled);
+            visibleRecurringItems = recurringData.items.filter(isSubscriptionService);
+            candidateRecurring = visibleRecurringItems.filter(i => (i.state === 'candidate' || i.status === 'candidate') && !i.cancelled);
+            activeRecurring = visibleRecurringItems.filter(i =>
+                (i.state === 'confirmed' || i.state === 'active' || i.status === 'active')
+                && i.state !== 'candidate'
+                && i.status !== 'candidate'
+                && !i.cancelled
+            );
+            cancelledRecurring = visibleRecurringItems.filter(i => i.cancelled);
+            inactiveRecurring = visibleRecurringItems.filter(i =>
+                (i.status === 'inactive' || i.state === 'inactive' || i.state === 'stale')
+                && !i.cancelled
+            );
         } else {
+            visibleRecurringItems = [];
             activeRecurring = [];
+            candidateRecurring = [];
             inactiveRecurring = [];
             cancelledRecurring = [];
         }
@@ -88,8 +120,10 @@
 
     // Categories that are not real spending in the accrual model
     const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const merchantPalette = ['#d96d4a', '#1f2937', '#8bbfd9', '#7f9fd6', '#9a7de2', '#ef8fc3', '#f3a36d', '#6bd0a4'];
 
     // Inactive subscriptions dropdown state (closed by default)
+    let candidateOpen = false;
     let inactiveOpen = false;
 
     // Cancelled subscriptions dropdown state (closed by default)
@@ -351,10 +385,12 @@
 
         const income = currentMonthSummary.income;
         const expenses = currentMonthSummary.expenses;
+        const creditsRefunds = currentMonthSummary.credits_refunds ?? currentMonthSummary.refunds ?? 0;
+        const incomingTransfers = currentMonthSummary.incoming_transfers || 0;
         // Accrual-basis: external transfers are a real outflow (Zelle/Venmo to others)
         const externalTransfers = currentMonthSummary.external_transfers || 0;
 
-        // The waterfall shows: Income → Expense categories → External Transfers → Net
+        // The waterfall shows: Income → Credits → Incoming Transfers → Expenses → Outgoing Transfers → Net
         // Internal/household transfers (Savings Transfer, Personal Transfer, CC Payment)
         // are excluded — they're just money moving between your own accounts.
 
@@ -383,11 +419,41 @@
             icon: 'trending_up'
         });
 
+        if (creditsRefunds > 0) {
+            const before = running;
+            running += creditsRefunds;
+            items.push({
+                label: 'Credits',
+                value: creditsRefunds,
+                runningBefore: before,
+                runningAfter: running,
+                type: 'credit',
+                color: 'var(--positive)',
+                icon: 'undo',
+                count: monthTransactions.filter(t => parseFloat(t.amount) > 0 && !NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income').length
+            });
+        }
+
+        if (incomingTransfers > 0) {
+            const before = running;
+            running += incomingTransfers;
+            items.push({
+                label: 'Incoming',
+                value: incomingTransfers,
+                runningBefore: before,
+                runningAfter: running,
+                type: 'incoming_transfer',
+                color: 'var(--flow-transfer)',
+                icon: 'call_received',
+                count: monthTransactions.filter(t => ['transfer_external', 'transfer_household'].includes(t.expense_type) && parseFloat(t.amount) > 0).length
+            });
+        }
+
         // Expense categories sorted by total descending
         // Exclude transfer categories — they're not real spending in the accrual model
         const expenseCats = [...monthCategories]
             .filter(c => c.category !== 'Savings Transfer' && c.category !== 'Personal Transfer')
-            .sort((a, b) => b.total - a.total);
+            .sort((a, b) => (b.gross ?? b.total) - (a.gross ?? a.total));
 
         // Get transaction counts per category
         const txnCounts = {};
@@ -398,11 +464,13 @@
         });
 
         for (const cat of expenseCats) {
+            const categorySpend = cat.gross ?? cat.total;
+            if (categorySpend <= 0) continue;
             const before = running;
-            running -= cat.total;
+            running -= categorySpend;
             items.push({
                 label: cat.category,
-                value: -cat.total,
+                value: -categorySpend,
                 runningBefore: before,
                 runningAfter: running,
                 type: 'expense',
@@ -429,7 +497,7 @@
             });
         }
 
-        // END bar (anchor) — Net = Income - Spending - External Transfers
+        // END bar (anchor) — Net = Income + Credits + Incoming Transfers - Spending - External Transfers
         items.push({
             label: 'Net',
             value: running,
@@ -439,7 +507,7 @@
             color: running >= 0 ? 'var(--positive)' : 'var(--negative)'
         });
 
-        return { items, maxValue: income, minValue: Math.min(running, 0), netResult: running };
+        return { items, maxValue: Math.max(income + creditsRefunds + incomingTransfers, income), minValue: Math.min(running, 0), netResult: running };
     })();
 
     /* Waterfall SVG geometry */
@@ -485,12 +553,12 @@
                 const bottom = Math.min(item.runningAfter, 0);
                 y = yScale(top);
                 h = Math.max(yScale(bottom) - y, 3);
-            } else if (item.type === 'income') {
+            } else if (item.value >= 0) {
                 // Rises from runningBefore to runningAfter
                 y = yScale(item.runningAfter);
                 h = Math.max(yScale(item.runningBefore) - y, 3);
             } else {
-                // Expense: drops from runningBefore to runningAfter
+                // Outflow: drops from runningBefore to runningAfter
                 y = yScale(item.runningBefore);
                 h = Math.max(yScale(item.runningAfter) - y, 3);
             }
@@ -552,6 +620,10 @@
         waterfallTooltip = { ...waterfallTooltip, show: false };
     }
 
+    function isWaterfallBarClickable(bar) {
+        return !['anchor', 'result', 'income'].includes(bar.type);
+    }
+
     function handleWaterfallClick(bar) {
         if (bar.type === 'anchor' || bar.type === 'result' || bar.type === 'income') return;
         if (bar.type === 'external_transfer') {
@@ -562,8 +634,30 @@
                 .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
             return;
         }
+        if (bar.type === 'incoming_transfer') {
+            selectedCategory = 'Incoming Transfers';
+            categoryTransactions = monthTransactions
+                .filter(t => ['transfer_external', 'transfer_household'].includes(t.expense_type) && parseFloat(t.amount) > 0)
+                .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
+            return;
+        }
+        if (bar.type === 'credit') {
+            selectedCategory = 'Credits & Refunds';
+            categoryTransactions = monthTransactions
+                .filter(t => parseFloat(t.amount) > 0 && !NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income')
+                .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
+            return;
+        }
         let catName = bar.label;
         drillIntoCategory(catName);
+    }
+
+    function handleWaterfallKeydown(event, bar) {
+        if (!isWaterfallBarClickable(bar)) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleWaterfallClick(bar);
+        }
     }
 
     /* ═══════════════════════════════════════
@@ -571,7 +665,7 @@
        ═══════════════════════════════════════ */
     $: savingsRateTrend = (() => {
         if (monthly.length < 2) return null;
-        const sorted = analyticsContext.sortedMonthly;
+        const sorted = analyticsContext.sortedMonthly.slice(-12);
 
         const points = sorted.map(m => {
             // Accrual-basis: Net Flow = Income - Spending - External Transfers
@@ -591,7 +685,7 @@
         const currentRate = rolling[rolling.length - 1]?.rate || 0;
         const avgRate = points.reduce((s, p) => s + p.rate, 0) / points.length;
 
-        return { points: rolling, currentRate, avgRate, target: 25 };
+        return { points: rolling, currentRate, avgRate, target: 25, windowMonths: points.length };
     })();
 
     /* Savings Rate SVG geometry */
@@ -665,14 +759,16 @@
        ═══════════════════════════════════════ */
     $: projectedYearEnd = (() => {
         if (monthly.length < 3) return null;
-        const sorted = analyticsContext.sortedMonthly;
+        const allSorted = analyticsContext.sortedMonthly;
+        const sorted = allSorted.slice(-12);
 
-        // Last 3 months rolling average (accrual-basis)
-        const last3 = sorted.slice(-3);
-        const avgIncome = last3.reduce((s, m) => s + m.income, 0) / last3.length;
-        const avgExpenses = last3.reduce((s, m) => s + m.expenses, 0) / last3.length;
-        const avgExtTransfers = last3.reduce((s, m) => s + (m.external_transfers || 0), 0) / last3.length;
-        const avgNet = avgIncome - avgExpenses - avgExtTransfers;
+        // Last 12 months baseline (accrual-basis), aligned with the trajectory chart.
+        const avgIncome = sorted.reduce((s, m) => s + m.income, 0) / sorted.length;
+        const avgExpenses = sorted.reduce((s, m) => s + m.expenses, 0) / sorted.length;
+        const avgCreditsRefunds = sorted.reduce((s, m) => s + (m.credits_refunds ?? m.refunds ?? 0), 0) / sorted.length;
+        const avgIncomingTransfers = sorted.reduce((s, m) => s + (m.incoming_transfers || 0), 0) / sorted.length;
+        const avgExtTransfers = sorted.reduce((s, m) => s + (m.external_transfers || 0), 0) / sorted.length;
+        const avgNet = avgIncome - avgExpenses + avgCreditsRefunds + avgIncomingTransfers - avgExtTransfers;
 
         // Current year
         const currentYear = new Date().getFullYear();
@@ -680,8 +776,8 @@
         const remainingMonths = 12 - currentMonth - 1;
 
         // YTD totals (accrual-basis net)
-        const ytdMonths = sorted.filter(m => m.month.startsWith(currentYear.toString()));
-        const ytdNet = ytdMonths.reduce((s, m) => s + (m.income || 0) - (m.expenses || 0) + (m.refunds || 0) - (m.external_transfers || 0), 0);
+        const ytdMonths = allSorted.filter(m => m.month.startsWith(currentYear.toString()));
+        const ytdNet = ytdMonths.reduce((s, m) => s + (m.income || 0) - (m.expenses || 0) + (m.credits_refunds ?? m.refunds ?? 0) + (m.incoming_transfers || 0) - (m.external_transfers || 0), 0);
 
         const projectedAdditional = avgNet * remainingMonths;
         const projectedTotal = ytdNet + projectedAdditional;
@@ -700,7 +796,8 @@
             pessimistic,
             projectedSavingsRate,
             ytdNet,
-            currentYear
+            currentYear,
+            windowMonths: sorted.length
         };
     })();
 
@@ -709,7 +806,7 @@
        ═══════════════════════════════════════ */
     $: incomeStability = (() => {
         if (monthly.length < 3) return null;
-        const sorted = analyticsContext.sortedMonthly;
+        const sorted = analyticsContext.sortedMonthly.slice(-12);
         const incomes = sorted.map(m => m.income);
         const avgIncome = incomes.reduce((s, v) => s + v, 0) / incomes.length;
         const variance = incomes.reduce((s, v) => s + Math.pow(v - avgIncome, 2), 0) / incomes.length;
@@ -788,12 +885,70 @@
         return `Top ${n} merchants · ${pct}% of spending`;
     })();
 
+    $: merchantBrief = (() => {
+        if (!topMerchants.length) return null;
+        const total = topMerchants.reduce((s, m) => s + (m.total_spent || 0), 0);
+        const n = Math.min(topMerchants.length, 3);
+        const topNTotal = topMerchants.slice(0, n).reduce((s, m) => s + (m.total_spent || 0), 0);
+        const share = total > 0 ? Math.round((topNTotal / total) * 100) : 0;
+        const leader = topMerchants[0]?.name || 'Top merchant';
+        return { total, n, topNTotal, share, leader };
+    })();
+
     $: subscriptionInsight = (() => {
         if (!inactiveRecurring.length) return null;
-        const savingsPerYear = inactiveRecurring.reduce((s, i) => s + (i.annual_cost || 0), 0);
-        if (savingsPerYear < 1) return null;
-        return `${inactiveRecurring.length} inactive · ${formatCurrency(savingsPerYear)}/yr still tracked`;
+        if (inactiveTotalSpent < 1) return null;
+        return `${inactiveRecurring.length} inactive · ${formatCurrency(inactiveTotalSpent)} paid historically`;
     })();
+
+    $: recurringReviewValue = inactiveTotalSpent;
+    $: visibleRecurringTotals = (() => {
+        const trustedActive = activeRecurring.filter((item) =>
+            item.confirmed ||
+            item.confidence === 'user' ||
+            item.confidence === 'high' ||
+            Number(item.confidence_score || 0) >= 75
+        );
+        const annual = trustedActive.reduce((sum, item) => sum + (item.annual_cost || 0), 0);
+        return {
+            monthly: annual / 12,
+            annual,
+            active: trustedActive.length,
+            inactive: inactiveRecurring.length,
+            cancelled: cancelledRecurring.length
+        };
+    })();
+
+    $: healthStatus = (() => {
+        const rate = savingsRateTrend?.currentRate ?? 0;
+        const projected = projectedYearEnd?.projectedTotal ?? 0;
+        if (rate >= 25 && projected >= 0) return { label: 'on track', tone: 'positive' };
+        if (rate >= 10 || projected >= 0) return { label: 'watch', tone: 'warning' };
+        return { label: 'at risk', tone: 'negative' };
+    })();
+
+    $: healthScore = (() => {
+        const rate = savingsRateTrend?.currentRate ?? 0;
+        const projected = projectedYearEnd?.projectedTotal ?? 0;
+        const avgNet = projectedYearEnd?.avgNet ?? 0;
+        const stabilityDots = incomeStability?.dots ?? 0;
+        const incomeStreak = incomeStability?.streak ?? 0;
+        let score = 0;
+        if (rate >= 25) score += 1.25;
+        else if (rate >= 10) score += 0.7;
+        if (projected >= 0) score += 1.25;
+        else if (projected > -5000) score += 0.5;
+        if (avgNet >= 0) score += 1;
+        else if (avgNet > -1000) score += 0.4;
+        score += (Math.min(stabilityDots, 5) / 5) * 0.75;
+        score += (Math.min(incomeStreak, 6) / 6) * 0.75;
+        return Math.max(0, Math.min(5, score));
+    })();
+
+    $: savingsTargetGap = savingsRateTrend ? savingsRateTrend.currentRate - savingsRateTrend.target : 0;
+    $: savingsMonthsAtTarget = savingsRateTrend
+        ? savingsRateTrend.points.filter(p => p.rate >= savingsRateTrend.target).length
+        : 0;
 
     $: momInsight = (() => {
         if (!momDiff.length || !prevMonthData) return null;
@@ -808,8 +963,8 @@
         const { currentRate, target } = savingsRateTrend;
         const diff = Math.abs(Math.round(currentRate - target));
         return currentRate >= target
-            ? `Current rate ${formatPercent(currentRate)} · ${diff}pp above ${target}% target`
-            : `Current rate ${formatPercent(currentRate)} · ${diff}pp below ${target}% target`;
+            ? `Current rate ${formatPercent(currentRate)} · ${diff} points above ${target}% target`
+            : `Current rate ${formatPercent(currentRate)} · ${diff} points below ${target}% target`;
     })();
 
     /* ═══════════════════════════════════════
@@ -886,12 +1041,40 @@
         // 'Custom' does nothing — user picks from dropdown
     }
 
+    async function explainSelectedMonth() {
+        if (!selectedMonth || explainingMonth) return;
+        explainingMonth = true;
+        explanationError = '';
+        try {
+            const result = await api.explainMonth(selectedMonth, true);
+            monthExplanation = result;
+        } catch (e) {
+            console.error('Failed to explain month:', e);
+            explanationError = e?.message || 'Failed to explain this month';
+        } finally {
+            explainingMonth = false;
+        }
+    }
+
     // ── Subscription feedback handlers ──────────────────────────────
     let subscriptionFeedback = '';
 
     async function handleConfirmSubscription(item) {
         try {
-            await api.confirmSubscription(item.merchant, null, item.frequency, item.category);
+            const amount = Math.abs(Number(item.amount || item.avg_amount || 0));
+            if (amount > 0) {
+                await api.declareSubscription(
+                    item.merchant,
+                    amount,
+                    item.frequency || 'monthly',
+                    item.profile || null,
+                    item.category || 'Subscriptions',
+                    item.expected_day || (item.next_expected ? Number(String(item.next_expected).slice(8, 10)) : null)
+                );
+            } else {
+                await api.confirmSubscription(item.merchant, null, item.frequency, item.category, item.profile || null);
+            }
+            recurringData = await api.getRecurring();
             subscriptionFeedback = `✓ ${item.merchant} confirmed`;
             setTimeout(() => { subscriptionFeedback = ''; }, 3000);
         } catch (e) {
@@ -903,15 +1086,15 @@
 
     async function handleDismissSubscription(item) {
         try {
-            await api.dismissSubscription(item.merchant, null);
+            await api.dismissSubscription(item.merchant, null, item.profile || null);
             // Remove from local list immediately
             if (recurringData && recurringData.items) {
-                recurringData = {
-                    ...recurringData,
-                    items: recurringData.items.filter(i => i.merchant !== item.merchant),
-                    dismissed_count: (recurringData.dismissed_count || 0) + 1,
-                    dismissed: [...(recurringData.dismissed || []), { merchant: item.merchant, dismissed_at: new Date().toISOString() }],
-                };
+	                recurringData = {
+	                    ...recurringData,
+	                    items: recurringData.items.filter(i => i.merchant !== item.merchant || (i.profile || null) !== (item.profile || null)),
+	                    dismissed_count: (recurringData.dismissed_count || 0) + 1,
+	                    dismissed: [...(recurringData.dismissed || []), { merchant: item.merchant, dismissed_at: new Date().toISOString(), profile: item.profile || null }],
+	                };
                 // Recalculate totals
                 let newMonthly = 0, newAnnual = 0;
                 for (const r of recurringData.items) {
@@ -935,14 +1118,18 @@
 
     async function handleCancelSubscription(item) {
         try {
-            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            const profile = item.profile && item.profile !== 'household'
+                ? item.profile
+                : ($activeProfile && $activeProfile !== 'household' ? $activeProfile : null);
             await api.cancelSubscription(item.merchant, profile);
             // Mark as cancelled locally
             if (recurringData && recurringData.items) {
                 recurringData = {
                     ...recurringData,
                     items: recurringData.items.map(i =>
-                        i.merchant === item.merchant ? { ...i, cancelled: true } : i
+                        i.merchant === item.merchant && (i.profile || null) === (item.profile || null)
+                            ? { ...i, cancelled: true, state: 'cancelled', status: 'cancelled' }
+                            : i
                     ),
                     cancelled_count: (recurringData.cancelled_count || 0) + 1,
                     inactive_count: Math.max((recurringData.inactive_count || 0) - 1, 0),
@@ -959,7 +1146,9 @@
 
     async function handleRestoreSubscription(item) {
         try {
-            const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
+            const profile = item.profile && item.profile !== 'household'
+                ? item.profile
+                : ($activeProfile && $activeProfile !== 'household' ? $activeProfile : null);
             await api.restoreSubscription(item.merchant, profile);
             // Refetch recurring data to get fresh state
             recurringLoading = true;
@@ -1016,8 +1205,13 @@
         try {
             const profile = $activeProfile && $activeProfile !== 'household' ? $activeProfile : null;
             await api.redetectSubscriptions(profile);
-            // Refetch recurring data
+            invalidateCache();
             recurringData = await api.getRecurring();
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('folio:recurring-updated', {
+                    detail: { profile: profile || 'household' }
+                }));
+            }
             subscriptionFeedback = '✓ Subscriptions re-scanned';
             setTimeout(() => { subscriptionFeedback = ''; }, 3000);
         } catch (e) {
@@ -1111,6 +1305,32 @@
         <ProfileSwitcher />
     </div>
 
+    <section class="analytics-mira-panel card fade-in-up" style="animation-delay: 40ms">
+        <div class="analytics-mira-main">
+            <div>
+                <p class="folio-kicker">Mira</p>
+                <h3>Explain {selectedMonth ? formatMonth(selectedMonth) : 'this month'}</h3>
+                <p>Uses structured analytics first, then asks the configured local model to write the narrative.</p>
+            </div>
+            <button class="analytics-mira-action" disabled={!selectedMonth || explainingMonth} on:click={explainSelectedMonth}>
+                <span class="material-symbols-outlined">{explainingMonth ? 'hourglass_top' : 'auto_awesome'}</span>
+                {explainingMonth ? 'Explaining...' : 'Explain month'}
+            </button>
+        </div>
+        {#if explanationError}
+            <div class="analytics-mira-error">{explanationError}</div>
+        {/if}
+        {#if monthExplanation}
+            <article class="analytics-mira-answer">
+                <div>
+                    <strong>{monthExplanation.question}</strong>
+                    <span>{monthExplanation.source ? (monthExplanation.source === 'deterministic' ? 'Deterministic fallback' : `Generated with ${monthExplanation.source}`) : 'Saved insight'}</span>
+                </div>
+                <p>{monthExplanation.answer}</p>
+            </article>
+        {/if}
+    </section>
+
 
 <!-- ═══════════════════════════════════════
          S1: CASH FLOW WATERFALL (Hero)
@@ -1182,7 +1402,8 @@
                             </span>
                         </button>
                         {#if monthPickerOpen}
-                            <div class="analytics-month-picker-dropdown" on:click|stopPropagation>
+                            <!-- svelte-ignore a11y-click-events-have-key-events -->
+                            <div class="analytics-month-picker-dropdown" role="presentation" on:click|stopPropagation>
                                 {#each [...monthly].sort((a,b) => b.month.localeCompare(a.month)) as m}
                                     <button
                                         class="analytics-month-picker-option"
@@ -1261,10 +1482,14 @@
                                     rx="4" fill={bar.color}
                                     opacity={bar.type === 'result' ? 0.90 : 0.75}
                                     class="analytics-wf-bar"
-                                    style="cursor: {bar.type === 'expense' || bar.type === 'savings' || bar.type === 'transfer' ? 'pointer' : 'default'}"
+                                    style="cursor: {isWaterfallBarClickable(bar) ? 'pointer' : 'default'}"
+                                    role="button"
+                                    tabindex="0"
+                                    aria-label={`${bar.label}: ${formatCurrency(bar.value)}`}
                                     on:mouseenter={(e) => handleWaterfallHover(bar, e)}
                                     on:mouseleave={handleWaterfallLeave}
                                     on:click|stopPropagation={() => handleWaterfallClick(bar)}
+                                    on:keydown={(e) => handleWaterfallKeydown(e, bar)}
                                 />
                                 <!-- Top edge highlight -->
                                 <line
@@ -1284,10 +1509,10 @@
                             <!-- Value above/below bar -->
                             {#if bar.type !== 'anchor'}
                                 <text x={bar.x + bar.barWidth / 2}
-                                    y={bar.type === 'income' || bar.type === 'result' && bar.value >= 0 ? bar.y - 6 : bar.y + bar.h + 12}
+                                    y={(bar.value >= 0 || bar.type === 'result' && bar.value >= 0) ? bar.y - 6 : bar.y + bar.h + 12}
                                     text-anchor="middle" fill={bar.color}
                                     font-size="8" font-family="DM Mono, monospace" font-weight="500" opacity="0.8">
-                                    {bar.type === 'income' ? '+' : ''}{formatCompact(bar.value)}
+                                    {bar.value >= 0 ? '+' : ''}{formatCompact(bar.value)}
                                 </text>
                             {/if}
                         {/each}
@@ -1319,6 +1544,18 @@
                         <span class="analytics-wf-summary-label">Income</span>
                         <span class="analytics-wf-summary-value text-positive">+{formatCurrency(currentMonthSummary.income)}</span>
                     </div>
+                    {#if ((currentMonthSummary.credits_refunds ?? currentMonthSummary.refunds ?? 0) > 0)}
+                        <div class="analytics-wf-summary-item">
+                            <span class="analytics-wf-summary-label">Credits</span>
+                            <span class="analytics-wf-summary-value text-positive">+{formatCurrency(currentMonthSummary.credits_refunds ?? currentMonthSummary.refunds ?? 0)}</span>
+                        </div>
+                    {/if}
+                    {#if (currentMonthSummary.incoming_transfers || 0) > 0}
+                        <div class="analytics-wf-summary-item">
+                            <span class="analytics-wf-summary-label">Incoming Transfers</span>
+                            <span class="analytics-wf-summary-value" style="color: var(--flow-transfer)">+{formatCurrency(currentMonthSummary.incoming_transfers)}</span>
+                        </div>
+                    {/if}
                     <div class="analytics-wf-summary-item">
                         <span class="analytics-wf-summary-label">Spending</span>
                         <span class="analytics-wf-summary-value text-negative">-{formatCurrency(currentMonthSummary.expenses)}</span>
@@ -1340,7 +1577,8 @@
 
             <!-- ── Contextual Drill-Down (inside waterfall section) ── -->
             {#if selectedCategory && categoryTransactions.length > 0}
-                <div class="analytics-waterfall-drilldown" on:click|stopPropagation>
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <div class="analytics-waterfall-drilldown" role="presentation" on:click|stopPropagation>
                     <div class="analytics-waterfall-drilldown-header">
                         <div class="flex items-center gap-2.5">
                             <div class="w-6 h-6 rounded-md flex items-center justify-center"
@@ -1393,23 +1631,53 @@
     <!-- ═══════════════════════════════════════
          TOP MERCHANTS + RECURRING SUBSCRIPTIONS (paired)
          ═══════════════════════════════════════ -->
-    {#if topMerchants.length > 0 || (recurringData && recurringData.items && recurringData.items.length > 0)}
+    {#if topMerchants.length > 0 || visibleRecurringItems.length > 0}
     <div class="analytics-paired-layout mb-10" class:analytics-paired-scroll={activeRecurring.length >= 6}>
         {#if topMerchants.length > 0}
         <section class="analytics-paired-col fade-in-up" style="animation-delay: 120ms">
-            <div class="analytics-section-header">
+            <div class="analytics-section-header analytics-section-header-tight">
                 <h3 class="analytics-section-title">Top Merchants</h3>
                 {#if merchantInsight}<p class="analytics-section-context">{merchantInsight}</p>{/if}
             </div>
 
             <div class="card analytics-merchant-list" style="padding: 0; overflow: hidden; {activeRecurring.length >= 6 && subsCollapsedHeight > 0 ? `height: ${subsCollapsedHeight}px; overflow-y: auto;` : ''}">
+                <div class="analytics-merchant-story">
+                    <div>
+                        <p class="analytics-kicker">{formatMonthShort(selectedMonth)} · {topMerchants.length} merchants</p>
+                        <h4 class="analytics-editorial-line">Where your <em>money</em> went</h4>
+                    </div>
+                    {#if merchantBrief}
+                        <div class="analytics-merchant-story-metric">
+                            <strong>{formatCurrency(merchantBrief.total)}</strong>
+                            <span>top {merchantBrief.n} = {merchantBrief.share}%</span>
+                        </div>
+                    {/if}
+                </div>
+                {#if merchantBrief}
+                    <div class="analytics-merchant-stack" aria-hidden="true">
+                        {#each topMerchants.slice(0, 8) as merchant, i}
+                            {@const segmentPct = merchantBrief.total > 0 ? (merchant.total_spent / merchantBrief.total) * 100 : 0}
+                            <span style="width: {segmentPct}%; --segment-color: {CATEGORY_COLORS[merchant.industry] || CATEGORY_COLORS[merchant.category] || merchantPalette[i % merchantPalette.length]}"></span>
+                        {/each}
+                    </div>
+                    <div class="analytics-merchant-legend">
+                        {#each topMerchants.slice(0, 3) as merchant, i}
+                            <span><i style="background: {CATEGORY_COLORS[merchant.industry] || CATEGORY_COLORS[merchant.category] || merchantPalette[i % merchantPalette.length]}"></i>{merchant.name}</span>
+                        {/each}
+                        {#if topMerchants.length > 3}
+                            <span>+ {topMerchants.length - 3} others</span>
+                        {/if}
+                    </div>
+                {/if}
                 <div class="analytics-merchant-header">
                     <span></span>
                     <span>Merchant</span>
+                    <span>Visits · Share</span>
                     <span>Amount</span>
                 </div>
                 {#each topMerchants.slice(0, 8) as merchant, i}
                     {@const barPct = (merchant.total_spent / (topMerchants[0]?.total_spent || 1)) * 100}
+                    {@const totalPct = currentMonthSummary?.expenses ? Math.round((merchant.total_spent / currentMonthSummary.expenses) * 100) : 0}
                     <div class="analytics-merchant-row">
                         <span class="analytics-merchant-rank">{String(i + 1).padStart(2, '0')}</span>
                         <div class="analytics-merchant-body">
@@ -1417,13 +1685,16 @@
                             {#if merchant.industry}
                                 <span class="analytics-merchant-caption">{merchant.industry}</span>
                             {/if}
+                        </div>
+                        <div class="analytics-merchant-share">
+                            <span>{merchant.transaction_count} txn{merchant.transaction_count !== 1 ? 's' : ''}</span>
                             <div class="analytics-merchant-bar-track">
                                 <div class="analytics-merchant-bar-fill" style="width: {barPct}%"></div>
                             </div>
+                            <span>{totalPct}%</span>
                         </div>
                         <div class="analytics-merchant-right">
                             <span class="analytics-merchant-amount">{formatCurrency(merchant.total_spent)}</span>
-                            <span class="analytics-merchant-txns">{merchant.transaction_count} txn{merchant.transaction_count !== 1 ? 's' : ''}</span>
                         </div>
                     </div>
                 {/each}
@@ -1431,36 +1702,14 @@
         </section>
         {/if}
 
-        {#if recurringData && recurringData.items && recurringData.items.length > 0}
+        {#if visibleRecurringItems.length > 0}
         <section class="analytics-paired-col fade-in-up" style="animation-delay: 130ms">
-            <div class="analytics-section-header" style="margin-bottom:0.75rem">
+            <div class="analytics-section-header analytics-section-header-tight" style="margin-bottom:0.75rem">
                 <div class="flex items-center gap-2 flex-wrap">
                     <h3 class="analytics-section-title">Recurring Subscriptions</h3>
                     {#if unreadEventCount > 0}
                         <span class="analytics-event-count-badge">{unreadEventCount}</span>
                     {/if}
-                    <span class="analytics-sub-summary-badge" style="--badge-color: var(--positive)">
-                        {recurringData.active_count || activeRecurring.length} active
-                    </span>
-                    {#if (recurringData.inactive_count || inactiveRecurring.length) > 0}
-                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--warning)">
-                            {recurringData.inactive_count || inactiveRecurring.length} inactive
-                        </span>
-                    {/if}
-                    {#if (recurringData.cancelled_count || cancelledRecurring.length) > 0}
-                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--negative)">
-                            {recurringData.cancelled_count || cancelledRecurring.length} cancelled
-                        </span>
-                    {/if}
-                    {#if (recurringData.dismissed_count || dismissedRecurring.length) > 0}
-                        <span class="analytics-sub-summary-badge" style="--badge-color: var(--text-muted)">
-                            {recurringData.dismissed_count || dismissedRecurring.length} dismissed
-                        </span>
-                    {/if}
-                    <span class="text-[11px] font-mono" style="color: var(--text-muted)">
-                        <span class="font-bold" style="color: var(--text-primary)">{formatCurrency(recurringData.total_monthly)}/mo</span>
-                        · {formatCurrency(recurringData.total_annual)}/yr
-                    </span>
                     {#if priceChangeCount > 0}
                         <span class="text-[10px]" style="color: var(--negative)">{priceChangeCount} price increase{priceChangeCount !== 1 ? 's' : ''}</span>
                     {/if}
@@ -1480,7 +1729,34 @@
                     {/if}
                 </div>
             </div>
-            <div class="card" style="padding: 0; overflow: hidden" bind:clientHeight={subsCardHeight}>
+            <div class="card analytics-subscription-stage" style="padding: 0; overflow: hidden" bind:clientHeight={subsCardHeight}>
+                <div class="analytics-subscription-hero">
+                    <div>
+                        <p class="analytics-kicker">Recurring subscriptions</p>
+                        <h4 class="analytics-editorial-line">Your <em>subscription stack</em></h4>
+                    </div>
+                    <div class="analytics-subscription-counts">
+                        <span>{visibleRecurringTotals.active} active</span>
+                        {#if inactiveRecurring.length > 0}<span>{inactiveRecurring.length} inactive</span>{/if}
+                    </div>
+                </div>
+                <div class="analytics-subscription-metrics">
+                    <div>
+                        <span>Monthly</span>
+                        <strong>{formatCurrency(visibleRecurringTotals.monthly)}</strong>
+                        <small>{visibleRecurringTotals.active} active</small>
+                    </div>
+                    <div>
+                        <span>Annualized</span>
+                        <strong>{formatCurrency(visibleRecurringTotals.annual)}</strong>
+                        <small>{currentMonthSummary?.expenses ? formatPercent((visibleRecurringTotals.monthly / currentMonthSummary.expenses) * 100) : '0%'} of spend</small>
+                    </div>
+	                    <div class="attention">
+	                        <span>Inactive paid</span>
+	                        <strong>{formatCurrency(inactiveTotalSpent)}</strong>
+	                        <small>{inactiveRecurring.length} inactive · review</small>
+	                    </div>
+                </div>
                 <!-- Subscription Events / Alerts Strip -->
                 {#if subscriptionEvents.length > 0}
                     <div class="analytics-events-strip">
@@ -1529,7 +1805,7 @@
                     <span>Merchant</span>
                     <span>Freq</span>
                     <span>Amount</span>
-                    <span>Annual</span>
+	                    <span>Annual / paid</span>
                     <span>Status</span>
                     <span></span>
                 </div>
@@ -1562,7 +1838,7 @@
                         </div>
                         <span class="analytics-sub-col">{item.frequency}</span>
                         <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
-                        <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+	                                    <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
                         <span class="analytics-sub-col analytics-sub-col-status">
                             {#if item.confidence === 'user'}
                                 <span class="analytics-sub-dot" style="background: #8b5cf6"></span> User
@@ -1588,6 +1864,67 @@
                     </div>
                 {/if}
 
+                {#if candidateRecurring.length > 0}
+                    <div class="analytics-recurring-inactive-toggle"
+                         style="border-top: 1px solid var(--card-border); background: var(--surface-100)">
+                        <button class="analytics-recurring-inactive-trigger"
+                            on:click|stopPropagation={() => { candidateOpen = !candidateOpen; }}>
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-[14px]" style="color: var(--warning)">rule</span>
+                                <span class="text-[9px] font-bold tracking-[0.1em] uppercase" style="color: var(--text-muted)">
+                                    Needs review
+                                </span>
+                                <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                                    style="background: var(--surface-200); color: var(--warning)">
+                                    {candidateRecurring.length}
+                                </span>
+                            </div>
+                            <span class="text-[9px] font-mono" style="color: var(--text-muted)">not counted as active</span>
+                        </button>
+                    </div>
+                    {#if candidateOpen}
+                        <div class="analytics-recurring-inactive-body">
+                            {#each candidateRecurring as item, i}
+                                <div class="analytics-sub-row analytics-sub-row-inactive" style="border-bottom: {i < candidateRecurring.length - 1 ? '1px solid color-mix(in srgb, var(--card-border) 30%, transparent)' : 'none'}">
+                                    <div class="analytics-sub-left">
+                                        <div class="analytics-sub-avatar"
+                                            style="background: color-mix(in srgb, {CATEGORY_COLORS[item.category] || '#627d98'} 6%, transparent)">
+                                            <span class="material-symbols-outlined text-[12px]"
+                                                style="color: {CATEGORY_COLORS[item.category] || '#627d98'}; opacity: 0.7">
+                                                help
+                                            </span>
+                                        </div>
+                                        <div class="analytics-sub-body">
+                                            <span class="analytics-sub-name">{item.clean_name || item.merchant}</span>
+                                            {#if item.confidence_score}
+                                                <span class="analytics-sub-meta">Score {Math.round(item.confidence_score)}</span>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                    <span class="analytics-sub-col">{item.frequency}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
+	                                    <span class="analytics-sub-col">{formatCurrency(item.total_spent || ((item.amount || 0) * (item.charge_count || 0)))}</span>
+                                    <span class="analytics-sub-col analytics-sub-col-status">
+                                        <span class="analytics-sub-dot" style="background: var(--warning)"></span> Candidate
+                                    </span>
+                                    <div class="analytics-sub-actions">
+                                        <button class="analytics-recurring-action-btn"
+                                            title="Confirm subscription"
+                                            on:click|stopPropagation={() => handleConfirmSubscription(item)}>
+                                            <span class="material-symbols-outlined text-[13px]">check</span>
+                                        </button>
+                                        <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
+                                            title="Not a subscription — dismiss"
+                                            on:click|stopPropagation={() => handleDismissSubscription(item)}>
+                                            <span class="material-symbols-outlined text-[13px]">close</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                {/if}
+
                 <!-- Inactive subscriptions (collapsible dropdown, closed by default) -->
                 {#if inactiveRecurring.length > 0}
                     <div class="analytics-recurring-inactive-toggle"
@@ -1606,9 +1943,7 @@
                                     {inactiveRecurring.length}
                                 </span>
                             </div>
-                            <span class="text-[9px] font-mono" style="color: var(--text-muted)">
-                                {formatCurrency(inactiveTotalSpent)} total spent
-                            </span>
+                            <span class="text-[9px] font-mono" style="color: var(--text-muted)">confirm or dismiss</span>
                         </button>
                     </div>
                     {#if inactiveOpen}
@@ -1633,15 +1968,15 @@
                                     </div>
                                     <span class="analytics-sub-col">{item.frequency}</span>
                                     <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+	                                    <span class="analytics-sub-col">{formatCurrency(item.total_spent || ((item.amount || 0) * (item.charge_count || 0)))}</span>
                                     <span class="analytics-sub-col analytics-sub-col-status">
                                         <span class="analytics-sub-dot" style="background: var(--warning)"></span> Inactive
                                     </span>
-                                    <div class="analytics-sub-actions" style="opacity: 0.6">
+                                    <div class="analytics-sub-actions">
                                         <button class="analytics-recurring-action-btn analytics-recurring-cancel-btn"
                                             title="Confirm cancelled"
                                             on:click|stopPropagation={() => handleCancelSubscription(item)}>
-                                            <span class="text-[8px] font-bold whitespace-nowrap">Cancel</span>
+                                            <span class="text-[8px] font-bold whitespace-nowrap">Cancelled</span>
                                         </button>
                                         <button class="analytics-recurring-action-btn analytics-recurring-dismiss"
                                             title="Not a subscription — dismiss"
@@ -1693,11 +2028,17 @@
                                     </div>
                                     <span class="analytics-sub-col">{item.frequency}</span>
                                     <span class="analytics-sub-col">{formatCurrency(item.amount || item.avg_amount)}</span>
-                                    <span class="analytics-sub-col">{formatCurrency(item.annual_cost)}</span>
+                                    <span class="analytics-sub-col">{formatCurrency(item.total_spent || ((item.amount || 0) * (item.charge_count || 0)))}</span>
                                     <span class="analytics-sub-col analytics-sub-col-status">
                                         <span class="analytics-sub-dot" style="background: var(--negative)"></span> Cancelled
                                     </span>
-                                    <span class="analytics-sub-col"></span>
+                                    <div class="analytics-sub-actions">
+                                        <button class="analytics-recurring-restore-btn"
+                                            on:click|stopPropagation={() => handleRestoreSubscription(item)}>
+                                            <span class="material-symbols-outlined text-[12px]">undo</span>
+                                            Restore
+                                        </button>
+                                    </div>
                                 </div>
                             {/each}
                         </div>
@@ -1760,10 +2101,13 @@
                 <!-- Summary footer -->
                 <div class="analytics-sub-footer">
                     <span class="analytics-sub-footer-text">
-                        {activeRecurring.length} active subscription{activeRecurring.length !== 1 ? 's' : ''} totaling <strong>{formatCurrency(recurringData.total_annual)}/yr</strong>
-                        {#if inactiveRecurring.length > 0}
-                            · {inactiveRecurring.length} inactive — review for savings
-                        {/if}
+                        {visibleRecurringTotals.active} active subscription{visibleRecurringTotals.active !== 1 ? 's' : ''} totaling <strong>{formatCurrency(visibleRecurringTotals.annual)}/yr</strong>
+	                        {#if inactiveRecurring.length > 0}
+	                            · {inactiveRecurring.length} inactive · {formatCurrency(inactiveTotalSpent)} paid
+	                        {/if}
+	                        {#if candidateRecurring.length > 0}
+	                            · {candidateRecurring.length} to review
+	                        {/if}
                         {#if cancelledRecurring.length > 0}
                             · {cancelledRecurring.length} cancelled
                         {/if}
@@ -1773,11 +2117,6 @@
                             · <span style="color: var(--negative)">{priceIncreases.length} recent price increase{priceIncreases.length !== 1 ? 's' : ''} (+{formatCurrency(totalIncrease)}/mo)</span>
                         {/if}
                     </span>
-                    {#if inactiveRecurring.length > 0}
-                        <button class="analytics-sub-footer-action" on:click|stopPropagation={() => { inactiveOpen = !inactiveOpen; }}>
-                            Review
-                        </button>
-                    {/if}
                 </div>
             </div>
         </section>
@@ -1796,7 +2135,52 @@
                 {#if pulseInsight}<p class="analytics-section-context">{pulseInsight}</p>{/if}
             </div>
 
-            <div class="analytics-pulse-grid">
+            <div class="card analytics-pulse-movement" class:expanded={pulseExpanded} style="padding: 0">
+                <div class="analytics-pulse-movement-head">
+                    <div>
+                        <p class="analytics-kicker">Spending Pulse · {formatMonthShort(selectedMonth)}</p>
+                        <h4 class="analytics-editorial-line">How <em>each</em> category moved</h4>
+                    </div>
+                    <div class="analytics-pulse-total">
+                        <strong>{formatCurrency(currentMonthSummary.expenses)}</strong>
+                        <span>spent · avg baseline</span>
+                    </div>
+                </div>
+                <div class="analytics-pulse-scale">
+                    <span><i class="below"></i>Below avg</span>
+                    <span><i class="above"></i>Above avg</span>
+                </div>
+                <div class="analytics-pulse-rows">
+                    {#each (pulseExpanded ? spendingPulseCards : spendingPulseCards.slice(0, 4)) as card}
+                        {@const deviationAbs = Math.min(Math.abs(card.deviation), 150)}
+                        {@const deviationWidth = Math.max((deviationAbs / 150) * 48, Math.abs(card.deviation) > 0 ? 3 : 0)}
+                        <button class="analytics-pulse-row"
+                            on:click={() => drillIntoCategory(card.category)}
+                            class:selected={selectedCategory === card.category}
+                            style="--pulse-color: {card.color}; --deviation-width: {deviationWidth}%">
+                            <div class="analytics-pulse-row-label">
+                                <span>{card.category}</span>
+                                <small>{formatCurrency(card.total)}</small>
+                            </div>
+                            <div class="analytics-pulse-deviation">
+                                <span class="analytics-pulse-baseline"></span>
+                                {#if card.isOver || card.deviation > 0}
+                                    <span class="analytics-pulse-dev-fill above"></span>
+                                {:else if card.isUnder || card.deviation < 0}
+                                    <span class="analytics-pulse-dev-fill below"></span>
+                                {/if}
+                            </div>
+                            <div class="analytics-pulse-row-stat" class:over={card.deviation > 0} class:under={card.deviation < 0}>
+                                <span>avg {formatCompact(card.avgTotal)} · {card.comparisonLabel}</span>
+                                <strong>{card.deviation > 0 ? '+' : ''}{formatPercent(card.deviation)}</strong>
+                            </div>
+                        </button>
+                    {/each}
+                </div>
+            </div>
+
+            <!-- Legacy card grid retained as a compact visual fallback for very small screens -->
+            <div class="analytics-pulse-grid analytics-pulse-card-fallback">
                 {#each (pulseExpanded ? spendingPulseCards : spendingPulseCards.slice(0, 4)) as card, i}
                     {@const maxBar = Math.max(card.total, card.avgTotal)}
                     <button
@@ -1836,7 +2220,7 @@
 
             {#if spendingPulseCards.length > 4}
                 <button
-                    class="text-[10px] mt-3 font-medium"
+                    class="analytics-pulse-more"
                     style="color: var(--text-muted); background: none; border: none; cursor: pointer;"
                     on:click={() => pulseExpanded = !pulseExpanded}>
                     {pulseExpanded ? 'Show fewer categories' : `+ ${spendingPulseCards.length - 4} more categories`}
@@ -1854,10 +2238,22 @@
             {#if trendsInsight}<p class="analytics-section-context">{trendsInsight}</p>{/if}
         </div>
 
-        <div class="analytics-two-panel">
+        <div class="analytics-two-panel analytics-trajectory-stage">
             <!-- Savings Rate Trend -->
-            <div class="card" style="padding: 1.5rem">
-                <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-3" style="color: var(--text-muted)">Savings Rate Over Time</p>
+            <div class="card analytics-savings-panel analytics-trajectory-card" style="padding: 1.35rem">
+                <div class="analytics-panel-title-row">
+                    <div>
+                        <p class="analytics-kicker">Trends & trajectory · last {savingsRateTrend?.windowMonths || 12} months</p>
+                        <h4 class="analytics-editorial-line">Savings <em>trajectory</em></h4>
+                    </div>
+                    <div class="analytics-savings-summary">
+                        {#if savingsRateTrend}
+                            <span class="analytics-target-pill">Target {savingsRateTrend.target}%</span>
+                            <strong>{formatPercent(savingsRateTrend.currentRate)}</strong>
+                            <small>current</small>
+                        {/if}
+                    </div>
+                </div>
 
                 {#if savingsRateGeometry}
                     {@const lastDot = savingsRateGeometry.dots[savingsRateGeometry.dots.length - 1]}
@@ -1940,7 +2336,24 @@
                         </svg>
                     </div>
 
-                    <div class="flex items-center gap-4 mt-2 pt-2" style="border-top: 1px solid var(--card-border)">
+                    <div class="analytics-savings-ledger">
+                        <div>
+                            <span>Target gap</span>
+                            <strong style="color: {savingsTargetGap >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                                {Math.abs(Math.round(savingsTargetGap))} pts {savingsTargetGap >= 0 ? 'above' : 'below'}
+                            </strong>
+                        </div>
+                        <div>
+                            <span>Average rate</span>
+                            <strong>{formatPercent(savingsRateTrend.avgRate)}</strong>
+                        </div>
+                        <div>
+                            <span>Months at target</span>
+                            <strong>{savingsMonthsAtTarget}/{savingsRateTrend.points.length}</strong>
+                        </div>
+                    </div>
+
+                    <div class="analytics-chart-legend">
                         <div class="flex items-center gap-1.5">
                             <span class="w-5 h-0.5 rounded-full" style="background: var(--accent)"></span>
                             <span class="text-[9px]" style="color: var(--text-muted)">3mo Rolling Avg</span>
@@ -1953,9 +2366,6 @@
                             <span class="w-5 h-0.5 rounded-full" style="background: var(--positive); opacity: 0.3; border-style: dashed;"></span>
                             <span class="text-[9px]" style="color: var(--text-muted)">Target</span>
                         </div>
-                        <span class="ml-auto text-[11px] font-bold font-mono" style="color: {sentimentColor}">
-                            Current: {formatPercent(savingsRateTrend.currentRate)}
-                        </span>
                     </div>
                 {:else}
                     <p class="text-sm text-center py-6" style="color: var(--text-muted)">Not enough data</p>
@@ -1963,101 +2373,58 @@
             </div>
 
             <!-- Financial Health Snapshot (merged Projected + Income Stability) -->
-            <div class="card" style="padding: 1.5rem">
-                <p class="text-[10px] font-bold tracking-[0.12em] uppercase mb-3" style="color: var(--text-muted)">Financial Health Snapshot</p>
+            <div class="card analytics-health-panel analytics-trajectory-card" style="padding: 1.35rem">
+                <div class="analytics-health-panel-head">
+                    <div>
+                        <p class="analytics-kicker">Financial health · last {projectedYearEnd?.windowMonths || incomeStability?.totalMonths || 12} months</p>
+                        <h4>Forecast <em>scorecard</em></h4>
+                    </div>
+                    <span class="analytics-health-status {healthStatus.tone}">{healthStatus.label}</span>
+                </div>
 
-                <div class="analytics-health-grid">
-                    <!-- Projected Year-End -->
-                    <div class="analytics-health-cell">
-                        <span class="analytics-health-label">Projected Year-End</span>
+                <div class="analytics-health-scorecard">
+                    <div class="analytics-health-hero-metric">
+                        <span>Projected year-end</span>
                         {#if projectedYearEnd}
-                            <span class="analytics-health-value" style="color: {projectedYearEnd.projectedTotal >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                            <strong style="color: {projectedYearEnd.projectedTotal >= 0 ? 'var(--positive)' : 'var(--negative)'}">
                                 {projectedYearEnd.projectedTotal >= 0 ? '+' : ''}{formatCompact(projectedYearEnd.projectedTotal)}
-                            </span>
-                            <span class="analytics-health-sub">
-                                {formatCompact(projectedYearEnd.pessimistic)} — {formatCompact(projectedYearEnd.optimistic)} range
-                            </span>
-                            {#if analyticsContext.sortedMonthly.length >= 2}
-                                {@const nets = analyticsContext.sortedMonthly.slice(-8).map(m => m.income - m.expenses - (m.external_transfers || 0))}
-                                {@const sparkMin = Math.min(...nets)}
-                                {@const sparkMax = Math.max(...nets)}
-                                {@const sparkRange = sparkMax - sparkMin || 1}
-                                {@const sparkPts = nets.map((n, i) => `${(i / Math.max(nets.length - 1, 1)) * 46},${12 - ((n - sparkMin) / sparkRange) * 10}`).join(' ')}
-                                <svg width="48" height="14" class="health-sparkline" style="margin-top: 0.375rem">
-                                    <polyline points={sparkPts} fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                                </svg>
-                            {/if}
+                            </strong>
+                            <small>{formatCompact(projectedYearEnd.pessimistic)} — {formatCompact(projectedYearEnd.optimistic)} range</small>
                         {:else}
-                            <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
+                            <strong>—</strong>
                         {/if}
                     </div>
+                    <div class="analytics-health-score-ring" style="--score-pct: {(healthScore / 5) * 100}%">
+                        <small>Score</small>
+                        <strong>{healthScore.toFixed(1)}</strong>
+                        <span>/5</span>
+                    </div>
+                </div>
 
-                    <!-- Avg Net/Mo -->
-                    <div class="analytics-health-cell">
-                        <span class="analytics-health-label">Avg Net / Month</span>
-                        {#if projectedYearEnd}
-                            <span class="analytics-health-value" style="color: {projectedYearEnd.avgNet >= 0 ? 'var(--positive)' : 'var(--negative)'}">
-                                {projectedYearEnd.avgNet >= 0 ? '+' : ''}{formatCurrency(projectedYearEnd.avgNet)}
-                            </span>
-                            <span class="analytics-health-sub">
-                                {projectedYearEnd.remainingMonths} months left in {projectedYearEnd.currentYear}
-                            </span>
-                            {#if analyticsContext.sortedMonthly.length >= 2}
-                                {@const nets = analyticsContext.sortedMonthly.slice(-6).map(m => m.income - m.expenses - (m.external_transfers || 0))}
-                                {@const maxAbs = Math.max(...nets.map(n => Math.abs(n)), 1)}
-                                <div class="health-mini-bars" style="margin-top: 0.375rem">
-                                    {#each nets as n}
-                                        <div style="height: {Math.max(Math.abs(n) / maxAbs * 12, 2)}px; background: {n >= 0 ? 'var(--positive)' : 'var(--negative)'}; opacity: 0.5; width: 5px; border-radius: 1px; align-self: flex-end;"></div>
-                                    {/each}
-                                </div>
-                            {/if}
-                        {:else}
-                            <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
-                        {/if}
+                <div class="analytics-health-drivers">
+                    <div class="analytics-health-driver">
+                        <span>Monthly net</span>
+                        <strong style="color: {(projectedYearEnd?.avgNet || 0) >= 0 ? 'var(--positive)' : 'var(--negative)'}">
+                            {projectedYearEnd ? `${projectedYearEnd.avgNet >= 0 ? '+' : ''}${formatCurrency(projectedYearEnd.avgNet)}` : '—'}
+                        </strong>
+                        <small>{projectedYearEnd ? `${projectedYearEnd.remainingMonths} months left in ${projectedYearEnd.currentYear}` : 'Need more history'}</small>
                     </div>
-
-                    <!-- Income Stability -->
-                    <div class="analytics-health-cell">
-                        <span class="analytics-health-label">Income Stability</span>
-                        {#if incomeStability}
-                            <div class="flex items-center gap-2">
-                                <span class="analytics-health-value" style="color: {incomeStability.dots >= 4 ? 'var(--positive)' : incomeStability.dots >= 3 ? 'var(--warning)' : 'var(--negative)'}">
-                                    {incomeStability.level}
-                                </span>
-                                <div class="flex gap-0.5">
-                                    {#each Array(5) as _, i}
-                                        <span class="w-1.5 h-1.5 rounded-full"
-                                            style="background: {i < incomeStability.dots ? (incomeStability.dots >= 4 ? 'var(--positive)' : incomeStability.dots >= 3 ? 'var(--warning)' : 'var(--negative)') : 'var(--surface-200)'}">
-                                        </span>
-                                    {/each}
-                                </div>
-                            </div>
-                            <span class="analytics-health-sub">σ {formatCurrency(incomeStability.stdDev)}</span>
-                        {:else}
-                            <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
-                        {/if}
+                    <div class="analytics-health-driver">
+                        <span>Income stability</span>
+                        <strong style="color: {incomeStability && incomeStability.dots >= 4 ? 'var(--positive)' : incomeStability && incomeStability.dots >= 3 ? 'var(--warning)' : 'var(--negative)'}">
+                            {incomeStability ? incomeStability.level : '—'}
+                        </strong>
+                        <small>{incomeStability ? `σ ${formatCurrency(incomeStability.stdDev)}` : 'Need more history'}</small>
                     </div>
-
-                    <!-- Income Consistency -->
-                    <div class="analytics-health-cell">
-                        <span class="analytics-health-label">Consistency</span>
-                        {#if incomeStability}
-                            <div class="flex items-center gap-1.5">
-                                <span class="material-symbols-outlined text-[16px]" style="color: var(--positive)">local_fire_department</span>
-                                <span class="analytics-health-value" style="color: var(--text-primary)">{incomeStability.streak} mo</span>
-                            </div>
-                            <span class="analytics-health-sub">consecutive income · avg {formatCompact(incomeStability.avgIncome)}/mo</span>
-                            {#if analyticsContext.sortedMonthly.length >= 2}
-                                <div class="health-streak-dots">
-                                    {#each analyticsContext.sortedMonthly.slice(-6) as m}
-                                        <span class="health-streak-dot {m.income > 0 ? 'filled' : ''}"></span>
-                                    {/each}
-                                </div>
-                            {/if}
-                        {:else}
-                            <span class="analytics-health-value" style="color: var(--text-muted)">—</span>
-                        {/if}
+                    <div class="analytics-health-driver">
+                        <span>Consistency</span>
+                        <strong>{incomeStability ? `${incomeStability.streak} mo` : '—'}</strong>
+                        <small>{incomeStability ? `avg ${formatCompact(incomeStability.avgIncome)}/mo income` : 'Need more history'}</small>
                     </div>
+                </div>
+                <div class="analytics-health-footer">
+                    <span>Year-end forecast</span>
+                    <a href="/budget">Build a plan →</a>
                 </div>
             </div>
         </div>
@@ -2163,11 +2530,11 @@
             </div>
             <span class="material-symbols-outlined text-[18px] transition-transform duration-200" style="color: var(--text-primary)">expand_more</span>
         </summary>
-        <div class="overflow-hidden" style="padding: 0">
+        <div class="overflow-x-auto" style="padding: 0">
             <table class="w-full">
                 <thead>
                     <tr style="border-bottom: 1px solid var(--card-border)">
-                        {#each ['Month', 'Income', 'Spending', 'Ext. Transfers', 'Net Flow'] as h}
+                        {#each ['Month', 'Income', 'Spending', 'Credits', 'Incoming', 'Ext. Transfers', 'Net Flow'] as h}
                             <th class="text-left px-5 py-2.5 text-[9px] font-bold uppercase tracking-wider"
                                 style="color: var(--text-muted)">{h}</th>
                         {/each}
@@ -2175,7 +2542,9 @@
                 </thead>
                 <tbody>
                     {#each [...monthly].sort((a,b) => b.month.localeCompare(a.month)) as m}
-                        {@const accrualNet = (m.income || 0) - (m.expenses || 0) + (m.refunds || 0) - (m.external_transfers || 0)}
+                        {@const creditsRefunds = m.credits_refunds ?? m.refunds ?? 0}
+                        {@const incomingTransfers = m.incoming_transfers || 0}
+                        {@const accrualNet = (m.income || 0) - (m.expenses || 0) + creditsRefunds + incomingTransfers - (m.external_transfers || 0)}
                         <tr class="transition-colors cursor-pointer" style="border-bottom: 1px solid var(--card-border)"
                             on:click={() => { selectedMonth = m.month; }}>
                             <td class="px-5 py-2.5 text-[12px] font-medium" style="color: var(--text-primary)">
@@ -2186,6 +2555,8 @@
                             </td>
                             <td class="px-5 py-2.5 text-[12px] font-mono text-positive">{formatCurrency(m.income)}</td>
                             <td class="px-5 py-2.5 text-[12px] font-mono text-negative">{formatCurrency(m.expenses)}</td>
+                            <td class="px-5 py-2.5 text-[12px] font-mono" style="color: {creditsRefunds > 0 ? 'var(--positive)' : 'var(--text-muted)'}">{creditsRefunds > 0 ? '+' : ''}{formatCurrency(creditsRefunds)}</td>
+                            <td class="px-5 py-2.5 text-[12px] font-mono" style="color: {incomingTransfers > 0 ? 'var(--flow-transfer)' : 'var(--text-muted)'}">{incomingTransfers > 0 ? '+' : ''}{formatCurrency(incomingTransfers)}</td>
                             <td class="px-5 py-2.5 text-[12px] font-mono" style="color: {(m.external_transfers || 0) > 0 ? 'var(--warning)' : 'var(--text-muted)'}">{formatCurrency(m.external_transfers || 0)}</td>
                             <td class="px-5 py-2.5 text-[12px] font-bold font-mono"
                                 style="color: {accrualNet >= 0 ? 'var(--positive)' : 'var(--negative)'}">

@@ -204,6 +204,17 @@ export function createApi(fetchFn = fetch) {
 
         getReviewQueue: () => request('/transactions/review-queue'),
 
+        bulkReviewTransactions: (params = {}, targetReviewed = true) => {
+            const query = new URLSearchParams();
+            if (params.month) query.set('month', params.month);
+            if (params.category) query.set('category', params.category);
+            if (params.account) query.set('account', params.account);
+            if (params.search) query.set('search', params.search);
+            if (params.reviewed != null) query.set('reviewed', params.reviewed);
+            query.set('target_reviewed', targetReviewed ? 'true' : 'false');
+            return request(`/transactions/bulk-review?${query.toString()}`, { method: 'POST' });
+        },
+
         exportTransactions: (params = {}) => {
             const query = new URLSearchParams();
             if (params.month) query.set('month', params.month);
@@ -294,9 +305,55 @@ export function createApi(fetchFn = fetch) {
                 body: JSON.stringify({ model }),
             }),
 
-        sync: () => request('/sync', { method: 'POST' }),
+        sync: async () => {
+            const result = await request('/sync', { method: 'POST' });
+            invalidateCache();
+            return result;
+        },
 
         getSyncStatus: () => request('/sync-status'),
+        getDataHealth: () => request('/data-health'),
+        getScheduledTransactions: (days = 45) => request(`/scheduled-transactions?days=${days}`),
+        getCashFlowForecast: (days = 90) => request(`/analytics/cash-flow-forecast?days=${days}`),
+        explainMonth: (month, useLlm = true, profile = null) => {
+            const params = new URLSearchParams();
+            const activeProfile = profile || get(profileParam);
+            if (activeProfile) params.set('profile', activeProfile);
+            const qs = params.toString();
+            return request(`/analytics/explain-month${qs ? '?' + qs : ''}`, {
+                method: 'POST',
+                body: JSON.stringify({ month, use_llm: useLlm })
+            });
+        },
+        getInvestments: () => request('/investments'),
+        createInvestmentHolding: (payload) =>
+            request('/investments/holdings', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            }),
+        updateInvestmentHolding: (holdingId, payload) =>
+            request(`/investments/holdings/${holdingId}`, {
+                method: 'PATCH',
+                body: JSON.stringify(payload)
+            }),
+        deleteInvestmentHolding: (holdingId) =>
+            request(`/investments/holdings/${holdingId}`, { method: 'DELETE' }),
+        getBackupStatus: () => request('/backup/status'),
+        exportBackup: async (includeCredentials = false) => {
+            const endpoint = appendProfileParam(`/backup/export?include_credentials=${includeCredentials ? 'true' : 'false'}`, 'GET');
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetchFn(`${BASE}${endpoint}`, { headers });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(err.detail || 'API error');
+            }
+            const blob = await res.blob();
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename="([^"]+)"/);
+            return { blob, filename: match?.[1] || 'folio-backup.json' };
+        },
 
         askCopilot: (question, profile, history = null) => {
             // Build endpoint with profile param for copilot context
@@ -398,6 +455,12 @@ export function createApi(fetchFn = fetch) {
                     source_conversation_id: sourceConversationId
                 })
             });
+        },
+        getSavedInsights: (limit = 20, profile = null) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            if (profile && profile !== 'household') params.set('profile', profile);
+            return request(`/copilot/insights?${params.toString()}`);
         },
 
         // ── Persistent memory (about_user.md) ──
@@ -579,8 +642,11 @@ export function createApi(fetchFn = fetch) {
                 body: JSON.stringify({ expense_type: expenseType })
             }),
 
-        confirmSubscription: (merchant, pattern, frequencyHint, category) =>
-            request('/subscriptions/confirm', {
+        confirmSubscription: (merchant, pattern, frequencyHint, category, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/confirm${qs ? '?' + qs : ''}`, {
                 method: 'POST',
                 body: JSON.stringify({
                     merchant,
@@ -588,24 +654,45 @@ export function createApi(fetchFn = fetch) {
                     frequency_hint: frequencyHint || 'monthly',
                     category: category || 'Subscriptions'
                 })
-            }),
+            });
+        },
 
-        dismissSubscription: (merchant, pattern) =>
-            request('/subscriptions/dismiss', {
+        dismissSubscription: (merchant, pattern, profile) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            const qs = params.toString();
+            return request(`/subscriptions/dismiss${qs ? '?' + qs : ''}`, {
                 method: 'POST',
                 body: JSON.stringify({
                     merchant,
                     pattern: pattern || null
                 })
-            }),
+            });
+        },
 
-        declareSubscription: (merchant, amount, frequency, profile) => {
+        declareSubscription: (merchant, amount, frequency, profile, category = 'Subscriptions', expectedDay = null) => {
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
+            const payload = { merchant, amount, frequency, category, profile: profile || null };
+            if (expectedDay !== null && expectedDay !== undefined && expectedDay !== '') {
+                payload.expected_day = Number(expectedDay);
+            }
             return request(`/subscriptions/declare${qs ? '?' + qs : ''}`, {
                 method: 'POST',
-                body: JSON.stringify({ merchant, amount, frequency })
+                body: JSON.stringify(payload)
+            });
+        },
+
+        dismissSubscriptionAmountReview: (merchant, suggestedAmount, latestDate, profile) => {
+            return request('/subscriptions/amount-review/dismiss', {
+                method: 'POST',
+                body: JSON.stringify({
+                    merchant,
+                    suggested_amount: suggestedAmount,
+                    latest_date: latestDate,
+                    profile: profile || null
+                })
             });
         },
 
@@ -647,13 +734,18 @@ export function createApi(fetchFn = fetch) {
                 body: JSON.stringify({ event_ids: eventIds })
             }),
 
-        redetectSubscriptions: (profile) => {
+        redetectSubscriptions: async (profile) => {
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
-            return request(`/subscriptions/redetect${qs ? '?' + qs : ''}`, {
+            const result = await request(`/subscriptions/redetect${qs ? '?' + qs : ''}`, {
                 method: 'POST'
             });
+            invalidateCacheByPrefix('analytics/recurring');
+            invalidateCacheByPrefix('scheduled-transactions');
+            invalidateCacheByPrefix('dashboard-bundle');
+            invalidateCacheByPrefix('cash-flow-forecast');
+            return result;
         },
 
         getBudgets: () => request('/budgets'),
@@ -775,8 +867,11 @@ export function createApi(fetchFn = fetch) {
                 body: JSON.stringify({ id }),
             }),
 
-        syncSimpleFIN: () =>
-            request('/simplefin/sync', { method: 'POST' }),
+        syncSimpleFIN: async () => {
+            const result = await request('/simplefin/sync', { method: 'POST' });
+            invalidateCache();
+            return result;
+        },
 
         // ── Provider Migration ──
 

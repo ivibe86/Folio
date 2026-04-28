@@ -255,6 +255,35 @@
     font-weight: 750;
 }
 
+.budget-goal-row .budget-goal-projection {
+    display: inline-flex;
+    width: fit-content;
+    margin-top: 0.4rem;
+    padding: 0.22rem 0.42rem;
+    border-radius: 0.45rem;
+    font-size: 0.62rem;
+    font-style: normal;
+    font-weight: 750;
+    letter-spacing: 0.02em;
+    background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+    color: var(--text-muted);
+}
+
+.budget-goal-projection-positive {
+    background: color-mix(in srgb, var(--positive) 12%, transparent);
+    color: var(--positive);
+}
+
+.budget-goal-projection-warning {
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--warning);
+}
+
+.budget-goal-projection-negative {
+    background: color-mix(in srgb, var(--negative) 12%, transparent);
+    color: var(--negative);
+}
+
 .budget-goal-list,
 .budget-goal-form {
     display: flex;

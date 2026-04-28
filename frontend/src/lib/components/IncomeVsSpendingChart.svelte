@@ -381,6 +381,8 @@ onMount(() => {
             viewBox="0 0 {chart.W} {chart.H}"
             preserveAspectRatio="xMidYMid meet"
             class="ivs-svg"
+            role="img"
+            aria-label="Income versus spending chart"
             on:mousemove={handleMouseMove}
             on:mouseleave={handleMouseLeave}
         >

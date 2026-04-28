@@ -7,16 +7,29 @@ Replaces the old JSON cache with database operations.
 import re
 import os
 import threading
-from datetime import datetime
+import calendar
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 from dotenv import load_dotenv
 import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
 from categorizer import categorize_transactions, _rule_based_categorize
-from database import get_db, dicts_from_rows, _extract_merchant_pattern
+from database import DB_PATH, get_db, dicts_from_rows, _extract_merchant_pattern
 from merchant_identity import (
     build_merchant_identity,
     canonicalize_merchant_key,
+)
+from recurring_obligations import (
+    add_months as _recurring_add_months,
+    backfill_from_legacy as _backfill_recurring_obligations,
+    canonical_key as _recurring_canonical_key,
+    get_recurring_bundle as _get_obligation_recurring_bundle,
+    get_scheduled_bundle as _get_obligation_scheduled_bundle,
+    merchant_match_keys as _recurring_match_keys,
+    record_feedback as _record_recurring_feedback,
+    restore_obligation as _restore_recurring_obligation,
+    sync_legacy_subscription_cache as _sync_recurring_legacy_cache,
+    upsert_user_obligation as _upsert_user_recurring_obligation,
 )
 from log_config import get_logger
 
@@ -25,6 +38,7 @@ load_dotenv()
 logger = get_logger(__name__)
 
 _lock = threading.Lock()
+_recurring_redetection_locks: dict[str, threading.Lock] = {}
 
 _COPILOT_HISTORY_CHAT_PREVIEW_CHARS = int(os.getenv("COPILOT_HISTORY_CHAT_PREVIEW_CHARS", "1000"))
 _COPILOT_HISTORY_FINANCE_PREVIEW_CHARS = int(os.getenv("COPILOT_HISTORY_FINANCE_PREVIEW_CHARS", "4000"))
@@ -203,7 +217,7 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
                         account_type,
                         current_balance as balance, currency, profile_id as profile,
                         COALESCE(provider, 'teller') as provider,
-                        manual_updated_at, manual_notes
+                        last_synced_at, manual_updated_at, manual_notes
                  FROM accounts WHERE is_active = 1"""
         params = []
         if profile and profile != "household":
@@ -218,10 +232,162 @@ def get_accounts_filtered(profile: str | None = None, conn=None) -> list[dict]:
             if acct["is_manual"] and acct.get("manual_updated_at"):
                 try:
                     updated = datetime.fromisoformat(str(acct["manual_updated_at"]).replace("Z", "+00:00"))
-                    acct["manual_is_stale"] = (datetime.now(updated.tzinfo) - updated).days > 45
+                    stale_days = (datetime.now(updated.tzinfo) - updated).days
+                    acct["manual_stale_days"] = stale_days
+                    acct["manual_is_stale"] = stale_days > 30
                 except Exception:
                     acct["manual_is_stale"] = False
         return accounts
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_data_health_summary(profile: str | None = None, conn=None) -> dict:
+    """Return account freshness and local data-safety signals for trust surfaces."""
+
+    def _parse_dt(value: str | None):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T"))
+        except Exception:
+            return None
+
+    def _days_since(value: str | None) -> int | None:
+        parsed = _parse_dt(value)
+        if not parsed:
+            return None
+        return max(0, (datetime.now(parsed.tzinfo) - parsed).days)
+
+    def _encryption_status() -> dict:
+        key_present = bool(os.getenv("TOKEN_ENCRYPTION_KEY"))
+        fernet_ready = False
+        if key_present:
+            try:
+                from cryptography.fernet import Fernet
+                Fernet(os.getenv("TOKEN_ENCRYPTION_KEY").encode())
+                fernet_ready = True
+            except Exception:
+                fernet_ready = False
+        return {
+            "key_present": key_present,
+            "fernet_ready": fernet_ready,
+            "status": "encrypted" if fernet_ready else "plaintext",
+            "message": (
+                "Credential encryption is active."
+                if fernet_ready
+                else "TOKEN_ENCRYPTION_KEY is missing or invalid; bank credentials may be stored in plaintext."
+            ),
+        }
+
+    def _query(c):
+        accounts = get_accounts_filtered(profile=profile, conn=c)
+        thresholds = {
+            "teller": int(os.getenv("FOLIO_TELLER_STALE_DAYS", "7")),
+            "simplefin": int(os.getenv("FOLIO_SIMPLEFIN_STALE_DAYS", "3")),
+            "manual": int(os.getenv("FOLIO_MANUAL_STALE_DAYS", "30")),
+        }
+        account_statuses = []
+        provider_counts: dict[str, dict] = {}
+        warnings = []
+        stale_count = 0
+
+        for acct in accounts:
+            provider = (acct.get("provider") or "teller").lower()
+            updated_at = acct.get("manual_updated_at") if provider == "manual" else acct.get("last_synced_at")
+            if not updated_at:
+                row = c.execute("SELECT last_synced_at FROM accounts WHERE id = ?", (acct.get("id"),)).fetchone()
+                updated_at = row["last_synced_at"] if row else None
+            days = _days_since(updated_at)
+            threshold = thresholds.get(provider, thresholds["teller"])
+            is_stale = days is None or days > threshold
+            if is_stale:
+                stale_count += 1
+
+            provider_bucket = provider_counts.setdefault(provider, {"provider": provider, "total": 0, "stale": 0})
+            provider_bucket["total"] += 1
+            if is_stale:
+                provider_bucket["stale"] += 1
+
+            status = {
+                "id": acct.get("id"),
+                "name": acct.get("name"),
+                "profile": acct.get("profile"),
+                "provider": provider,
+                "account_type": acct.get("account_type"),
+                "balance": acct.get("balance"),
+                "last_updated_at": updated_at,
+                "days_since_update": days,
+                "stale_threshold_days": threshold,
+                "is_stale": is_stale,
+                "is_manual": provider == "manual",
+            }
+            account_statuses.append(status)
+
+            if is_stale:
+                label = "updated" if provider == "manual" else "synced"
+                age = "never" if days is None else f"{days} days ago"
+                warnings.append({
+                    "type": "manual_stale" if provider == "manual" else "sync_stale",
+                    "severity": "warning",
+                    "account_id": acct.get("id"),
+                    "account_name": acct.get("name"),
+                    "provider": provider,
+                    "message": f"{acct.get('name')} was {label} {age}.",
+                    "action": "update_manual" if provider == "manual" else "sync_now",
+                })
+
+        active_simplefin_rows = c.execute(
+            "SELECT id, profile, display_name, last_synced_at FROM simplefin_connections WHERE is_active = 1"
+        ).fetchall()
+        simplefin_connections = []
+        for row in active_simplefin_rows:
+            days = _days_since(row["last_synced_at"])
+            simplefin_connections.append({
+                "id": row["id"],
+                "profile": row["profile"],
+                "display_name": row["display_name"],
+                "last_synced_at": row["last_synced_at"],
+                "days_since_sync": days,
+                "is_stale": days is None or days > thresholds["simplefin"],
+                "next_eligible_sync_hint": "SimpleFIN syncs are intentionally paced; avoid more than one pull per hour.",
+            })
+
+        active_teller_count = c.execute("SELECT COUNT(*) AS count FROM enrolled_tokens WHERE is_active = 1").fetchone()["count"]
+
+        encryption = _encryption_status()
+        if encryption["status"] != "encrypted":
+            warnings.append({
+                "type": "credential_encryption",
+                "severity": "warning",
+                "message": encryption["message"],
+                "action": "configure_encryption",
+            })
+
+        latest_updates = [s["last_updated_at"] for s in account_statuses if s.get("last_updated_at")]
+        latest_update = max(latest_updates) if latest_updates else None
+
+        return {
+            "generated_at": datetime.now().replace(microsecond=0).isoformat(sep=" "),
+            "status": "attention" if warnings else "healthy",
+            "thresholds": thresholds,
+            "summary": {
+                "total_accounts": len(accounts),
+                "stale_accounts": stale_count,
+                "warnings": len(warnings),
+                "latest_account_update": latest_update,
+                "active_teller_enrollments": active_teller_count,
+                "active_simplefin_connections": len(simplefin_connections),
+            },
+            "providers": list(provider_counts.values()),
+            "accounts": account_statuses,
+            "simplefin_connections": simplefin_connections,
+            "encryption": encryption,
+            "warnings": warnings,
+        }
 
     if conn is not None:
         return _query(conn)
@@ -376,6 +542,98 @@ def get_transactions_paginated(
         return _query(c)
 
 
+def bulk_mark_transactions_reviewed(
+    month: str | None = None,
+    category: str | None = None,
+    account: str | None = None,
+    search: str | None = None,
+    reviewed: bool | None = None,
+    profile: str | None = None,
+    target_reviewed: bool = True,
+    conn=None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """Mark transactions matching the current filter set as reviewed/unreviewed."""
+    def _update(c):
+        tx_source = _transactions_source(alias="t")
+        alias_join_sql = _merchant_alias_join_sql("t", "merchant_alias")
+        metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
+        where_clauses = []
+        params = []
+
+        if profile and profile != "household":
+            where_clauses.append("t.profile_id = ?")
+            params.append(profile)
+        if month:
+            where_clauses.append("t.date LIKE ?")
+            params.append(month + "%")
+        else:
+            if start_date:
+                where_clauses.append("t.date >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("t.date <= ?")
+                params.append(end_date)
+        if category:
+            where_clauses.append(
+                """(t.category = ? OR EXISTS (
+                    SELECT 1 FROM transaction_splits s
+                    WHERE s.transaction_id = t.id AND s.category = ?
+                ))"""
+            )
+            params.extend([category, category])
+        if account:
+            where_clauses.append("t.account_name = ?")
+            params.append(account)
+        if reviewed is not None:
+            where_clauses.append("COALESCE(t.reviewed, 0) = ?")
+            params.append(1 if reviewed else 0)
+        if search:
+            escaped = _escape_like(search.upper())
+            where_clauses.append(
+                """(
+                    UPPER(COALESCE(t.description, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.raw_description, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.merchant_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(merchant_alias.display_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(merchant_meta.clean_name, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.category, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.notes, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.tags, '')) LIKE ? ESCAPE '\\'
+                    OR UPPER(COALESCE(t.account_name, '')) LIKE ? ESCAPE '\\'
+                )"""
+            )
+            params.extend([f"%{escaped}%"] * 9)
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        id_rows = c.execute(
+            f"""SELECT t.id
+                FROM {tx_source}
+                {alias_join_sql}
+                {metadata_join_sql}
+                {where_sql}""",
+            params,
+        ).fetchall()
+        ids = [row[0] for row in id_rows]
+        if not ids:
+            return {"updated_count": 0, "matched_count": 0}
+
+        placeholders = ",".join("?" * len(ids))
+        cur = c.execute(
+            f"""UPDATE transactions
+                SET reviewed = ?, updated_at = datetime('now')
+                WHERE id IN ({placeholders})""",
+            [1 if target_reviewed else 0, *ids],
+        )
+        return {"updated_count": cur.rowcount or 0, "matched_count": len(ids)}
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
 def get_summary_data(profile: str | None = None, conn=None) -> dict:
     """Compute summary statistics using SQL-level aggregation."""
     def _query(c):
@@ -460,18 +718,32 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
             profile_params,
         ).fetchone()[0]
 
-        # External transfers (Zelle/Venmo to other people) — included in net flow
+        # External transfers (Zelle/Venmo to other people) — included in net flow.
+        # In household view, household transfers are hidden by design; in an
+        # individual view they may still be useful as personal inflow/outflow.
+        if is_household:
+            personal_transfer_type_clause = "expense_type = 'transfer_external'"
+        else:
+            personal_transfer_type_clause = "expense_type IN ('transfer_external', 'transfer_household')"
+
         external_transfers = c.execute(
-            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE expense_type = 'transfer_external' AND amount < 0{profile_clause}",
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE {personal_transfer_type_clause} AND amount < 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+
+        incoming_transfers = c.execute(
+            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE {personal_transfer_type_clause} AND amount > 0{profile_clause}",
             profile_params,
         ).fetchone()[0]
 
         net_spending = expenses - refunds
-        net_flow = income - net_spending - external_transfers
+        net_flow = income - net_spending + incoming_transfers - external_transfers
         return {
             "income": round(income, 2),
             "expenses": round(expenses, 2),
             "refunds": round(refunds, 2),
+            "credits_refunds": round(refunds, 2),
+            "incoming_transfers": round(incoming_transfers, 2),
             "net_spending": round(net_spending, 2),
             "savings": round(savings, 2),
             "net_flow": round(net_flow, 2),
@@ -551,7 +823,12 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
                 "net": round(inc - exp + ref, 2),
             })
 
-        # Compute CC repaid and external transfers per month
+        # Compute CC repaid and personal transfer inflow/outflow per month.
+        if is_household:
+            personal_transfer_type_clause = "expense_type = 'transfer_external'"
+        else:
+            personal_transfer_type_clause = "expense_type IN ('transfer_external', 'transfer_household')"
+
         cc_sql = f"""
             SELECT SUBSTR(date, 1, 7) as month,
                    COALESCE(SUM(ABS(amount)), 0) as cc_repaid
@@ -567,17 +844,34 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
             SELECT SUBSTR(date, 1, 7) as month,
                    COALESCE(SUM(ABS(amount)), 0) as ext_transfers
             FROM {tx_source}
-            WHERE expense_type = 'transfer_external' AND amount < 0
+            WHERE {personal_transfer_type_clause} AND amount < 0
               AND LENGTH(date) >= 7{profile_clause}
             GROUP BY SUBSTR(date, 1, 7)
         """
         ext_rows = c.execute(ext_sql, profile_params).fetchall()
         ext_by_month = {row[0]: row[1] for row in ext_rows}
 
+        incoming_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month,
+                   COALESCE(SUM(amount), 0) as incoming_transfers
+            FROM {tx_source}
+            WHERE {personal_transfer_type_clause} AND amount > 0
+              AND LENGTH(date) >= 7{profile_clause}
+            GROUP BY SUBSTR(date, 1, 7)
+        """
+        incoming_rows = c.execute(incoming_sql, profile_params).fetchall()
+        incoming_by_month = {row[0]: row[1] for row in incoming_rows}
+
         for entry in result:
             m = entry["month"]
             entry["cc_repaid"] = round(cc_by_month.get(m, 0), 2)
             entry["external_transfers"] = round(ext_by_month.get(m, 0), 2)
+            entry["incoming_transfers"] = round(incoming_by_month.get(m, 0), 2)
+            entry["credits_refunds"] = entry["refunds"]
+            entry["net"] = round(
+                entry["income"] - entry["expenses"] + entry["refunds"] + entry["incoming_transfers"] - entry["external_transfers"],
+                2,
+            )
 
         return result
 
@@ -695,7 +989,6 @@ def get_net_worth_delta_metrics(profile: str | None = None, conn=None) -> dict:
             (history_profile,),
         ).fetchall()
         if history_rows:
-            from datetime import date as dt_date, timedelta
             current_net_worth = float(history_rows[-1][1] or 0)
             today = dt_date.today()
             previous_month_end = today.replace(day=1) - timedelta(days=1)
@@ -959,17 +1252,55 @@ def get_plan_snapshot_data(profile: str | None = None, conn=None) -> dict:
     from datetime import date as dt_date
 
     def _query(c):
-        current_month = dt_date.today().strftime("%Y-%m")
+        today = dt_date.today()
+        current_month = today.strftime("%Y-%m")
+        days_remaining_this_month = max(0, calendar.monthrange(today.year, today.month)[1] - today.day)
         categories = get_category_analytics_data(month=current_month, profile=profile, conn=c)["categories"]
         budgets = get_category_budgets(profile=profile, conn=c)
-        recurring = get_recurring_from_db(profile=profile, conn=c)
         goals = get_goals(profile=profile, conn=c)
+        monthly = get_monthly_analytics_data(profile=profile, conn=c)
+        scheduled = get_scheduled_transactions_data(days=max(days_remaining_this_month, 1), profile=profile, conn=c)
+        current_month_row = next((row for row in monthly if row.get("month") == current_month), None) or {}
+        prior_income_months = [
+            float(row.get("income") or 0)
+            for row in sorted(monthly, key=lambda row: row.get("month") or "", reverse=True)
+            if (row.get("month") or "") < current_month and float(row.get("income") or 0) > 0
+        ][:3]
+        average_income = sum(prior_income_months) / len(prior_income_months) if prior_income_months else 0.0
+        current_income = float(current_month_row.get("income") or 0)
+        planned_income = max(current_income, average_income)
 
         budget_by_cat = {item["category"]: float(item.get("amount") or 0) for item in budgets}
         spent_by_cat = {item["category"]: float(item.get("total") or 0) for item in categories}
         total_budget = sum(v for v in budget_by_cat.values() if v > 0)
         budgeted_spent = sum(spent_by_cat.get(cat, 0) for cat in budget_by_cat)
-        active_goal_gap = sum(max(float(g["target_amount"] or 0) - float(g["current_amount"] or 0), 0) for g in goals)
+        mandatory_spend = sum(float(item.get("total") or 0) for item in categories if item.get("expense_type") == "fixed")
+        variable_spend = sum(float(item.get("total") or 0) for item in categories if item.get("expense_type") == "variable")
+        mandatory_remaining = sum(
+            float(item.get("amount") or 0)
+            for item in scheduled.get("items", [])
+            if str(item.get("next_date") or "").startswith(current_month)
+            and bool(item.get("confirmed", item.get("source") != "recurring_candidate"))
+        )
+        mandatory_projected = mandatory_spend + mandatory_remaining
+        tx_source = _transactions_source()
+        profile_clause = ""
+        profile_params = []
+        if profile and profile != "household":
+            profile_clause = " AND profile_id = ?"
+            profile_params = [profile]
+        save_first_actual = c.execute(
+            f"""SELECT COALESCE(SUM(ABS(amount)), 0)
+                FROM {tx_source}
+                WHERE category = 'Savings Transfer'
+                  AND amount < 0
+                  AND date LIKE ?{profile_clause}""",
+            [current_month + "%", *profile_params],
+        ).fetchone()[0]
+        save_first_rate = 0.20
+        save_first_target = planned_income * save_first_rate
+        safe_to_spend_limit = planned_income - save_first_target - mandatory_projected
+        safe_to_spend = safe_to_spend_limit - variable_spend
         over_count = sum(1 for cat, amount in budget_by_cat.items() if amount > 0 and spent_by_cat.get(cat, 0) > amount)
 
         return {
@@ -977,9 +1308,21 @@ def get_plan_snapshot_data(profile: str | None = None, conn=None) -> dict:
             "total_budget": round(total_budget, 2),
             "budgeted_spent": round(budgeted_spent, 2),
             "remaining": round(total_budget - budgeted_spent, 2),
-            "recurring_monthly": round(float(recurring.get("total_monthly") or 0), 2),
+            "planned_income": round(planned_income, 2),
+            "income_actual": round(current_income, 2),
+            "income_basis": "actual" if current_income >= average_income else "trailing_average",
+            "save_first_rate": save_first_rate,
+            "save_first_target": round(save_first_target, 2),
+            "save_first_actual": round(float(save_first_actual or 0), 2),
+            "save_first_remaining": round(max(save_first_target - float(save_first_actual or 0), 0), 2),
+            "mandatory_spend": round(mandatory_spend, 2),
+            "mandatory_remaining": round(mandatory_remaining, 2),
+            "mandatory_projected": round(mandatory_projected, 2),
+            "variable_spend": round(variable_spend, 2),
+            "safe_to_spend_limit": round(safe_to_spend_limit, 2),
+            "safe_to_spend_spent": round(variable_spend, 2),
+            "safe_to_spend": round(safe_to_spend, 2),
             "active_goal_count": len(goals),
-            "goal_gap": round(active_goal_gap, 2),
             "over_count": over_count,
         }
 
@@ -1037,6 +1380,50 @@ def _profile_id(profile: str | None) -> str:
 def get_goals(profile: str | None = None, conn=None) -> list[dict]:
     profile_id = _profile_id(profile)
 
+    def _with_projection(goal: dict) -> dict:
+        target = max(float(goal.get("target_amount") or 0), 0)
+        current = max(float(goal.get("current_amount") or 0), 0)
+        gap = max(target - current, 0)
+        target_date = _parse_date_only(goal.get("target_date"))
+        created = _parse_date_only(goal.get("created_at"))
+        today = date.today()
+        months_remaining = 0
+        if target_date and target_date > today:
+            months_remaining = max(1, round((target_date - today).days / 30.4375))
+        required_monthly = gap / months_remaining if gap > 0 and months_remaining > 0 else 0
+
+        months_elapsed = 0
+        average_monthly_progress = 0
+        projected_completion_date = None
+        if created and created < today and current > 0:
+            months_elapsed = max(1, round((today - created).days / 30.4375))
+            average_monthly_progress = current / months_elapsed
+            if gap > 0 and average_monthly_progress > 0:
+                months_to_finish = max(1, round(gap / average_monthly_progress))
+                projected_completion_date = (today + timedelta(days=round(months_to_finish * 30.4375))).isoformat()
+
+        if gap <= 0:
+            status = "funded"
+        elif not target_date:
+            status = "needs_target_date"
+        elif average_monthly_progress <= 0:
+            status = "needs_progress"
+        elif average_monthly_progress + 0.01 >= required_monthly:
+            status = "on_track"
+        else:
+            status = "behind"
+
+        projection = {
+            "gap": round(gap, 2),
+            "progress_percent": round((current / target) * 100, 1) if target > 0 else 0,
+            "months_remaining": months_remaining,
+            "required_monthly": round(required_monthly, 2),
+            "average_monthly_progress": round(average_monthly_progress, 2),
+            "projected_completion_date": projected_completion_date,
+            "status": status,
+        }
+        return {**goal, "projection": projection}
+
     def _query(c):
         rows = c.execute(
             """SELECT id, profile_id, name, goal_type, target_amount, current_amount,
@@ -1047,7 +1434,7 @@ def get_goals(profile: str | None = None, conn=None) -> list[dict]:
                ORDER BY COALESCE(target_date, '9999-99-99'), updated_at DESC""",
             (profile_id,),
         ).fetchall()
-        return dicts_from_rows(rows)
+        return [_with_projection(row) for row in dicts_from_rows(rows)]
 
     if conn is not None:
         return _query(conn)
@@ -1445,6 +1832,10 @@ def get_dashboard_bundle_data(
         monthly_cat_breakdown = get_monthly_category_breakdown(profile=profile, months=12, conn=c)
         plan_snapshot = get_plan_snapshot_data(profile=profile, conn=c)
         review_queue = get_review_queue_data(profile=profile, conn=c)
+        data_health = get_data_health_summary(profile=profile, conn=c)
+        scheduled = get_scheduled_transactions_data(days=45, profile=profile, conn=c)
+        cash_flow_forecast = get_cash_flow_forecast_data(days=90, profile=profile, conn=c)
+        investments = get_investments_summary_data(profile=profile, conn=c)
 
         return {
             "summary": summary_out,
@@ -1458,9 +1849,261 @@ def get_dashboard_bundle_data(
             "netWorthYtdDelta": nw_deltas.get("ytd"),
             "ccRepaid": summary_out.get("cc_repaid", 0),
             "externalTransfers": summary_out.get("external_transfers", 0),
+            "incomingTransfers": summary_out.get("incoming_transfers", 0),
+            "creditsRefunds": summary_out.get("credits_refunds", summary_out.get("refunds", 0)),
             "monthlyCategoryBreakdown": monthly_cat_breakdown,
             "planSnapshot": plan_snapshot,
             "reviewQueue": review_queue,
+            "dataHealth": data_health,
+            "scheduled": scheduled,
+            "cashFlowForecast": cash_flow_forecast,
+            "investments": investments,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INVESTMENTS LITE
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ASSET_CLASS_LABELS = {
+    "stock": "Stocks",
+    "bond": "Bonds",
+    "cash": "Cash",
+    "fund": "Funds",
+    "retirement": "Retirement",
+    "crypto": "Crypto",
+    "real_estate": "Real Estate",
+    "other": "Other",
+}
+
+
+def _holding_market_value(row: dict) -> float:
+    manual_value = row.get("manual_value")
+    if manual_value is not None:
+        return float(manual_value or 0)
+    return float(row.get("quantity") or 0) * float(row.get("current_price") or 0)
+
+
+def _serialize_holding(row: dict) -> dict:
+    out = dict(row)
+    out["market_value"] = round(_holding_market_value(out), 2)
+    out["cost_basis_total"] = round(float(out.get("quantity") or 0) * float(out.get("cost_basis") or 0), 2)
+    out["gain_loss"] = round(out["market_value"] - out["cost_basis_total"], 2)
+    out["asset_class_label"] = _ASSET_CLASS_LABELS.get(out.get("asset_class"), "Other")
+    return out
+
+
+def get_investments_summary_data(profile: str | None = None, conn=None) -> dict:
+    """Return manual holdings, allocation, and drift. No external price calls."""
+    def _query(c):
+        params = []
+        clause = ""
+        if profile and profile != "household":
+            clause = "WHERE h.profile_id = ?"
+            params.append(profile)
+        rows = c.execute(
+            f"""SELECT h.*, a.account_name, a.account_subtype
+                FROM investment_holdings h
+                LEFT JOIN accounts a ON a.id = h.account_id
+                {clause}
+                ORDER BY h.asset_class, UPPER(COALESCE(NULLIF(h.symbol, ''), h.name))""",
+            params,
+        ).fetchall()
+        holdings = [_serialize_holding(dict(row)) for row in rows]
+        total_value = round(sum(item["market_value"] for item in holdings), 2)
+        total_cost = round(sum(item["cost_basis_total"] for item in holdings), 2)
+
+        allocation_map: dict[str, dict] = {}
+        for item in holdings:
+            key = item.get("asset_class") or "other"
+            bucket = allocation_map.setdefault(
+                key,
+                {
+                    "asset_class": key,
+                    "label": _ASSET_CLASS_LABELS.get(key, "Other"),
+                    "value": 0.0,
+                    "target_percent": None,
+                },
+            )
+            bucket["value"] += item["market_value"]
+            if item.get("target_percent") is not None:
+                bucket["target_percent"] = (bucket["target_percent"] or 0) + float(item.get("target_percent") or 0)
+
+        allocation = []
+        for bucket in allocation_map.values():
+            actual = (bucket["value"] / total_value * 100) if total_value else 0
+            target = bucket["target_percent"]
+            allocation.append({
+                **bucket,
+                "value": round(bucket["value"], 2),
+                "actual_percent": round(actual, 1),
+                "target_percent": round(target, 1) if target is not None else None,
+                "drift_percent": round(actual - target, 1) if target is not None else None,
+            })
+        allocation.sort(key=lambda item: item["value"], reverse=True)
+
+        return {
+            "holdings": holdings,
+            "allocation": allocation,
+            "summary": {
+                "holding_count": len(holdings),
+                "total_value": total_value,
+                "total_cost": total_cost,
+                "gain_loss": round(total_value - total_cost, 2),
+                "gain_loss_percent": round(((total_value - total_cost) / total_cost * 100), 1) if total_cost else None,
+                "priced_manually": True,
+                "external_price_refresh": "off",
+            },
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def upsert_investment_holding(payload: dict, holding_id: int | None = None, profile: str | None = None, conn=None) -> dict:
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        name = (payload.get("name") or payload.get("symbol") or "").strip()
+        if not name:
+            raise ValueError("Holding name or symbol is required.")
+        asset_class = (payload.get("asset_class") or "other").strip() or "other"
+        if asset_class not in _ASSET_CLASS_LABELS:
+            asset_class = "other"
+        account_id = (payload.get("account_id") or "").strip() or None
+        if account_id:
+            acct = c.execute(
+                "SELECT id FROM accounts WHERE id = ? AND profile_id = ? AND is_active = 1",
+                (account_id, profile_id),
+            ).fetchone()
+            if not acct:
+                raise ValueError("Account not found for this profile.")
+        values = {
+            "profile_id": profile_id,
+            "account_id": account_id,
+            "symbol": (payload.get("symbol") or "").strip().upper(),
+            "name": name,
+            "asset_class": asset_class,
+            "quantity": float(payload.get("quantity") or 0),
+            "cost_basis": float(payload.get("cost_basis") or 0),
+            "current_price": float(payload.get("current_price") or 0),
+            "manual_value": float(payload["manual_value"]) if payload.get("manual_value") not in (None, "") else None,
+            "target_percent": float(payload["target_percent"]) if payload.get("target_percent") not in (None, "") else None,
+            "notes": (payload.get("notes") or "").strip(),
+            "price_as_of": (payload.get("price_as_of") or "").strip() or datetime.now().date().isoformat(),
+        }
+        now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
+        if holding_id is None:
+            cur = c.execute(
+                """INSERT INTO investment_holdings
+                   (profile_id, account_id, symbol, name, asset_class, quantity, cost_basis,
+                    current_price, manual_value, target_percent, notes, price_as_of, updated_at)
+                   VALUES (:profile_id, :account_id, :symbol, :name, :asset_class, :quantity, :cost_basis,
+                           :current_price, :manual_value, :target_percent, :notes, :price_as_of, :updated_at)""",
+                {**values, "updated_at": now},
+            )
+            holding_id_out = cur.lastrowid
+        else:
+            existing = c.execute(
+                "SELECT id FROM investment_holdings WHERE id = ? AND profile_id = ?",
+                (holding_id, profile_id),
+            ).fetchone()
+            if not existing:
+                return None
+            c.execute(
+                """UPDATE investment_holdings
+                   SET account_id = :account_id, symbol = :symbol, name = :name, asset_class = :asset_class,
+                       quantity = :quantity, cost_basis = :cost_basis, current_price = :current_price,
+                       manual_value = :manual_value, target_percent = :target_percent, notes = :notes,
+                       price_as_of = :price_as_of, updated_at = :updated_at
+                   WHERE id = :id AND profile_id = :profile_id""",
+                {**values, "updated_at": now, "id": holding_id},
+            )
+            holding_id_out = holding_id
+        row = c.execute("SELECT * FROM investment_holdings WHERE id = ?", (holding_id_out,)).fetchone()
+        return _serialize_holding(dict(row))
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def delete_investment_holding(holding_id: int, profile: str | None = None, conn=None) -> bool:
+    profile_id = _profile_id(profile)
+
+    def _update(c):
+        cur = c.execute("DELETE FROM investment_holdings WHERE id = ? AND profile_id = ?", (holding_id, profile_id))
+        return cur.rowcount > 0
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
+def get_backup_status_data(profile: str | None = None, conn=None) -> dict:
+    """Return backup/export readiness and the DB location without leaking secrets."""
+    def _query(c):
+        tables = [
+            row["name"]
+            for row in c.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type = 'table'
+                     AND name NOT LIKE 'sqlite_%'
+                   ORDER BY name"""
+            ).fetchall()
+        ]
+        excluded = {"enrolled_tokens", "simplefin_connections"}
+        included = [name for name in tables if name not in excluded]
+        db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+        return {
+            "db_path": str(DB_PATH),
+            "db_size_bytes": db_size,
+            "export_format": "json",
+            "included_tables": included,
+            "excluded_tables": sorted(excluded.intersection(tables)),
+            "profile_scope": profile or "household",
+            "encryption": get_data_health_summary(profile=profile, conn=c).get("encryption", {}),
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def create_backup_export_data(profile: str | None = None, include_credentials: bool = False, conn=None) -> dict:
+    """Create a JSON-safe export. Credential tables are excluded unless explicitly requested."""
+    def _query(c):
+        status = get_backup_status_data(profile=profile, conn=c)
+        excluded = set() if include_credentials else set(status["excluded_tables"])
+        tables = []
+        for table in status["included_tables"] + ([] if not include_credentials else status["excluded_tables"]):
+            if table in excluded:
+                continue
+            table_info = c.execute(f"PRAGMA table_info({table})").fetchall()
+            columns = [row["name"] for row in table_info]
+            rows = [dict(row) for row in c.execute(f"SELECT * FROM {table}").fetchall()]
+            if profile and profile != "household" and "profile_id" in columns:
+                rows = [row for row in rows if row.get("profile_id") == profile]
+            elif profile and profile != "household" and "profile" in columns:
+                rows = [row for row in rows if row.get("profile") == profile]
+            tables.append({"name": table, "columns": columns, "rows": rows})
+        return {
+            "app": "Folio",
+            "created_at": datetime.now().replace(microsecond=0).isoformat(sep=" "),
+            "profile_scope": profile or "household",
+            "credential_tables_included": include_credentials,
+            "excluded_tables": [] if include_credentials else status["excluded_tables"],
+            "tables": tables,
         }
 
     if conn is not None:
@@ -1472,15 +2115,26 @@ def get_dashboard_bundle_data(
 # RECURRING / SUBSCRIPTION QUERY OPERATIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _ensure_recurring_obligation_projection(conn, profile: str | None = None) -> None:
+    """Keep the v2 obligation model populated before production recurring reads."""
+    _backfill_recurring_obligations(conn, profile=profile)
+    _sync_recurring_legacy_cache(conn, profile=profile)
+
+
 def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
     """
-    Read stored recurring subscription data from the merchants table.
-    Returns the same shape as RecurringDetector.detect() so the frontend
-    migration is minimal. Includes events and dismissed items in the bundle.
+    Read recurring subscriptions from the v2 obligation model.
+    Legacy merchant subscription fields are now compatibility/cache writes only.
     """
     import json as _json
 
     def _query(c):
+        try:
+            _ensure_recurring_obligation_projection(c, profile)
+            return _get_obligation_recurring_bundle(c, profile)
+        except Exception as exc:
+            logger.debug("Recurring obligation read fell back to legacy merchants view: %s", exc)
+
         profile_clause = ""
         profile_params = []
         if profile and profile != "household":
@@ -1493,7 +2147,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
                        industry, subscription_frequency, subscription_amount,
                        subscription_status, last_charge_date, next_expected_date,
                        charge_count, total_spent, cancelled_by_user, cancelled_at,
-                       source
+                       source, profile_id
                 FROM merchants
                 WHERE is_subscription = 1{profile_clause}
                 ORDER BY
@@ -1508,7 +2162,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
 
         # Dismissed items
         dismissed_rows = c.execute(
-            f"""SELECT merchant_name, dismissed_at
+            f"""SELECT merchant_name, dismissed_at, profile_id
                 FROM dismissed_recurring
                 WHERE 1=1{profile_clause.replace('profile_id', 'profile_id')}""",
             profile_params,
@@ -1516,7 +2170,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
 
         # Events (recent, last 50)
         event_rows = c.execute(
-            f"""SELECT id, event_type, merchant_name, detail, created_at, is_read
+            f"""SELECT id, event_type, merchant_name, detail, created_at, is_read, profile_id
                 FROM subscription_events
                 WHERE 1=1{profile_clause.replace('profile_id', 'profile_id')}
                 ORDER BY created_at DESC
@@ -1526,13 +2180,32 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
 
         # User-declared subscriptions (to merge in)
         user_decl_rows = c.execute(
-            f"""SELECT merchant_name, amount, frequency
+            f"""SELECT merchant_name, amount, frequency,
+                       COALESCE(NULLIF(category, ''), 'Subscriptions'),
+                       profile_id
                 FROM user_declared_subscriptions
                 WHERE is_active = 1{profile_clause.replace('profile_id', 'profile_id')}""",
             profile_params,
         ).fetchall()
 
-        dismissed_set = {row[0] for row in dismissed_rows}
+        dismissed_set = set()
+        scoped_dismissals = not (profile and profile != "household")
+        for row in dismissed_rows:
+            row_profile = row[2] or "household"
+            for key in _recurring_match_keys(row[0]):
+                dismissed_set.add(f"{row_profile}::{key}")
+                if not scoped_dismissals:
+                    dismissed_set.add(key)
+
+        def _is_dismissed(merchant: str | None, row_profile: str | None) -> bool:
+            keys = _recurring_match_keys(merchant)
+            if any(key in dismissed_set for key in keys):
+                return True
+            return any(f"{row_profile or 'household'}::{key}" in dismissed_set for key in keys)
+
+        def _seen_key(merchant: str | None, row_profile: str | None) -> str:
+            key = _recurring_canonical_key(merchant or "")
+            return f"{row_profile or 'household'}::{key}" if key else ""
 
         items = []
         active_count = 0
@@ -1546,20 +2219,22 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
         # Add user-declared first (Layer 0 — highest priority)
         for row in user_decl_rows:
             merchant_name = row[0]
-            if merchant_name in dismissed_set:
+            row_profile = row[4] or "household"
+            if _is_dismissed(merchant_name, row_profile):
                 continue
-            merchant_key_upper = merchant_name.upper().strip()
+            merchant_key_upper = _seen_key(merchant_name, row_profile)
             seen_merchants.add(merchant_key_upper)
 
             amt = row[1]
             freq = row[2]
+            category = row[3] or "Subscriptions"
             annual = _annualize_amount(amt, freq)
 
             items.append({
                 "merchant": merchant_name,
                 "clean_name": merchant_name,
                 "logo_url": None,
-                "category": "Subscriptions",
+                "category": category,
                 "frequency": freq,
                 "amount": round(amt, 2),
                 "annual_cost": round(annual, 2),
@@ -1572,6 +2247,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
                 "price_change": None,
                 "matched_by": "user",
                 "cancelled": False,
+                "profile": row_profile,
             })
             active_count += 1
             total_annual += annual
@@ -1580,12 +2256,14 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
         # Add detection-based subscriptions
         for row in rows:
             merchant_key = row[0]
-            if merchant_key in dismissed_set:
+            row_profile = row[16] or "household"
+            if _is_dismissed(merchant_key, row_profile) or _is_dismissed(row[1], row_profile):
                 continue
-            if merchant_key in seen_merchants:
+            merchant_seen_key = _seen_key(merchant_key, row_profile)
+            if merchant_seen_key in seen_merchants:
                 # User declaration wins — update with transaction data
                 for item in items:
-                    if item["merchant"].upper().strip() == merchant_key:
+                    if _seen_key(item["merchant"], item.get("profile")) == merchant_seen_key:
                         item["last_charge"] = row[9]
                         item["next_expected"] = row[10]
                         item["charge_count"] = row[11] or 0
@@ -1595,7 +2273,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
                         break
                 continue
 
-            seen_merchants.add(merchant_key)
+            seen_merchants.add(merchant_seen_key)
             status = row[8] or "inactive"
             cancelled = bool(row[13])
             amt = row[7] or 0
@@ -1624,6 +2302,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
                 "price_change": None,
                 "matched_by": row[15] or "algorithm",
                 "cancelled": cancelled,
+                "profile": row_profile,
             })
 
             if status == "active" and not cancelled:
@@ -1656,7 +2335,7 @@ def get_recurring_from_db(profile: str | None = None, conn=None) -> dict:
 
         # Build dismissed list
         dismissed = [
-            {"merchant": row[0], "dismissed_at": row[1]}
+            {"merchant": row[0], "dismissed_at": row[1], "profile": row[2] or "household"}
             for row in dismissed_rows
         ]
 
@@ -1683,6 +2362,804 @@ def _annualize_amount(amount: float, frequency: str) -> float:
     """Convert per-period amount to annual cost."""
     multipliers = {"monthly": 12, "quarterly": 4, "semi_annual": 2, "annual": 1}
     return amount * multipliers.get(frequency, 12)
+
+
+def _advance_recurring_date(base: date, frequency: str) -> date:
+    """Advance a date by one recurrence period without fixed-day calendar drift."""
+    freq = (frequency or "monthly").lower()
+    if freq in {"weekly", "week"}:
+        return base + timedelta(days=7)
+    if freq in {"biweekly", "bi_weekly", "fortnightly"}:
+        return base + timedelta(days=14)
+    if freq in {"quarterly", "quarter"}:
+        return _recurring_add_months(base, 3)
+    if freq in {"annual", "annually", "yearly", "year"}:
+        return _recurring_add_months(base, 12)
+    if freq in {"semi_annual", "semiannual", "semi-annually"}:
+        return _recurring_add_months(base, 6)
+    return _recurring_add_months(base, 1)
+
+
+def _parse_date_only(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T")).date()
+    except Exception:
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+
+def get_scheduled_transactions_data(days: int = 45, profile: str | None = None, conn=None) -> dict:
+    """
+    Derive upcoming scheduled bills from the v2 recurring obligation model.
+    Legacy projections below remain as a safety fallback for pre-migration DBs.
+    """
+    window_days = max(1, min(int(days or 45), 180))
+    today = date.today()
+    window_end = today + timedelta(days=window_days)
+
+    def _upcoming_group(merchant: str, category: str | None) -> dict:
+        text = f"{merchant or ''} {category or ''}".lower()
+        category_name = category or "Subscriptions"
+        checks = [
+            ("housing", "Housing", ("rent", "mortgage", "apartment", "property", "hoa", "landlord", "housing")),
+            ("utilities", "Utilities", ("utility", "utilities", "electric", "water", "gas", "pg&e", "pge", "internet", "xfinity", "comcast", "verizon", "at&t", "phone", "mobile")),
+            ("debt", "Debt", ("loan", "student loan", "auto loan", "mortgage", "credit card", "visa", "mastercard", "amex", "debt")),
+            ("insurance", "Insurance", ("insurance", "geico", "progressive", "state farm", "allstate", "anthem", "kaiser")),
+            ("subscriptions", "Subscriptions", ("subscription", "netflix", "spotify", "apple", "google", "claude", "anthropic", "openai", "chatgpt", "x premium", "twitter", "simplefin")),
+        ]
+        for key, label, needles in checks:
+            if category_name.lower() == label.lower() or any(needle in text for needle in needles):
+                return {"key": key, "label": label}
+        return {"key": "other", "label": "Other"}
+
+    def _median(values: list[float]) -> float:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2
+
+    def _detect_frequency_from_dates(dates: list[date]) -> str | None:
+        if len(dates) < 2:
+            return None
+        intervals = sorted((dates[i + 1] - dates[i]).days for i in range(len(dates) - 1))
+        med = _median(intervals)
+        if 25 <= med <= 38:
+            return "monthly"
+        if 80 <= med <= 105:
+            return "quarterly"
+        if 340 <= med <= 400:
+            return "annual"
+        return None
+
+    def _fixed_obligation_category(category: str | None, merchant: str | None) -> bool:
+        text = f"{category or ''} {merchant or ''}".lower()
+        return any(token in text for token in (
+            "housing", "rent", "mortgage", "hoa",
+            "utilities", "utility", "electric", "water", "gas", "internet", "wireless", "phone", "mobile",
+            "insurance",
+            "loan", "debt",
+            "subscription", "software", "saas",
+        ))
+
+    def _date_consistent(dates: list[date]) -> bool:
+        if len(dates) < 2:
+            return False
+        days = sorted(d.day for d in dates)
+        med_day = _median(days)
+        consistent = 0
+        for day in days:
+            diff = abs(day - med_day)
+            if diff <= 5 or (med_day >= 27 and day <= 5) or (day >= 27 and med_day <= 5):
+                consistent += 1
+        return consistent / len(days) >= 0.65
+
+    def _candidate_is_recent_enough(latest_date: date, frequency: str) -> bool:
+        """Avoid projecting cancelled/stale history into the current Upcoming list."""
+        max_age_days = {
+            "monthly": 70,
+            "quarterly": 130,
+            "annual": 430,
+        }.get(frequency, 70)
+        return (today - latest_date).days <= max_age_days
+
+    def _due_from_expected_day(expected_day: int | None) -> date | None:
+        if not expected_day:
+            return None
+        day = max(1, min(int(expected_day), 31))
+        month_start = today.replace(day=1)
+        for month_offset in (0, 1):
+            year = month_start.year + (month_start.month + month_offset - 1) // 12
+            month = (month_start.month + month_offset - 1) % 12 + 1
+            last_day = calendar.monthrange(year, month)[1]
+            candidate = date(year, month, min(day, last_day))
+            if candidate >= today:
+                return candidate
+        return None
+
+    def _is_stale(last_date: date | None, frequency: str) -> bool:
+        if not last_date:
+            return False
+        max_age_days = {
+            "monthly": 45,
+            "quarterly": 110,
+            "annual": 395,
+            "semi_annual": 220,
+        }.get(frequency or "monthly", 45)
+        return (today - last_date).days > max_age_days
+
+    def _query(c):
+        try:
+            _ensure_recurring_obligation_projection(c, profile)
+            return _get_obligation_scheduled_bundle(c, days=window_days, profile=profile, today=today)
+        except Exception as exc:
+            logger.debug("Scheduled obligation read fell back to legacy projection: %s", exc)
+
+        profile_clause = ""
+        params = []
+        if profile and profile != "household":
+            profile_clause = " AND profile_id = ?"
+            params.append(profile)
+
+        rows = c.execute(
+            f"""SELECT merchant_key, clean_name, category, subscription_frequency,
+                       subscription_amount, subscription_status, last_charge_date,
+                       next_expected_date, charge_count, profile_id, source,
+                       cancelled_by_user
+                FROM merchants
+                WHERE is_subscription = 1{profile_clause}
+                  AND COALESCE(cancelled_by_user, 0) = 0
+                  AND COALESCE(subscription_status, 'active') = 'active'""",
+            params,
+        ).fetchall()
+
+        declared_rows = c.execute(
+            f"""SELECT merchant_name, amount, frequency, profile_id,
+                       COALESCE(NULLIF(category, ''), 'Subscriptions') AS category,
+                       expected_day,
+                       amount_review_dismissed_amount,
+                       amount_review_dismissed_latest_date
+                FROM user_declared_subscriptions
+                WHERE is_active = 1{profile_clause}""",
+            params,
+        ).fetchall()
+
+        dismissed_rows = c.execute(
+            f"""SELECT merchant_name, profile_id
+                FROM dismissed_recurring
+                WHERE 1=1{profile_clause}""",
+            params,
+        ).fetchall()
+        dismissed = set()
+        scoped_dismissals = not (profile and profile != "household")
+        for row in dismissed_rows:
+            row_profile = row[1] or "household"
+            for key_part in _recurring_match_keys(row[0]):
+                dismissed.add(f"{row_profile}::{key_part}")
+                if not scoped_dismissals:
+                    dismissed.add(key_part)
+
+        items = []
+        seen = set()
+        items_by_key = {}
+
+        def add_item(*, merchant, amount, frequency, category="Subscriptions", status="expected",
+                     last_charge=None, next_expected=None, profile_id=None, source="detected",
+                     confidence="medium", charge_count=0, expected_day=None,
+                     amount_review_dismissed_amount=None, amount_review_dismissed_latest_date=None):
+            if not merchant:
+                return
+            merchant_key = str(merchant).upper().strip()
+            canonical_key = (canonicalize_merchant_key(merchant_key) or merchant_key).upper().strip()
+            key = f"{canonical_key}::{profile_id or 'household'}"
+            if merchant_key in dismissed or canonical_key in dismissed or key in dismissed:
+                return
+            amt = float(amount or 0)
+            if amt <= 0:
+                return
+
+            due = _parse_date_only(next_expected)
+            last = _parse_date_only(last_charge)
+            if due is None:
+                due = _due_from_expected_day(expected_day)
+            if due is None and last is not None:
+                due = _advance_recurring_date(last, frequency)
+            while due is not None and due < today:
+                due = _advance_recurring_date(due, frequency)
+
+            if due is None:
+                schedule_status = "needs_date"
+                days_until = None
+            else:
+                days_until = (due - today).days
+                if due < today:
+                    schedule_status = "overdue"
+                elif due <= today + timedelta(days=7):
+                    schedule_status = "due_soon"
+                else:
+                    schedule_status = status
+
+            if due is not None and due > window_end:
+                return
+
+            monthly = _annualize_amount(amt, frequency) / 12
+            group = _upcoming_group(merchant, category)
+            item = {
+                "merchant": merchant,
+                "category": category or "Subscriptions",
+                "group": group["key"],
+                "group_label": group["label"],
+                "amount": round(amt, 2),
+                "monthly_equivalent": round(monthly, 2),
+                "frequency": frequency or "monthly",
+                "next_date": due.isoformat() if due else None,
+                "days_until": days_until,
+                "status": schedule_status,
+                "last_charge": last.isoformat() if last else None,
+	                "profile": profile_id,
+	                "source": source,
+	                "confidence": confidence,
+	                "confirmed": source == "user",
+	                "charge_count": charge_count or 0,
+                "expected_day": expected_day,
+                "_amount_review_dismissed_amount": amount_review_dismissed_amount,
+                "_amount_review_dismissed_latest_date": amount_review_dismissed_latest_date,
+            }
+
+            if source == "recurring_candidate":
+                if confidence == "low":
+                    return
+                for existing_item in items:
+                    same_date = existing_item.get("next_date") == item.get("next_date")
+                    same_group = existing_item.get("group") == item.get("group")
+                    same_amount = abs(float(existing_item.get("amount") or 0) - item["amount"]) <= 0.75
+                    if same_date and same_group and same_amount:
+                        return
+
+            existing = items_by_key.get(key)
+            if existing:
+                # User declarations win for amount/frequency, but detected rows
+                # can still supply the date anchor needed for forecasting.
+                if source == "user":
+                    existing["amount"] = item["amount"]
+                    existing["monthly_equivalent"] = item["monthly_equivalent"]
+                    existing["frequency"] = item["frequency"]
+                    existing["source"] = "user"
+                    existing["confidence"] = "user"
+                    existing["category"] = item["category"] or existing["category"]
+                if existing.get("status") == "needs_date" and item.get("next_date"):
+                    existing["next_date"] = item["next_date"]
+                    existing["days_until"] = item["days_until"]
+                    existing["status"] = item["status"]
+                    existing["last_charge"] = item["last_charge"]
+                    existing["charge_count"] = item["charge_count"]
+                return
+
+            seen.add(key)
+            items_by_key[key] = item
+            items.append(item)
+
+        for row in declared_rows:
+            # User-declared subscriptions win, but may not have a known due date yet.
+            add_item(
+                merchant=row[0],
+                amount=row[1],
+                frequency=row[2],
+                profile_id=row[3],
+                category=row[4],
+                expected_day=row[5],
+                amount_review_dismissed_amount=row[6],
+                amount_review_dismissed_latest_date=row[7],
+                source="user",
+                confidence="user",
+            )
+
+        for row in rows:
+            add_item(
+                merchant=row[1] or row[0],
+                category=row[2],
+                frequency=row[3],
+                amount=row[4],
+                status=row[5] or "expected",
+                last_charge=row[6],
+                next_expected=row[7],
+                charge_count=row[8],
+                profile_id=row[9],
+                source=row[10] or "detected",
+                confidence="high" if row[10] in {"seed", "user"} else "medium",
+            )
+
+        history_params = []
+        history_where = [
+            "amount < 0",
+            "COALESCE(is_excluded, 0) = 0",
+            "date >= ?",
+        ]
+        history_params.append((today - timedelta(days=450)).isoformat())
+        if profile and profile != "household":
+            history_where.append("profile_id = ?")
+            history_params.append(profile)
+        history_rows = c.execute(
+            f"""SELECT id, date, amount, category,
+                       COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), description) AS merchant,
+                       profile_id, expense_type
+                FROM transactions_visible
+                WHERE {' AND '.join(history_where)}
+                ORDER BY date ASC""",
+            history_params,
+        ).fetchall()
+
+        recent_by_key: dict[str, list[dict]] = {}
+        for row in history_rows:
+            tx_date = _parse_date_only(row[1])
+            merchant = row[4] or ""
+            if not tx_date or not merchant:
+                continue
+            key_base = canonicalize_merchant_key(merchant) or merchant.upper().strip()
+            row_key = f"{key_base}::{row[5] or 'household'}"
+            recent_by_key.setdefault(row_key, []).append({
+                "id": row[0],
+                "date": tx_date.isoformat(),
+                "amount": round(abs(float(row[2] or 0)), 2),
+                "category": row[3] or "",
+                "merchant": merchant,
+                "profile": row[5],
+            })
+
+        groups: dict[str, list[dict]] = {}
+        for row in history_rows:
+            category = row[3] or ""
+            merchant = row[4] or ""
+            if not merchant or category in NON_SPENDING_CATEGORIES:
+                continue
+            if row[6] in {TRANSFER_INTERNAL, TRANSFER_HOUSEHOLD, TRANSFER_EXTERNAL, TRANSFER_CC_PAYMENT}:
+                continue
+            if not _fixed_obligation_category(category, merchant):
+                continue
+            key_base = canonicalize_merchant_key(merchant) or merchant.upper().strip()
+            key = f"{key_base}::{row[5] or 'household'}"
+            groups.setdefault(key, []).append({
+                "date": _parse_date_only(row[1]),
+                "amount": abs(float(row[2] or 0)),
+                "category": category,
+                "merchant": merchant,
+                "profile_id": row[5],
+            })
+
+        for group in groups.values():
+            clean = [item for item in group if item["date"]]
+            if len(clean) < 2:
+                continue
+            dates = sorted(item["date"] for item in clean)
+            frequency = _detect_frequency_from_dates(dates)
+            if not frequency or not _date_consistent(dates):
+                continue
+            amounts = [item["amount"] for item in clean]
+            med_amount = _median(amounts)
+            if med_amount <= 0:
+                continue
+            close_amounts = [amount for amount in amounts if abs(amount - med_amount) / med_amount <= 0.35]
+            if len(close_amounts) / len(amounts) < 0.65:
+                continue
+            latest = max(clean, key=lambda item: item["date"])
+            if not _candidate_is_recent_enough(latest["date"], frequency):
+                continue
+            due = _advance_recurring_date(latest["date"], frequency)
+            while due < today - timedelta(days=window_days):
+                due = _advance_recurring_date(due, frequency)
+            add_item(
+                merchant=latest["merchant"],
+                amount=med_amount,
+                frequency=frequency,
+                category=latest["category"],
+                last_charge=latest["date"].isoformat(),
+                next_expected=due.isoformat(),
+                charge_count=len(clean),
+                profile_id=latest["profile_id"],
+                source="recurring_candidate",
+                confidence="medium" if len(clean) >= 3 else "low",
+            )
+
+        def _amount_review_suggestion(item: dict, recent: list[dict]) -> dict | None:
+            if item.get("source") != "user" or len(recent) < 2:
+                return None
+            current = float(item.get("amount") or 0)
+            if current <= 0:
+                return None
+            latest_two = recent[:2]
+            latest_amounts = [float(tx.get("amount") or 0) for tx in latest_two]
+            suggested = round(sum(latest_amounts) / len(latest_amounts), 2)
+            if suggested <= 0:
+                return None
+            spread = max(latest_amounts) - min(latest_amounts)
+            if spread > max(5.0, suggested * 0.10):
+                return None
+            delta = round(suggested - current, 2)
+            if abs(delta) < max(5.0, current * 0.05):
+                return None
+            latest_date = latest_two[0].get("date")
+            dismissed_date = item.get("_amount_review_dismissed_latest_date")
+            dismissed_amount = item.get("_amount_review_dismissed_amount")
+            if dismissed_date == latest_date and dismissed_amount is not None:
+                try:
+                    if abs(float(dismissed_amount) - suggested) < 0.01:
+                        return None
+                except (TypeError, ValueError):
+                    pass
+            return {
+                "type": "amount_change",
+                "basis": "latest_two_charges",
+                "current_amount": round(current, 2),
+                "suggested_amount": suggested,
+                "latest_amount": round(latest_amounts[0], 2),
+                "previous_amount": round(latest_amounts[1], 2),
+                "latest_date": latest_date,
+                "delta": delta,
+                "delta_pct": round((delta / current) * 100, 1),
+                "direction": "down" if delta < 0 else "up",
+            }
+
+        for item in items:
+            merchant_key = str(item.get("merchant") or "").upper().strip()
+            canonical_key = (canonicalize_merchant_key(merchant_key) or merchant_key).upper().strip()
+            key = f"{canonical_key}::{item.get('profile') or 'household'}"
+            recent = sorted(recent_by_key.get(key, []), key=lambda tx: tx["date"], reverse=True)[:5]
+            amounts = [tx["amount"] for tx in recent]
+            last = _parse_date_only(item.get("last_charge"))
+            source = item.get("source") or "detected"
+            if source == "user":
+                source_label = "User confirmed"
+            elif source == "recurring_candidate":
+                source_label = "Inferred"
+            elif source == "seed":
+                source_label = "Seeded"
+            else:
+                source_label = "Detected"
+            item["recent_transactions"] = recent
+            item["evidence"] = {
+                "source_label": source_label,
+                "seen_count": item.get("charge_count") or len(recent),
+                "last_paid": item.get("last_charge") or (recent[0]["date"] if recent else None),
+                "amount_min": round(min(amounts), 2) if amounts else item.get("amount"),
+                "amount_max": round(max(amounts), 2) if amounts else item.get("amount"),
+                "stale": _is_stale(last, item.get("frequency") or "monthly"),
+            }
+            amount_review = _amount_review_suggestion(item, recent)
+            if amount_review:
+                item["amount_review"] = amount_review
+            item.pop("_amount_review_dismissed_amount", None)
+            item.pop("_amount_review_dismissed_latest_date", None)
+
+        items.sort(key=lambda item: (item["next_date"] is None, item["next_date"] or "9999-99-99", item["merchant"]))
+        scheduled = [item for item in items if item["next_date"]]
+        due_soon = [item for item in scheduled if item["status"] in {"overdue", "due_soon"}]
+        confirmed_upcoming_total = sum(
+            item["amount"]
+            for item in scheduled
+            if item["days_until"] is not None
+            and item["days_until"] >= 0
+            and item.get("source") != "recurring_candidate"
+        )
+        inferred_upcoming_total = sum(
+            item["amount"]
+            for item in scheduled
+            if item["days_until"] is not None
+            and item["days_until"] >= 0
+            and item.get("source") == "recurring_candidate"
+        )
+        groups = {}
+        for item in items:
+            key = item.get("group") or "other"
+            if key not in groups:
+                groups[key] = {
+                    "key": key,
+                    "label": item.get("group_label") or "Other",
+                    "count": 0,
+                    "scheduled_count": 0,
+                    "amount": 0,
+                    "monthly_equivalent": 0,
+                }
+            groups[key]["count"] += 1
+            groups[key]["monthly_equivalent"] += item.get("monthly_equivalent") or 0
+            if item.get("next_date"):
+                groups[key]["scheduled_count"] += 1
+                groups[key]["amount"] += item.get("amount") or 0
+        group_summary = [
+            {**group, "amount": round(group["amount"], 2), "monthly_equivalent": round(group["monthly_equivalent"], 2)}
+            for group in groups.values()
+        ]
+        group_summary.sort(key=lambda group: (-group["amount"], group["label"]))
+
+        return {
+            "window_days": window_days,
+            "start_date": today.isoformat(),
+            "end_date": window_end.isoformat(),
+            "items": items,
+            "scheduled_count": len(scheduled),
+            "needs_date_count": len([item for item in items if item["status"] == "needs_date"]),
+            "due_soon_count": len(due_soon),
+            "upcoming_total": round(confirmed_upcoming_total, 2),
+            "confirmed_upcoming_total": round(confirmed_upcoming_total, 2),
+            "inferred_upcoming_total": round(inferred_upcoming_total, 2),
+            "needs_review_total": round(inferred_upcoming_total, 2),
+            "monthly_equivalent_total": round(sum(item["monthly_equivalent"] for item in items), 2),
+            "groups": group_summary,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def create_month_explanation(month: str, profile: str | None = None, use_llm: bool = True, conn=None) -> dict:
+    """Build a source-linked month explanation and persist it as a saved insight."""
+    import json as _json
+
+    if not re.match(r"^\d{4}-\d{2}$", month or ""):
+        raise ValueError("month must be YYYY-MM")
+
+    profile_id = _profile_id(profile)
+
+    def _fallback_answer(facts: dict) -> str:
+        summary = facts["summary"] or {}
+        top_categories = facts["top_categories"][:3]
+        top_merchants = facts["top_merchants"][:3]
+        pulse = facts["spending_pulse"][:2]
+        lines = [
+            f"## {facts['month_label']} in plain English",
+            "",
+            f"You brought in {summary.get('income_formatted')} and spent {summary.get('expenses_formatted')}, leaving net flow at {summary.get('net_flow_formatted')}.",
+        ]
+        if top_categories:
+            lines.append("Your biggest spending categories were " + ", ".join(f"{c['category']} ({c['total_formatted']})" for c in top_categories) + ".")
+        if top_merchants:
+            lines.append("The top merchants were " + ", ".join(f"{m['merchant']} ({m['total_formatted']})" for m in top_merchants) + ".")
+        if pulse:
+            lines.append("The clearest month-over-month changes were " + ", ".join(f"{p['category']} {p['direction']} {p['delta_formatted']}" for p in pulse) + ".")
+        if facts.get("recurring"):
+            lines.append(f"Recurring commitments are running at {facts['recurring']['monthly_formatted']} per month.")
+        return "\n".join(lines)
+
+    def _query(c):
+        monthly = get_monthly_analytics_data(profile=profile, conn=c)
+        current = next((row for row in monthly if row.get("month") == month), None)
+        if not current:
+            raise ValueError("No analytics data found for that month.")
+        sorted_months = sorted(monthly, key=lambda row: row.get("month") or "")
+        current_idx = next((idx for idx, row in enumerate(sorted_months) if row.get("month") == month), -1)
+        prev = sorted_months[current_idx - 1] if current_idx > 0 else None
+
+        categories = get_category_analytics_data(month=month, profile=profile, conn=c).get("categories", [])
+        prev_categories = get_category_analytics_data(month=prev["month"], profile=profile, conn=c).get("categories", []) if prev else []
+        prev_by_cat = {row["category"]: float(row.get("total") or 0) for row in prev_categories}
+
+        top_categories = sorted(categories, key=lambda row: float(row.get("total") or 0), reverse=True)[:8]
+        merchant_rows = get_merchant_insights_data(month=month, profile=profile, conn=c)[:8]
+        recurring = get_recurring_from_db(profile=profile, conn=c)
+        scheduled = get_scheduled_transactions_data(days=45, profile=profile, conn=c)
+
+        pulse = []
+        for cat in top_categories:
+            total = float(cat.get("total") or 0)
+            previous = prev_by_cat.get(cat.get("category"), 0)
+            delta = total - previous
+            if abs(delta) >= 10:
+                pulse.append({
+                    "category": cat.get("category"),
+                    "direction": "up" if delta > 0 else "down",
+                    "delta": round(delta, 2),
+                    "delta_formatted": f"${abs(delta):,.0f}",
+                    "current": round(total, 2),
+                    "previous": round(previous, 2),
+                })
+        pulse.sort(key=lambda row: abs(row["delta"]), reverse=True)
+
+        income = float(current.get("income") or 0)
+        expenses = float(current.get("expenses") or 0)
+        external = float(current.get("external_transfers") or 0)
+        net_flow = income - expenses - external
+        month_label = datetime.strptime(month + "-01", "%Y-%m-%d").strftime("%B %Y")
+        facts = {
+            "month": month,
+            "month_label": month_label,
+            "summary": {
+                "income": round(income, 2),
+                "expenses": round(expenses, 2),
+                "external_transfers": round(external, 2),
+                "net_flow": round(net_flow, 2),
+                "income_formatted": f"${income:,.0f}",
+                "expenses_formatted": f"${expenses:,.0f}",
+                "net_flow_formatted": f"{'-' if net_flow < 0 else ''}${abs(net_flow):,.0f}",
+            },
+            "top_categories": [
+                {**cat, "total_formatted": f"${float(cat.get('total') or 0):,.0f}"}
+                for cat in top_categories
+            ],
+            "top_merchants": [
+                {
+                    "merchant": row.get("merchant") or row.get("merchant_name") or row.get("clean_name") or row.get("name") or "Merchant",
+                    "total": round(float(row.get("total_spent") or row.get("total") or 0), 2),
+                    "total_formatted": f"${float(row.get('total_spent') or row.get('total') or 0):,.0f}",
+                    "transaction_count": row.get("transaction_count") or row.get("count") or 0,
+                }
+                for row in merchant_rows
+            ],
+            "spending_pulse": pulse[:8],
+            "recurring": {
+                "monthly": round(float(recurring.get("total_monthly") or 0), 2),
+                "monthly_formatted": f"${float(recurring.get('total_monthly') or 0):,.0f}",
+                "active_count": recurring.get("active_count") or 0,
+            },
+            "upcoming": {
+                "window_days": scheduled.get("window_days"),
+                "total": scheduled.get("upcoming_total"),
+                "groups": scheduled.get("groups", []),
+            },
+        }
+
+        answer = None
+        source = "deterministic"
+        if use_llm:
+            try:
+                import llm_client
+                prompt = (
+                    "You are Mira, a local-first personal finance analyst inside Folio. "
+                    "Write a concise month explanation from the JSON facts. Use only the facts provided. "
+                    "No generic advice, no moralizing, no unsupported claims. "
+                    "Use 4 short sections with markdown headings: What happened, What changed, What to check, Source facts.\n\n"
+                    f"FACTS:\n{_json.dumps(facts, indent=2)}"
+                )
+                answer = llm_client.complete(prompt, max_tokens=900, purpose="copilot")
+                source = llm_client.get_provider()
+            except Exception as exc:
+                logger.info("Month explanation LLM unavailable; using deterministic fallback: %s", exc)
+        if not answer:
+            answer = _fallback_answer(facts)
+
+        question = f"Explain {month_label}"
+        c.execute(
+            """INSERT INTO saved_insights (profile_id, question, answer, kind, pinned)
+               VALUES (?, ?, ?, 'insight', 0)""",
+            (profile_id, question, answer),
+        )
+        insight_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {
+            "id": insight_id,
+            "question": question,
+            "answer": answer,
+            "facts": facts,
+            "source": source,
+            "saved": True,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def get_cash_flow_forecast_data(days: int = 90, profile: str | None = None, conn=None) -> dict:
+    """Return a deterministic cash runway forecast and safe-to-spend number."""
+    horizon_days = max(7, min(int(days or 90), 180))
+    today = date.today()
+    end_date = today + timedelta(days=horizon_days)
+
+    def _months_between(start: date, end: date) -> int:
+        return max(1, (end.year - start.year) * 12 + (end.month - start.month) + (1 if end.day >= start.day else 0))
+
+    def _query(c):
+        profile_clause = ""
+        params = []
+        if profile and profile != "household":
+            profile_clause = " AND profile_id = ?"
+            params = [profile]
+
+        liquid_balance = c.execute(
+            f"""SELECT COALESCE(SUM(current_balance), 0)
+                FROM accounts
+                WHERE account_type = 'depository'
+                  AND is_active = 1{profile_clause}""",
+            params,
+        ).fetchone()[0] or 0
+
+        monthly = get_monthly_analytics_data(profile=profile, conn=c)
+        recent_months = [m for m in monthly if m.get("income", 0) > 0][:3]
+        avg_monthly_income = (
+            sum(float(m.get("income") or 0) for m in recent_months) / len(recent_months)
+            if recent_months else 0
+        )
+
+        budgets = get_category_budgets(profile=profile, conn=c)
+        total_budget = sum(max(float(item.get("amount") or 0), 0) for item in budgets)
+        scheduled = get_scheduled_transactions_data(days=horizon_days, profile=profile, conn=c)
+        scheduled_items = [
+            item for item in scheduled.get("items", [])
+            if item.get("next_date") and bool(item.get("confirmed", item.get("source") != "recurring_candidate"))
+        ]
+        scheduled_monthly = sum(float(item.get("monthly_equivalent") or 0) for item in scheduled_items)
+        variable_monthly = max(total_budget - scheduled_monthly, 0)
+
+        goals = get_goals(profile=profile, conn=c)
+        goal_monthly = 0.0
+        for goal in goals:
+            gap = max(float(goal.get("target_amount") or 0) - float(goal.get("current_amount") or 0), 0)
+            target = _parse_date_only(goal.get("target_date"))
+            months = _months_between(today, target) if target else 12
+            goal_monthly += gap / months if gap > 0 else 0
+
+        daily_income = avg_monthly_income / 30
+        daily_variable = variable_monthly / 30
+        daily_goals = goal_monthly / 30
+
+        scheduled_events = []
+        for item in scheduled_items:
+            due = _parse_date_only(item.get("next_date"))
+            if not due:
+                continue
+            while due <= end_date:
+                if due >= today:
+                    scheduled_events.append({
+                        "date": due.isoformat(),
+                        "merchant": item.get("merchant"),
+                        "amount": float(item.get("amount") or 0),
+                        "frequency": item.get("frequency") or "monthly",
+                    })
+                due = _advance_recurring_date(due, item.get("frequency") or "monthly")
+        scheduled_events.sort(key=lambda event: event["date"])
+
+        points = []
+        balance = float(liquid_balance or 0)
+        event_idx = 0
+        min_balance = balance
+        for offset in range(horizon_days + 1):
+            day = today + timedelta(days=offset)
+            if offset > 0:
+                balance += daily_income
+                balance -= daily_variable
+                balance -= daily_goals
+            while event_idx < len(scheduled_events) and scheduled_events[event_idx]["date"] == day.isoformat():
+                balance -= scheduled_events[event_idx]["amount"]
+                event_idx += 1
+            min_balance = min(min_balance, balance)
+            if offset == 0 or offset % 7 == 0 or offset == horizon_days:
+                points.append({"date": day.isoformat(), "balance": round(balance, 2)})
+
+        committed_30 = sum(event["amount"] for event in scheduled_events if _parse_date_only(event["date"]) <= today + timedelta(days=30))
+        expected_income_30 = daily_income * 30
+        variable_30 = daily_variable * 30
+        goals_30 = daily_goals * 30
+        safe_to_spend = float(liquid_balance or 0) + expected_income_30 - committed_30 - variable_30 - goals_30
+
+        return {
+            "start_date": today.isoformat(),
+            "end_date": end_date.isoformat(),
+            "days": horizon_days,
+            "liquid_balance": round(float(liquid_balance or 0), 2),
+            "safe_to_spend": round(safe_to_spend, 2),
+            "projected_end_balance": points[-1]["balance"] if points else round(float(liquid_balance or 0), 2),
+            "projected_low_balance": round(min_balance, 2),
+            "inputs": {
+                "avg_monthly_income": round(avg_monthly_income, 2),
+                "scheduled_30_day_total": round(committed_30, 2),
+                "scheduled_monthly_equivalent": round(scheduled_monthly, 2),
+                "budgeted_variable_monthly": round(variable_monthly, 2),
+                "goal_monthly_need": round(goal_monthly, 2),
+            },
+            "events": scheduled_events[:40],
+            "points": points,
+        }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
 
 
 def get_dismissed_subscriptions(profile: str | None = None, conn=None) -> list[dict]:
@@ -1750,28 +3227,124 @@ def get_subscription_events(profile: str | None = None, conn=None) -> dict:
         return _query(c)
 
 
-def declare_subscription(merchant: str, amount: float, frequency: str, profile: str | None = None) -> dict:
+def _recurring_identity_matches(value: str | None, target_keys: set[str], target_upper: str) -> bool:
+    """Return whether a legacy display/key value matches a canonical recurring target."""
+    if not value:
+        return False
+    if str(value).upper().strip() == target_upper:
+        return True
+    return bool(_recurring_match_keys(value) & target_keys)
+
+
+def _legacy_merchant_ids_for_recurring(conn, merchant: str, profile_id: str) -> list[int]:
+    """Find legacy merchant rows by canonical key or exact display-name fallback."""
+    target_keys = _recurring_match_keys(merchant)
+    merchant_key = _recurring_canonical_key(merchant)
+    if merchant_key:
+        target_keys.add(merchant_key)
+    target_upper = merchant.upper().strip()
+    rows = conn.execute(
+        """SELECT id, merchant_key, clean_name
+           FROM merchants
+           WHERE profile_id = ?
+             AND is_subscription = 1""",
+        (profile_id,),
+    ).fetchall()
+    return [
+        row[0]
+        for row in rows
+        if _recurring_identity_matches(row[1], target_keys, target_upper)
+        or _recurring_identity_matches(row[2], target_keys, target_upper)
+    ]
+
+
+def _user_declared_ids_for_recurring(conn, merchant: str, profile_id: str) -> list[int]:
+    target_keys = _recurring_match_keys(merchant)
+    merchant_key = _recurring_canonical_key(merchant)
+    if merchant_key:
+        target_keys.add(merchant_key)
+    target_upper = merchant.upper().strip()
+    rows = conn.execute(
+        """SELECT id, merchant_name
+           FROM user_declared_subscriptions
+           WHERE profile_id = ?""",
+        (profile_id,),
+    ).fetchall()
+    return [
+        row[0]
+        for row in rows
+        if _recurring_identity_matches(row[1], target_keys, target_upper)
+    ]
+
+
+def _dismissed_ids_for_recurring(conn, merchant: str, profile_id: str) -> list[int]:
+    target_keys = _recurring_match_keys(merchant)
+    merchant_key = _recurring_canonical_key(merchant)
+    if merchant_key:
+        target_keys.add(merchant_key)
+    target_upper = merchant.upper().strip()
+    rows = conn.execute(
+        """SELECT id, merchant_name
+           FROM dismissed_recurring
+           WHERE profile_id = ?""",
+        (profile_id,),
+    ).fetchall()
+    return [
+        row[0]
+        for row in rows
+        if _recurring_identity_matches(row[1], target_keys, target_upper)
+    ]
+
+
+def _apply_to_ids(conn, table: str, ids: list[int], sql_suffix: str, params: tuple = ()) -> int:
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    result = conn.execute(
+        f"UPDATE {table} {sql_suffix} WHERE id IN ({placeholders})",
+        (*params, *ids),
+    )
+    return result.rowcount
+
+
+def declare_subscription(
+    merchant: str,
+    amount: float,
+    frequency: str,
+    profile: str | None = None,
+    category: str = "Subscriptions",
+    expected_day: int | None = None,
+) -> dict:
     """
     Store a user-declared subscription.
     Writes to user_declared_subscriptions and merchants tables.
     """
     profile_id = profile or "household"
+    category_name = (category or "Subscriptions").strip() or "Subscriptions"
+    normalized_expected_day = None
+    if expected_day is not None:
+        normalized_expected_day = max(1, min(int(expected_day), 31))
 
     with get_db() as conn:
         conn.execute(
             """INSERT INTO user_declared_subscriptions
-               (merchant_name, amount, frequency, profile_id)
-               VALUES (?, ?, ?, ?)
+               (merchant_name, amount, frequency, category, expected_day, profile_id)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(merchant_name, profile_id) DO UPDATE SET
                    amount = excluded.amount,
                    frequency = excluded.frequency,
-                   is_active = 1,
-                   updated_at = datetime('now')""",
-            (merchant, amount, frequency, profile_id),
+	                   category = excluded.category,
+	                   expected_day = excluded.expected_day,
+	                   amount_review_dismissed_amount = NULL,
+	                   amount_review_dismissed_latest_date = NULL,
+	                   amount_review_dismissed_at = NULL,
+	                   is_active = 1,
+	                   updated_at = datetime('now')""",
+            (merchant, amount, frequency, category_name, normalized_expected_day, profile_id),
         )
 
         # Also upsert merchants table
-        merchant_key = merchant.upper().strip()
+        merchant_key = _recurring_canonical_key(merchant)
         from recurring import _annualize
         annual = _annualize(amount, frequency)
         conn.execute(
@@ -1779,9 +3352,10 @@ def declare_subscription(merchant: str, amount: float, frequency: str, profile: 
                (merchant_key, clean_name, category, source, is_subscription,
                 subscription_frequency, subscription_amount, subscription_status,
                 profile_id)
-               VALUES (?, ?, 'Subscriptions', 'user', 1, ?, ?, 'active', ?)
+               VALUES (?, ?, ?, 'user', 1, ?, ?, 'active', ?)
                ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
                    clean_name = excluded.clean_name,
+                   category = excluded.category,
                    is_subscription = 1,
                    subscription_frequency = excluded.subscription_frequency,
                    subscription_amount = excluded.subscription_amount,
@@ -1790,12 +3364,72 @@ def declare_subscription(merchant: str, amount: float, frequency: str, profile: 
                    cancelled_by_user = 0,
                    cancelled_at = NULL,
                    updated_at = datetime('now')""",
-            (merchant_key, merchant, frequency, amount, profile_id),
+            (
+                merchant_key,
+                merchant,
+                category_name,
+                frequency,
+                amount,
+                profile_id,
+	            ),
+	        )
+
+        user_obligation_key = _upsert_user_recurring_obligation(
+            conn,
+            merchant=merchant,
+            amount=amount,
+            frequency=frequency,
+            profile_id=profile_id,
+            category=category_name,
+            expected_day=normalized_expected_day,
         )
+        _record_recurring_feedback(
+            conn,
+            merchant=merchant,
+            profile_id=profile_id,
+            feedback_type="confirmed",
+            scope="exact_candidate",
+            obligation_key=user_obligation_key,
+            payload={
+                "amount": amount,
+                "frequency": frequency,
+                "category": category_name,
+                "expected_day": normalized_expected_day,
+            },
+        )
+
+        if normalized_expected_day:
+            today = date.today()
+            month_start = today.replace(day=1)
+            next_date = None
+            for month_offset in (0, 1):
+                year = month_start.year + (month_start.month + month_offset - 1) // 12
+                month = (month_start.month + month_offset - 1) % 12 + 1
+                last_day = calendar.monthrange(year, month)[1]
+                candidate = date(year, month, min(normalized_expected_day, last_day))
+                if candidate >= today:
+                    next_date = candidate.isoformat()
+                    break
+            if next_date:
+                conn.execute(
+                    """UPDATE merchants
+                       SET next_expected_date = ?, updated_at = datetime('now')
+                       WHERE merchant_key = ? AND profile_id = ?""",
+                    (next_date, merchant_key, profile_id),
+                )
+
+        dismissed_ids = _dismissed_ids_for_recurring(conn, merchant, profile_id)
+        if dismissed_ids:
+            placeholders = ",".join("?" * len(dismissed_ids))
+            conn.execute(
+                f"DELETE FROM dismissed_recurring WHERE id IN ({placeholders})",
+                dismissed_ids,
+            )
 
         # Fetch the record to return
         row = conn.execute(
-            """SELECT merchant_name, amount, frequency, profile_id, created_at
+            """SELECT merchant_name, amount, frequency, profile_id, created_at,
+                      COALESCE(NULLIF(category, ''), 'Subscriptions'), expected_day
                FROM user_declared_subscriptions
                WHERE merchant_name = ? AND profile_id = ?""",
             (merchant, profile_id),
@@ -1807,6 +3441,8 @@ def declare_subscription(merchant: str, amount: float, frequency: str, profile: 
         "frequency": row[2],
         "profile_id": row[3],
         "created_at": row[4],
+        "category": row[5],
+        "expected_day": row[6],
         "annual_cost": round(_annualize(row[1], row[2]), 2),
     }
 
@@ -1818,30 +3454,83 @@ def cancel_subscription(merchant: str, profile: str | None = None) -> dict:
     now = _dt.now().isoformat()
 
     with get_db() as conn:
-        merchant_key = merchant.upper().strip()
-        conn.execute(
-            """UPDATE merchants
-               SET cancelled_at = ?, cancelled_by_user = 1,
-                   subscription_status = 'cancelled',
-                   updated_at = datetime('now')
-               WHERE merchant_key = ? AND profile_id = ?""",
-            (now, merchant_key, profile_id),
+        merchant_ids = _legacy_merchant_ids_for_recurring(conn, merchant, profile_id)
+        if merchant_ids:
+            placeholders = ",".join("?" * len(merchant_ids))
+            conn.execute(
+                f"""UPDATE merchants
+                    SET cancelled_at = ?,
+                        cancelled_by_user = 1,
+                        subscription_status = 'cancelled',
+                        next_expected_date = NULL,
+                        updated_at = datetime('now')
+                    WHERE id IN ({placeholders})""",
+                (now, *merchant_ids),
+            )
+        declared_ids = _user_declared_ids_for_recurring(conn, merchant, profile_id)
+        if declared_ids:
+            placeholders = ",".join("?" * len(declared_ids))
+            conn.execute(
+                f"""UPDATE user_declared_subscriptions
+                    SET is_active = 0,
+                        updated_at = datetime('now')
+                    WHERE id IN ({placeholders})""",
+                declared_ids,
+            )
+        _record_recurring_feedback(
+            conn,
+            merchant=merchant,
+            profile_id=profile_id,
+            feedback_type="cancelled",
+            scope="merchant",
+            payload={"cancelled_at": now},
         )
 
     return {"status": "ok", "cancelled_at": now}
 
 
 def restore_subscription(merchant: str, profile: str | None = None) -> bool:
-    """Remove a merchant from the dismissed_recurring table."""
+    """Restore a dismissed/cancelled recurring item."""
     profile_id = profile or "household"
 
     with get_db() as conn:
-        result = conn.execute(
-            """DELETE FROM dismissed_recurring
-               WHERE merchant_name = ? AND profile_id = ?""",
-            (merchant, profile_id),
-        )
-        return result.rowcount > 0
+        dismissed_ids = _dismissed_ids_for_recurring(conn, merchant, profile_id)
+        dismissed_count = 0
+        if dismissed_ids:
+            placeholders = ",".join("?" * len(dismissed_ids))
+            dismissed_count = conn.execute(
+                f"DELETE FROM dismissed_recurring WHERE id IN ({placeholders})",
+                dismissed_ids,
+            ).rowcount
+        merchant_ids = _legacy_merchant_ids_for_recurring(conn, merchant, profile_id)
+        merchant_count = 0
+        if merchant_ids:
+            placeholders = ",".join("?" * len(merchant_ids))
+            merchant_count = conn.execute(
+                f"""UPDATE merchants
+                    SET cancelled_by_user = 0,
+                        cancelled_at = NULL,
+                        subscription_status = CASE
+                            WHEN subscription_status = 'cancelled' THEN 'inactive'
+                            ELSE subscription_status
+                        END,
+                        updated_at = datetime('now')
+                    WHERE id IN ({placeholders})""",
+                merchant_ids,
+            ).rowcount
+        declared_ids = _user_declared_ids_for_recurring(conn, merchant, profile_id)
+        declared_count = 0
+        if declared_ids:
+            placeholders = ",".join("?" * len(declared_ids))
+            declared_count = conn.execute(
+                f"""UPDATE user_declared_subscriptions
+                    SET is_active = 1,
+                        updated_at = datetime('now')
+                    WHERE id IN ({placeholders})""",
+                declared_ids,
+            ).rowcount
+        restored_obligation = _restore_recurring_obligation(conn, merchant=merchant, profile_id=profile_id)
+        return dismissed_count > 0 or merchant_count > 0 or declared_count > 0 or restored_obligation
 
 
 def mark_events_read(event_ids: list[int]) -> int:
@@ -1858,6 +3547,58 @@ def mark_events_read(event_ids: list[int]) -> int:
         return result.rowcount
 
 
+def _mark_missing_legacy_recurring_inactive(profile: str | None, items: list[dict], conn=None) -> int:
+    """Mark legacy detector-owned rows missing from a redetection run inactive."""
+    profile_id = profile or "household"
+    seen_by_profile: dict[str, set[str]] = {}
+    for item in items:
+        item_profile = item.get("profile") or profile_id
+        key = _recurring_canonical_key(item.get("merchant") or "")
+        if key:
+            seen_by_profile.setdefault(item_profile, set()).add(key)
+
+    def _apply(c) -> int:
+        if profile and profile != "household":
+            profiles = [profile]
+        else:
+            rows = c.execute(
+                """SELECT DISTINCT COALESCE(profile_id, 'household')
+                   FROM merchants
+                   WHERE is_subscription = 1
+                     AND source IN ('seed', 'algorithm', 'category')"""
+            ).fetchall()
+            profiles = [row[0] for row in rows] or ["household"]
+
+        updated = 0
+        for scoped_profile in profiles:
+            seen = seen_by_profile.get(scoped_profile, set())
+            params: list = [scoped_profile]
+            not_seen_clause = ""
+            if seen:
+                placeholders = ",".join("?" * len(seen))
+                not_seen_clause = f"AND merchant_key NOT IN ({placeholders})"
+                params.extend(sorted(seen))
+            result = c.execute(
+                f"""UPDATE merchants
+                    SET subscription_status = 'inactive',
+                        next_expected_date = NULL,
+                        updated_at = datetime('now')
+                    WHERE profile_id = ?
+                      AND is_subscription = 1
+                      AND COALESCE(cancelled_by_user, 0) = 0
+                      AND source IN ('seed', 'algorithm', 'category')
+                      {not_seen_clause}""",
+                params,
+            )
+            updated += result.rowcount
+        return updated
+
+    if conn is not None:
+        return _apply(conn)
+    with get_db() as c:
+        return _apply(c)
+
+
 def trigger_full_redetection(profile: str | None = None) -> dict:
     """
     Run full recurring detection across all transactions and persist results.
@@ -1865,27 +3606,36 @@ def trigger_full_redetection(profile: str | None = None) -> dict:
     """
     from recurring import RecurringDetector, write_detection_results_to_db
 
-    data = get_data()
-    txns = data["transactions"]
+    profile_id = profile or "household"
+    lock = _recurring_redetection_locks.setdefault(profile_id, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return {"status": "already_running", "items": [], "events": []}
 
-    if profile and profile != "household":
-        txns = [t for t in txns if t.get("profile") == profile]
+    try:
+        data = get_data()
+        txns = data["transactions"]
 
-    detector = RecurringDetector(get_db_conn=get_db)
-    result = detector.detect(
-        transactions=txns,
-        profile=profile,
-        generate_events=True,
-    )
+        if profile and profile != "household":
+            txns = [t for t in txns if t.get("profile") == profile or t.get("profile_id") == profile]
 
-    write_detection_results_to_db(
-        get_db_conn=get_db,
-        items=result["items"],
-        events=result.get("events", []),
-        profile=profile,
-    )
+        detector = RecurringDetector(get_db_conn=get_db)
+        result = detector.detect(
+            transactions=txns,
+            profile=profile,
+            generate_events=True,
+        )
 
-    return result
+        write_detection_results_to_db(
+            get_db_conn=get_db,
+            items=result["items"],
+            events=result.get("events", []),
+            profile=profile,
+        )
+        result["legacy_rows_marked_inactive"] = _mark_missing_legacy_recurring_inactive(profile, result["items"])
+
+        return result
+    finally:
+        lock.release()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2587,10 +4337,20 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
 
         result = {"updated": True, "retroactive_count": retroactive_count}
 
-        # Enhancement 7: Signal subscription prompt if category is "Subscriptions"
-        if new_category.strip().lower() == "subscriptions":
+        # Offer recurrence tracking for fixed-obligation categories. This keeps
+        # the workflow anchored on the transaction the user just corrected.
+        recurring_categories = {
+            "subscriptions",
+            "insurance",
+            "utilities",
+            "housing",
+            "debt",
+        }
+        if new_category.strip().lower() in recurring_categories:
             merchant_pattern = _extract_merchant_pattern(description)
             result["subscription_prompt"] = True
+            result["recurring_prompt"] = True
+            result["category"] = new_category
             result["merchant"] = tx_merchant_name if tx_merchant_name else (merchant_pattern or description[:50])
             result["amount"] = round(abs(float(tx_amount)), 2) if tx_amount else 0.0
             result["transaction_id"] = tx_id
@@ -3748,15 +5508,62 @@ def get_merchant_directory(
                     MAX(last_charge_date) AS last_charge_date
                 FROM merchant_overlay_candidates
                 GROUP BY profile_id, overlay_key
+            ),
+            recurring_overlay_candidates AS (
+                SELECT
+                    profile_id,
+                    UPPER(TRIM(merchant_key)) AS overlay_key,
+                    display_name AS clean_name,
+                    category,
+                    CASE WHEN state = 'confirmed' THEN 'active' ELSE state END AS subscription_status,
+                    last_seen_date
+                FROM recurring_obligations
+                WHERE TRIM(COALESCE(merchant_key, '')) != ''
+                  AND state IN ('active', 'confirmed', 'candidate', 'inactive', 'stale', 'cancelled')
+
+                UNION ALL
+
+                SELECT
+                    profile_id,
+                    UPPER(TRIM(display_name)) AS overlay_key,
+                    display_name AS clean_name,
+                    category,
+                    CASE WHEN state = 'confirmed' THEN 'active' ELSE state END AS subscription_status,
+                    last_seen_date
+                FROM recurring_obligations
+                WHERE TRIM(COALESCE(display_name, '')) != ''
+                  AND UPPER(TRIM(display_name)) != UPPER(TRIM(COALESCE(merchant_key, '')))
+                  AND state IN ('active', 'confirmed', 'candidate', 'inactive', 'stale', 'cancelled')
+            ),
+            recurring_overlay AS (
+                SELECT
+                    profile_id,
+                    overlay_key,
+                    COALESCE(
+                        MAX(NULLIF(TRIM(clean_name), '')),
+                        overlay_key
+                    ) AS clean_name,
+                    COALESCE(
+                        MAX(NULLIF(TRIM(category), '')),
+                        'Subscriptions'
+                    ) AS category,
+                    1 AS is_subscription,
+                    COALESCE(
+                        MAX(CASE WHEN subscription_status IN ('active', 'confirmed') THEN 'active' END),
+                        MAX(subscription_status)
+                    ) AS subscription_status,
+                    MAX(last_seen_date) AS last_charge_date
+                FROM recurring_overlay_candidates
+                GROUP BY profile_id, overlay_key
             )
             SELECT
                 spend.merchant_key,
-                COALESCE(alias.display_name, overlay.clean_name, spend.clean_name) AS clean_name,
+                COALESCE(alias.display_name, recurring_overlay.clean_name, overlay.clean_name, spend.clean_name) AS clean_name,
                 overlay.industry,
-                overlay.category,
-                COALESCE(overlay.is_subscription, 0) AS is_subscription,
-                overlay.subscription_status,
-                overlay.last_charge_date,
+                COALESCE(recurring_overlay.category, overlay.category) AS category,
+                COALESCE(recurring_overlay.is_subscription, overlay.is_subscription, 0) AS is_subscription,
+                COALESCE(recurring_overlay.subscription_status, overlay.subscription_status) AS subscription_status,
+                COALESCE(recurring_overlay.last_charge_date, overlay.last_charge_date) AS last_charge_date,
                 spend.profile_id,
                 spend.total_spent,
                 spend.charge_count
@@ -3767,6 +5574,9 @@ def get_merchant_directory(
             LEFT JOIN merchant_overlay overlay
                 ON overlay.profile_id = spend.profile_id
                AND overlay.overlay_key = spend.merchant_key
+            LEFT JOIN recurring_overlay
+                ON recurring_overlay.profile_id = spend.profile_id
+               AND recurring_overlay.overlay_key = spend.merchant_key
         """
 
         outer_where = "1=1"
@@ -4375,7 +6185,7 @@ def explain_category_assignment(
         ).fetchone()
 
         # Recent sample transactions
-        sample_params: list = [pattern, pattern]
+        sample_params: list = [pattern, key_pattern, pattern]
         sample_sql = f"""
             SELECT date, description, amount, category, categorization_source, merchant_name
             FROM transactions_visible

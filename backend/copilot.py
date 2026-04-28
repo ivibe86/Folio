@@ -870,19 +870,9 @@ def ask_copilot(
     if confirm_write and pending_sql:
         return _execute_write(pending_sql, profile, question)
 
-    # ── Try deterministic intent routing before LLM SQL ──
-    # Keyword pre-filter avoids any LLM call for pure analytics questions.
-    # For matched intents, the deterministic tool runs instead of SQL generation.
-    # Falls through transparently on any failure or free_form classification.
-    intent_result = _extract_intent(question)
-    if intent_result and intent_result.get("intent") not in (None, "free_form"):
-        dispatched = _dispatch_intent(intent_result, profile, question)
-        if dispatched is not None:
-            return dispatched
-
-    # ── Route free-form questions through the tool-using agent ──
-    # Writes are handled above by the deterministic intent dispatch; anything
-    # that reaches here is read-oriented.
+    # ── Route natural-language questions through the tool-using agent ──
+    # The dispatcher now performs LLM-first intent routing for both read and
+    # write-preview requests. Write confirmation still uses the nonce flow above.
     try:
         from copilot_agent import run_agent
         agent_result = run_agent(question=question, profile=profile, history=history)
@@ -896,6 +886,23 @@ def ask_copilot(
             0,
         )
         agent_data = agent_result.get("data")
+        pending_write = agent_result.get("pending_write") or {}
+        if pending_write:
+            return {
+                "answer": agent_result.get("answer") or "",
+                "sql": pending_write.get("sql") or "",
+                "confirmation_id": pending_write.get("confirmation_id"),
+                "data": pending_write.get("samples") or agent_data,
+                "preview_changes": pending_write.get("preview_changes", []),
+                "operation": "write_preview",
+                "rows_affected": pending_write.get("rows_affected") or 0,
+                "needs_confirmation": True,
+                "tool_trace": agent_result.get("tool_trace", []),
+                "data_source": agent_result.get("data_source"),
+                "iterations": agent_result.get("iterations", 0),
+                "memory_proposals": agent_result.get("memory_proposals", []),
+                "memory_observations": agent_result.get("memory_observations", []),
+            }
         return {
             "answer": agent_result.get("answer") or "",
             "sql": "",

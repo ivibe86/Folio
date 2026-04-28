@@ -8,8 +8,6 @@
     import { onMount } from 'svelte';
     import { loadProfiles } from '$lib/stores/profileStore.js';
 
-    export let params = {};
-
     let lastSynced = null;
     let syncPollTimer = null;
     let lastCompletedSyncKey = null;
@@ -433,10 +431,13 @@
      MOBILE NAV
      ——————————————————————————————————————————— -->
 {#if mobileMenuOpen}
-    <div class="md:hidden fixed inset-0 z-[60]" on:click={() => mobileMenuOpen = false}>
-        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
-        <nav class="glass-rail absolute left-0 top-0 bottom-0 w-[260px] flex flex-col"
-             on:click|stopPropagation>
+    <div class="md:hidden fixed inset-0 z-[60]">
+        <button
+            type="button"
+            class="absolute inset-0 bg-black/50 backdrop-blur-sm border-0 p-0"
+            aria-label="Close mobile menu"
+            on:click={() => mobileMenuOpen = false}></button>
+        <nav class="glass-rail absolute left-0 top-0 bottom-0 w-[260px] flex flex-col">
 
             <div class="rail-effects-layer" aria-hidden="true">
                 <span class="rail-shine"></span>
@@ -589,22 +590,6 @@
 
 <style>
 
-    .rail-brand-svg {
-        width: 20px;
-        height: 20px;
-    }
-
-    .folio-shimmer-path {
-        animation: folio-foil-sweep 4s ease-in-out infinite;
-    }
-
-    @keyframes folio-foil-sweep {
-        0%   { opacity: 0; transform: translateX(-120%); }
-        15%  { opacity: 1; }
-        30%  { opacity: 0; transform: translateX(120%); }
-        100% { opacity: 0; transform: translateX(120%); }
-    }
-    
     /* ———————————————————————————————————————————
        GLASS RAIL v3 — Unified Glass Navigation
        ——————————————————————————————————————————— */
@@ -701,7 +686,7 @@
         opacity: 0.5;
     }
 
-    :root:not(.dark) .rail-shine {
+    :global(:root:not(.dark)) .rail-shine {
         background: linear-gradient(
             160deg,
             rgba(255, 255, 255, 0.45) 0%,

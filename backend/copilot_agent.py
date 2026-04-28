@@ -707,10 +707,15 @@ def _planned_tools_for_route(route: dict) -> list[str]:
     return planned_tools_for_route(route)
 
 
-def route_question(question: str, history: list[dict] | None = None, forced_intent: str | None = None) -> dict:
+def route_question(
+    question: str,
+    history: list[dict] | None = None,
+    forced_intent: str | None = None,
+    profile: str | None = None,
+) -> dict:
     from copilot_agents.classifier import route_question as classify_route
 
-    return classify_route(question, history, forced_intent=forced_intent)
+    return classify_route(question, history, forced_intent=forced_intent, profile=profile)
 
 
 def run_agent(question: str, profile: str | None, history: list[dict] | None = None, forced_intent: str | None = None) -> dict:

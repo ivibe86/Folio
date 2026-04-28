@@ -827,7 +827,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "get_transactions": {
         "fn": _t_get_transactions,
-        "description": "Search / list transactions with filters — same source as the Transactions page. Filter by range, category, account, or free-text search.",
+        "description": "Search / list transactions with filters — same source as the Transactions page, newest transactions first. Use limit=1 for latest/last/most recent transaction questions.",
         "parameters": {
             "type": "object",
             "properties": {

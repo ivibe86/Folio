@@ -484,9 +484,28 @@
     }
 
     function getGoalMonthlyNeed(goal) {
+        if (goal?.projection?.required_monthly != null) return Number(goal.projection.required_monthly || 0);
         const gap = Math.max(Number(goal.target_amount || 0) - Number(goal.current_amount || 0), 0);
         const months = monthsUntil(goal.target_date);
         return months > 0 ? gap / months : 0;
+    }
+
+    function goalProjectionText(goal) {
+        const projection = goal?.projection || {};
+        if (projection.status === 'funded') return 'Funded';
+        if (projection.status === 'on_track') return `On track · ${formatCurrency(projection.required_monthly || 0)}/mo needed`;
+        if (projection.status === 'behind') return `Behind pace · ${formatCurrency(projection.required_monthly || 0)}/mo needed`;
+        if (projection.status === 'needs_progress') return `Needs ${formatCurrency(projection.required_monthly || 0)}/mo by target`;
+        if (projection.status === 'needs_target_date') return 'Add a target date for monthly pace';
+        return 'Projection unavailable';
+    }
+
+    function goalProjectionTone(goal) {
+        const status = goal?.projection?.status || '';
+        if (status === 'funded' || status === 'on_track') return 'positive';
+        if (status === 'behind') return 'negative';
+        if (status === 'needs_progress') return 'warning';
+        return 'neutral';
     }
 
     async function saveGoal() {
@@ -681,6 +700,9 @@
                             <div>
                                 <strong>{goal.name}</strong>
                                 <span>{goal.goal_type} · {gap > 0 ? `${formatCurrency(gap)} left` : 'funded'}</span>
+                                <em class="budget-goal-projection budget-goal-projection-{goalProjectionTone(goal)}">
+                                    {goalProjectionText(goal)}
+                                </em>
                             </div>
                             <div class="budget-goal-right">
                                 <span>{formatCurrency(goal.current_amount)} / {formatCurrency(goal.target_amount)}</span>

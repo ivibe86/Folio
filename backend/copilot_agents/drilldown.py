@@ -13,6 +13,7 @@ from .base import emit_done_with_memory, tool_loop_result, tool_loop_stream
 
 
 SPEND_TOTAL_TOOLS = {"get_merchant_spend", "get_category_spend"}
+TRANSACTION_TOOLS = {"get_transactions", "get_transactions_for_merchant"}
 SPEND_WORD_RE = re.compile(r"\b(how much|spend|spent|paid|pay|charges?|expenses?|transactions?|bought|purchase[ds]?)\b", re.I)
 CHART_WORD_RE = re.compile(r"\b(plot|chart|graph|visualize|trend)\b", re.I)
 WRITE_WORD_RE = re.compile(r"\b(move all|recategorize|reclassify|rename|create (?:a )?rule|always categorize)\b", re.I)
@@ -158,6 +159,68 @@ def _spend_answer(tool_name: str, args: dict, result: dict) -> str:
     merchant = result.get("merchant_query") or args.get("merchant") or "that merchant"
     count = int(result.get("txn_count") or result.get("total_matching_transactions") or 0)
     return f"You spent {total} at {merchant} for {label}, across {count} transaction{'s' if count != 1 else ''}."
+
+
+def _format_amount(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    sign = "-" if amount < 0 else ""
+    return f"{sign}${abs(amount):,.2f}"
+
+
+def _transaction_answer(tool_name: str, args: dict, result: dict) -> str:
+    if result.get("error"):
+        return f"I couldn't get a clean transaction list: {result['error']}"
+    rows = result.get("transactions") if tool_name == "get_transactions_for_merchant" else result.get("data")
+    if not isinstance(rows, list) or not rows:
+        return "I couldn't find matching transactions."
+
+    limit = int(args.get("limit") or len(rows) or 0)
+    first = rows[0]
+    desc = first.get("description") or first.get("merchant_display_name") or first.get("merchant_name") or "Unknown transaction"
+    date = first.get("date") or "unknown date"
+    amount = _format_amount(first.get("amount"))
+    category = first.get("category") or "Uncategorized"
+    account = first.get("account_name")
+    account_part = f" from {account}" if account else ""
+
+    if limit == 1:
+        return f"Your latest transaction is {desc} on {date} for {amount}, categorized as {category}{account_part}."
+    count = len(rows)
+    return f"I found {count} matching transaction{'s' if count != 1 else ''}. The most recent is {desc} on {date} for {amount}."
+
+
+def _looks_like_subject_followup(question: str) -> bool:
+    return bool(re.search(r"\b(what\s+about|how\s+about|and\s+for|now\s+for)\b", question or "", re.I))
+
+
+def _direct_plan_from_route(route: dict | None, question: str = "", history: list[dict] | None = None, profile: str | None = None) -> dict | None:
+    if not route:
+        return None
+    tool_name = route.get("tool_name")
+    if tool_name in SPEND_TOTAL_TOOLS or tool_name in TRANSACTION_TOOLS:
+        args = route.get("args") or {}
+        if tool_name in SPEND_TOTAL_TOOLS and _looks_like_subject_followup(question):
+            inherited = _history_subject(history, profile)
+            if inherited:
+                inherited_tool, subject = inherited
+                arg_name = "category" if inherited_tool == "get_category_spend" else "merchant"
+                tool_name = inherited_tool
+                args = {arg_name: subject, "range": args.get("range") or _range_from_question(question)}
+        return {
+            "name": tool_name,
+            "args": args,
+            "source": "router",
+        }
+    return None
+
+
+def _answer_for_direct_plan(tool_name: str, args: dict, result: dict) -> str:
+    if tool_name in SPEND_TOTAL_TOOLS:
+        return _spend_answer(tool_name, args, result)
+    return _transaction_answer(tool_name, args, result)
 
 
 def _load_categories(profile: str | None) -> list[str]:
@@ -471,18 +534,19 @@ def _first_tool_result(question: str, profile: str | None, history: list[dict] |
     return {"call": call, "result": result}, trace, cache, 1
 
 
-def run(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
+def run(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None) -> dict:
     import copilot_agent as core
 
-    structured, parser_calls = structured_spend_plan(question, profile, history)
-    direct = structured or direct_spend_plan(question, profile, history)
+    router_plan = _direct_plan_from_route(route, question, history, profile)
+    structured, parser_calls = (None, 0) if router_plan else structured_spend_plan(question, profile, history)
+    direct = router_plan or structured or direct_spend_plan(question, profile, history)
     if direct:
         cache: dict = {}
         start = datetime.now()
         result_payload = execute_tool(direct["name"], direct["args"], profile, cache=cache)
         duration_ms = int((datetime.now() - start).total_seconds() * 1000)
         trace = [{"name": direct["name"], "args": direct["args"], "duration_ms": duration_ms}]
-        answer = _spend_answer(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        answer = _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
         result = core._finalize_answer(
             question=question,
             profile=profile,
@@ -519,11 +583,12 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
     )
 
 
-def stream(question: str, profile: str | None, history: list[dict] | None = None):
+def stream(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None):
     import copilot_agent as core
 
-    structured, parser_calls = structured_spend_plan(question, profile, history)
-    direct = structured or direct_spend_plan(question, profile, history)
+    router_plan = _direct_plan_from_route(route, question, history, profile)
+    structured, parser_calls = (None, 0) if router_plan else structured_spend_plan(question, profile, history)
+    direct = router_plan or structured or direct_spend_plan(question, profile, history)
     if direct:
         cache: dict = {}
         trace: list[dict] = []
@@ -534,7 +599,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         duration_ms = int((datetime.now() - start).total_seconds() * 1000)
         trace.append({"name": direct["name"], "args": direct["args"], "duration_ms": duration_ms})
         yield {"type": "tool_result", "name": direct["name"], "duration_ms": duration_ms}
-        answer = _spend_answer(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
+        answer = _answer_for_direct_plan(direct["name"], direct["args"], result_payload if isinstance(result_payload, dict) else {})
         yield from emit_done_with_memory(
             question=question,
             profile=profile,

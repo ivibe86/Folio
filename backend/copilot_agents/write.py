@@ -148,10 +148,21 @@ def _pending_write(result: Any) -> dict | None:
     }
 
 
-def _direct_result(question: str, profile: str | None, history: list[dict] | None = None) -> dict | None:
+def _plan_from_route(route: dict | None) -> tuple[dict | None, int]:
+    if not route or route.get("intent") != "write":
+        return None, 0
+    tool_name = route.get("tool_name")
+    if tool_name not in {"preview_bulk_recategorize", "preview_create_rule", "preview_rename_merchant"}:
+        return None, 0
+    return {"name": tool_name, "args": route.get("args") or {}}, 0
+
+
+def _direct_result(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None) -> dict | None:
     import copilot_agent as core
 
-    plan, llm_calls = _structured_write_plan(question, profile, history)
+    plan, llm_calls = _plan_from_route(route)
+    if not plan:
+        plan, llm_calls = _structured_write_plan(question, profile, history)
     if not plan:
         return None
     cache: dict = {}
@@ -176,10 +187,10 @@ def _direct_result(question: str, profile: str | None, history: list[dict] | Non
     return finalized
 
 
-def run(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
+def run(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None) -> dict:
     import copilot_agent as core
 
-    direct = _direct_result(question, profile, history)
+    direct = _direct_result(question, profile, history, route)
     if direct:
         return direct
 
@@ -192,10 +203,12 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
     )
 
 
-def stream(question: str, profile: str | None, history: list[dict] | None = None):
+def stream(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None):
     import copilot_agent as core
 
-    plan, llm_calls = _structured_write_plan(question, profile, history)
+    plan, llm_calls = _plan_from_route(route)
+    if not plan:
+        plan, llm_calls = _structured_write_plan(question, profile, history)
     if plan:
         cache: dict = {}
         trace: list[dict] = []

@@ -377,28 +377,29 @@
 
     async function handleShortcut(question) {
         const lower = question.toLowerCase();
+        const pageNavigation = /\b(open|go to|navigate to)\b/.test(lower) || (/\bshow\b/.test(lower) && /\b(page|screen|tab)\b/.test(lower));
 
-        if (/\b(open|show)\b/.test(lower) && /\b(transaction|transactions)\b/.test(lower)) {
+        if (pageNavigation && /\b(transaction|transactions)\b/.test(lower)) {
             await openPage('/transactions');
             return "Opened Transactions.";
         }
-        if (/\b(open|show)\b/.test(lower) && /\b(merchant|merchants)\b/.test(lower)) {
+        if (pageNavigation && /\b(merchant|merchants)\b/.test(lower)) {
             await openControlCenter('merchants');
             return "Opened Control Center on Merchants.";
         }
-        if (/\b(open|show)\b/.test(lower) && /\brules?\b/.test(lower)) {
+        if (pageNavigation && /\brules?\b/.test(lower)) {
             await openControlCenter('rules');
             return "Opened Control Center on Rules.";
         }
-        if (/\b(open|show)\b/.test(lower) && /\b(categories|category)\b/.test(lower)) {
+        if (pageNavigation && /\b(categories|category)\b/.test(lower)) {
             await openControlCenter('categories');
             return "Opened Control Center on Categories.";
         }
-        if (/\b(open|show)\b/.test(lower) && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
+        if (pageNavigation && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
             await openControlCenter('merchants', { merchantFilter: 'subscriptions' });
             return "Opened Control Center on recurring merchants.";
         }
-        if (/\b(open|show)\b/.test(lower) && /\bhistory\b/.test(lower)) {
+        if (pageNavigation && /\bhistory\b/.test(lower)) {
             openHistory();
             return "Opened recent Mira activity.";
         }
@@ -1514,11 +1515,12 @@
                                     class="text-[11px] hover:underline" style="color: var(--text-muted)">Cancel</button>
                             </div>
                             <div class="flex flex-col gap-2.5">
-                                {#each chip.inputs as field}
+                                {#each chip.inputs as field, fieldIndex}
+                                    {@const fieldId = `chip-${chip.id}-${field.key || fieldIndex}`}
                                     <div>
-                                        <label class="text-[10px] font-medium mb-1 block" style="color: var(--text-muted)">{field.label}</label>
+                                        <label for={fieldId} class="text-[10px] font-medium mb-1 block" style="color: var(--text-muted)">{field.label}</label>
                                         {#if field.type === 'select'}
-                                            <select bind:value={chipFormValues[field.key]}
+                                            <select id={fieldId} bind:value={chipFormValues[field.key]}
                                                 class="w-full px-3 py-2 rounded-lg text-[12px] focus:ring-2 focus:ring-accent/40 outline-none"
                                                 style="background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--card-border)">
                                                 <option value="">Select category…</option>
@@ -1527,7 +1529,7 @@
                                                 {/each}
                                             </select>
                                         {:else}
-                                            <input type="text" bind:value={chipFormValues[field.key]}
+                                            <input id={fieldId} type="text" bind:value={chipFormValues[field.key]}
                                                 placeholder={field.placeholder}
                                                 on:keydown={(e) => { if (e.key === 'Enter' && chip.inputs.filter(f => f.required).every(f => chipFormValues[f.key]?.trim())) submitChipForm(); }}
                                                 class="w-full px-3 py-2 rounded-lg text-[12px] focus:ring-2 focus:ring-accent/40 outline-none"

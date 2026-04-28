@@ -22,6 +22,14 @@ from statistics import mean, stdev, median
 from collections import defaultdict
 from database import _extract_merchant_pattern
 from merchant_identity import canonicalize_merchant_key
+from recurring_obligations import (
+    advance_recurring_date,
+    canonical_key as recurring_canonical_key,
+    event_period_bucket,
+    merchant_match_keys,
+    recurring_event_key,
+    sync_detection_results,
+)
 from log_config import get_logger
 
 logger = get_logger(__name__)
@@ -38,8 +46,8 @@ FREQUENCY_DEFS = {
 
 FREQ_RANGES = {k: (v[2], v[3]) for k, v in FREQUENCY_DEFS.items()}
 
-TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment"}
-NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income"}
+TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment", "Internal Transfer"}
+NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income", "Tax Refund", "Refund"}
 
 # Seed categories that are ALLOWED through the category exclusion filter.
 # If a seed's own category is in this set, it bypasses ALGO_EXCLUDED_CATEGORIES.
@@ -84,6 +92,28 @@ def _normalise_seed_frequency(freq_hint: str | None) -> str:
     if f == "yearly":
         return "annual"
     return "monthly"
+
+
+def _profile_scope_key(merchant: str | None, profile_id: str | None = None) -> str:
+    key = recurring_canonical_key(merchant or "")
+    return f"{profile_id or 'household'}::{key}" if key else ""
+
+
+def _profile_from_group(group_txns: list[dict], fallback: str | None = None) -> str:
+    for tx in group_txns or []:
+        profile_id = tx.get("profile_id") or tx.get("profile")
+        if profile_id:
+            return profile_id
+    return fallback or "household"
+
+
+def _is_dismissed_match(dismissed: set[str], merchant: str | None, profile_id: str | None = None) -> bool:
+    keys = merchant_match_keys(merchant)
+    if any(key in dismissed for key in keys):
+        return True
+    if profile_id:
+        return any(f"{profile_id}::{key}" in dismissed for key in keys)
+    return False
 
 
 def _detect_frequency(dates: list, seed_freq_hint: str | None = None) -> str | None:
@@ -353,6 +383,54 @@ def _detect_price_change(group_txns: list[dict]) -> dict | None:
     }
 
 
+def _segment_evidence(segments: list[list[dict]]) -> list[dict]:
+    """Compact, deterministic evidence for each price-stable segment."""
+    evidence: list[dict] = []
+    for idx, segment in enumerate(segments, start=1):
+        ordered = sorted(segment, key=lambda t: t["date"])
+        amounts = [float(t["amount"]) for t in ordered]
+        dates = [str(t["date"])[:10] for t in ordered]
+        evidence.append({
+            "segment": idx,
+            "transaction_ids": [t.get("id") for t in ordered if t.get("id") is not None],
+            "start_date": dates[0] if dates else None,
+            "end_date": dates[-1] if dates else None,
+            "count": len(ordered),
+            "avg_amount": round(mean(amounts), 2) if amounts else 0,
+            "median_amount": round(median(amounts), 2) if amounts else 0,
+            "amount_min": round(min(amounts), 2) if amounts else 0,
+            "amount_max": round(max(amounts), 2) if amounts else 0,
+        })
+    return evidence
+
+
+def _transaction_evidence(group_txns: list[dict], segments: list[list[dict]] | None = None) -> dict:
+    ordered = sorted(group_txns, key=lambda t: t["date"])
+    dates = [str(t["date"])[:10] for t in ordered]
+    parsed_dates = _parse_dates(dates)
+    return {
+        "transaction_ids": [t.get("id") for t in ordered if t.get("id") is not None],
+        "dates": dates,
+        "amounts": [round(float(t["amount"]), 2) for t in ordered],
+        "intervals": [
+            (parsed_dates[i + 1] - parsed_dates[i]).days
+            for i in range(len(parsed_dates) - 1)
+        ],
+        "price_segments": _segment_evidence(segments or [ordered]),
+    }
+
+
+def _result_evidence_fields(result: dict | None) -> dict:
+    if not result:
+        return {}
+    keys = (
+        "transaction_ids", "dates", "amounts", "intervals", "price_segments",
+        "segment_amounts", "segment_dates", "segment_count", "segment_size",
+        "price_changed",
+    )
+    return {key: result[key] for key in keys if key in result}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PRICE SEGMENTATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -465,8 +543,9 @@ def _evaluate_group(
     if not group_txns:
         return None
 
-    full_amounts = [t["amount"] for t in group_txns]
-    full_dates = sorted(_parse_dates([t["date"] for t in group_txns]))
+    ordered_group = sorted(group_txns, key=lambda t: t["date"])
+    full_amounts = [t["amount"] for t in ordered_group]
+    full_dates = sorted(_parse_dates([t["date"] for t in ordered_group]))
     n_total = len(group_txns)
 
     if not full_dates:
@@ -518,7 +597,7 @@ def _evaluate_group(
     nominal, grace, _, _ = FREQUENCY_DEFS.get(detected_freq, FREQUENCY_DEFS["monthly"])
     last_date = full_dates[-1]  # Use full history for recency
     is_active = (today - last_date).days <= (nominal + grace)
-    next_expected = (last_date + timedelta(days=nominal)) if is_active else None
+    next_expected = advance_recurring_date(last_date, detected_freq) if is_active else None
 
     # ── Confidence scoring (on the segmented data) ──
     confidence_level = _compute_confidence(
@@ -558,6 +637,9 @@ def _evaluate_group(
         "price_changed":      price_changed,
         "segment_count":      len(segments),
         "segment_size":       n_segment,
+        "segment_amounts":    [round(float(t["amount"]), 2) for t in latest_segment],
+        "segment_dates":      [str(t["date"])[:10] for t in sorted(latest_segment, key=lambda t: t["date"])],
+        **_transaction_evidence(ordered_group, segments),
     }
 
 
@@ -606,58 +688,122 @@ def _load_dismissed_merchants(get_db_conn, profile: str | None = None) -> set[st
     with get_db_conn() as conn:
         if profile and profile != "household":
             rows = conn.execute(
-                "SELECT merchant_name FROM dismissed_recurring WHERE profile_id = ?",
+                "SELECT merchant_name, profile_id FROM dismissed_recurring WHERE profile_id = ?",
                 (profile,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT merchant_name FROM dismissed_recurring"
+                "SELECT merchant_name, profile_id FROM dismissed_recurring"
             ).fetchall()
-    return {row[0] for row in rows}
+    dismissed: set[str] = set()
+    scoped_only = not (profile and profile != "household")
+    for row in rows:
+        profile_id = row[1] or "household"
+        for key in merchant_match_keys(row[0]):
+            dismissed.add(f"{profile_id}::{key}")
+            if not scoped_only:
+                dismissed.add(key)
+    return dismissed
 
 
 def _load_cancelled_merchants(get_db_conn, profile: str | None = None) -> dict[str, str]:
-    """Load cancelled merchant names and their cancellation dates."""
+    """Load cancelled merchant names and their cancellation dates from v2 first."""
     with get_db_conn() as conn:
         if profile and profile != "household":
-            rows = conn.execute(
-                """SELECT merchant_key, cancelled_at FROM merchants
+            v2_rows = conn.execute(
+                """SELECT merchant_key, COALESCE(last_user_action_at, updated_at), profile_id
+                   FROM recurring_obligations
+                   WHERE state = 'cancelled' AND profile_id = ?""",
+                (profile,),
+            ).fetchall()
+            legacy_rows = conn.execute(
+                """SELECT merchant_key, cancelled_at, profile_id
+                   FROM merchants
                    WHERE cancelled_by_user = 1 AND profile_id = ?""",
                 (profile,),
             ).fetchall()
         else:
-            rows = conn.execute(
-                """SELECT merchant_key, cancelled_at FROM merchants
+            v2_rows = conn.execute(
+                """SELECT merchant_key, COALESCE(last_user_action_at, updated_at), profile_id
+                   FROM recurring_obligations
+                   WHERE state = 'cancelled'"""
+            ).fetchall()
+            legacy_rows = conn.execute(
+                """SELECT merchant_key, cancelled_at, profile_id
+                   FROM merchants
                    WHERE cancelled_by_user = 1"""
             ).fetchall()
-    return {row[0]: row[1] for row in rows}
+    cancelled: dict[str, str] = {}
+    scoped_only = not (profile and profile != "household")
+
+    def store_cancelled(row, *, overwrite: bool) -> None:
+        profile_id = row[2] or "household"
+        for key in merchant_match_keys(row[0]):
+            scoped_key = f"{profile_id}::{key}"
+            if overwrite or scoped_key not in cancelled:
+                cancelled[scoped_key] = row[1]
+            if not scoped_only and (overwrite or key not in cancelled):
+                cancelled[key] = row[1]
+
+    # Legacy rows fill gaps only; v2 obligations are the authority.
+    for row in legacy_rows:
+        store_cancelled(row, overwrite=False)
+    for row in v2_rows:
+        store_cancelled(row, overwrite=True)
+    return cancelled
 
 
 def _load_merchants_state(get_db_conn, profile: str | None = None) -> dict[str, dict]:
     """
-    Load current merchants table state for event comparison.
+    Load current recurring state for event comparison.
+
+    The v2 obligation model is authoritative. Legacy merchant subscription
+    columns are read only as a compatibility fallback for pre-v2 rows.
     Returns {merchant_key: {subscription_amount, subscription_status, ...}}.
     """
     with get_db_conn() as conn:
         if profile and profile != "household":
-            rows = conn.execute(
+            obligation_rows = conn.execute(
+                """SELECT merchant_key, display_name, amount_cents, state,
+                          frequency, source, profile_id
+                   FROM recurring_obligations
+                   WHERE profile_id = ?""",
+                (profile,),
+            ).fetchall()
+            legacy_rows = conn.execute(
                 """SELECT merchant_key, clean_name, subscription_amount,
                           subscription_status, subscription_frequency,
-                          is_subscription, cancelled_by_user
+                          is_subscription, cancelled_by_user,
+                          profile_id
                    FROM merchants WHERE profile_id = ?""",
                 (profile,),
             ).fetchall()
         else:
-            rows = conn.execute(
+            obligation_rows = conn.execute(
+                """SELECT merchant_key, display_name, amount_cents, state,
+                          frequency, source, profile_id
+                   FROM recurring_obligations"""
+            ).fetchall()
+            legacy_rows = conn.execute(
                 """SELECT merchant_key, clean_name, subscription_amount,
                           subscription_status, subscription_frequency,
-                          is_subscription, cancelled_by_user
+                          is_subscription, cancelled_by_user, profile_id
                    FROM merchants"""
             ).fetchall()
 
     result = {}
-    for row in rows:
-        result[row[0]] = {
+    scoped_only = not (profile and profile != "household")
+
+    def store_state(row_profile: str, keys: set[str], state: dict, *, overwrite: bool) -> None:
+        for key in keys:
+            scoped_key = f"{row_profile}::{key}"
+            if overwrite or scoped_key not in result:
+                result[scoped_key] = state
+            if not scoped_only and (overwrite or key not in result):
+                result[key] = state
+
+    for row in legacy_rows:
+        state = {
             "merchant_key": row[0],
             "clean_name": row[1],
             "subscription_amount": row[2],
@@ -666,6 +812,23 @@ def _load_merchants_state(get_db_conn, profile: str | None = None) -> dict[str, 
             "is_subscription": bool(row[5]),
             "cancelled_by_user": bool(row[6]),
         }
+        profile_id = row[7] or "household"
+        store_state(profile_id, merchant_match_keys(row[0]) | merchant_match_keys(row[1]), state, overwrite=False)
+
+    for row in obligation_rows:
+        obligation_state = row[3] or "candidate"
+        subscription_status = "active" if obligation_state == "confirmed" else obligation_state
+        state = {
+            "merchant_key": row[0],
+            "clean_name": row[1],
+            "subscription_amount": round(float(row[2] or 0) / 100.0, 2),
+            "subscription_status": subscription_status,
+            "subscription_frequency": row[4],
+            "is_subscription": obligation_state != "dismissed",
+            "cancelled_by_user": obligation_state == "cancelled",
+        }
+        profile_id = row[6] or "household"
+        store_state(profile_id, merchant_match_keys(row[0]) | merchant_match_keys(row[1]), state, overwrite=True)
     return result
 
 
@@ -697,7 +860,14 @@ def _load_seeds_cached(get_db_conn, profile: str | None = None) -> tuple[list[di
             """SELECT name, pattern, frequency_hint, category, source
                FROM subscription_seeds
                WHERE is_active = 1
-               ORDER BY source DESC, length(pattern) DESC, id ASC"""
+                 AND (
+                     source = 'system'
+                     OR created_by IS NULL
+                     OR created_by = ?
+                     OR created_by = 'household'
+                 )
+               ORDER BY source DESC, length(pattern) DESC, id ASC""",
+            (created_by,),
         ).fetchall()
 
     seeds = []
@@ -808,18 +978,21 @@ def _generate_subscription_events(
 
     for item in current_items:
         merchant = item.get("merchant", "")
-        merchant_key = merchant.upper().strip()
-        seen_merchants.add(merchant_key)
-        prev = previous_state.get(merchant_key)
+        item_profile = item.get("profile") or profile_id
+        merchant_key = recurring_canonical_key(merchant)
+        scoped_key = f"{item_profile}::{merchant_key}"
+        seen_merchants.add(scoped_key)
+        prev = previous_state.get(scoped_key) or previous_state.get(merchant_key)
 
         # Zombie detection: charge from a cancelled merchant
-        if merchant_key in cancelled_merchants and item.get("status") == "active":
+        cancelled_at = cancelled_merchants.get(scoped_key) or cancelled_merchants.get(merchant_key)
+        if cancelled_at and item.get("status") == "active":
             events.append({
                 "event_type": "zombie_charge",
                 "merchant_name": merchant,
-                "profile_id": profile_id,
+                "profile_id": item_profile,
                 "detail": _json.dumps({
-                    "cancelled_at": cancelled_merchants[merchant_key],
+                    "cancelled_at": cancelled_at,
                     "new_charge_amount": item.get("avg_amount"),
                     "new_charge_date": item.get("last_date"),
                 }),
@@ -831,7 +1004,7 @@ def _generate_subscription_events(
             events.append({
                 "event_type": "new_detected",
                 "merchant_name": merchant,
-                "profile_id": profile_id,
+                "profile_id": item_profile,
                 "detail": _json.dumps({
                     "amount": item.get("avg_amount"),
                     "frequency": item.get("frequency"),
@@ -848,22 +1021,24 @@ def _generate_subscription_events(
                     events.append({
                         "event_type": "price_increase",
                         "merchant_name": merchant,
-                        "profile_id": profile_id,
+                        "profile_id": item_profile,
                         "detail": _json.dumps({
                             "old_amount": prev_amount,
                             "new_amount": curr_amount,
                             "change": change,
+                            "latest_date": item.get("last_date"),
                         }),
                     })
                 elif change <= -0.50:
                     events.append({
                         "event_type": "price_decrease",
                         "merchant_name": merchant,
-                        "profile_id": profile_id,
+                        "profile_id": item_profile,
                         "detail": _json.dumps({
                             "old_amount": prev_amount,
                             "new_amount": curr_amount,
                             "change": change,
+                            "latest_date": item.get("last_date"),
                         }),
                     })
 
@@ -874,7 +1049,7 @@ def _generate_subscription_events(
                 events.append({
                     "event_type": "gone_inactive",
                     "merchant_name": merchant,
-                    "profile_id": profile_id,
+                    "profile_id": item_profile,
                     "detail": _json.dumps({
                         "last_charge_date": item.get("last_date"),
                         "amount": curr_amount,
@@ -899,7 +1074,8 @@ class RecurringDetector:
     ALGO_EXCLUDED_CATEGORIES = {
         # Non-spending
         "Savings Transfer", "Credit Card Payment",
-        "Income", "Personal Transfer",
+        "Income", "Personal Transfer", "Internal Transfer",
+        "Tax Payment", "Tax Refund", "Refund",
         # Groceries & dining
         "Groceries", "Food & Dining",
         # Travel & transport
@@ -919,6 +1095,12 @@ class RecurringDetector:
         "Taxes",
     }
 
+    # Category-backed recurring bills that should still be eligible after the
+    # hard false-positive gates above. These still must pass cadence/amount
+    # validation in _evaluate_group; this does not make arbitrary insurance
+    # transactions recurring by itself.
+    RECURRING_BILL_CATEGORIES = {"Subscriptions", "Insurance"}
+
     _DISQUALIFY_TOKENS = {
         "ATM", "CASH", "CHECK", "WITHDRAWAL", "DEPOSIT",
         "REFUND", "CREDIT", "REVERSAL", "TRANSFER",
@@ -935,6 +1117,7 @@ class RecurringDetector:
         profile: str | None = None,
         merchant_keys: set[str] | None = None,
         generate_events: bool = False,
+        today=None,
     ) -> dict:
         """
         Detect recurring charges in a list of transactions.
@@ -950,7 +1133,7 @@ class RecurringDetector:
         Returns:
             dict with keys: items, count, total_monthly, total_annual, events
         """
-        TODAY = datetime.now().date()
+        TODAY = today or datetime.now().date()
 
         # Load dismissed merchants for filtering
         dismissed_merchants = _load_dismissed_merchants(self._get_db_conn, profile)
@@ -985,11 +1168,11 @@ class RecurringDetector:
         user_declared = _load_user_declared_subscriptions(self._get_db_conn, profile)
         for decl in user_declared:
             merchant_name = decl["merchant_name"]
-            if merchant_name in dismissed_merchants:
+            decl_profile = decl.get("profile_id") or profile or "household"
+            if _is_dismissed_match(dismissed_merchants, merchant_name, decl_profile):
                 continue
             freq = decl["frequency"]
             amt = decl["amount"]
-            nominal = FREQUENCY_DEFS.get(freq, FREQUENCY_DEFS["monthly"])[0]
 
             recurring.append({
                 "merchant":           merchant_name,
@@ -1006,8 +1189,9 @@ class RecurringDetector:
                 "matched_by":         "user",
                 "annual_cost":        round(_annualize(amt, freq), 2),
                 "price_change":       None,
+                "profile":            decl_profile,
             })
-            seen_merchants.add(merchant_name.upper().strip())
+            seen_merchants.add(_profile_scope_key(merchant_name, decl_profile))
 
         if not expense_txns:
             return {
@@ -1025,7 +1209,9 @@ class RecurringDetector:
             filtered_groups = {}
             filtered_names = {}
             for key in merchant_groups:
-                if key in merchant_keys or key.upper() in {mk.upper() for mk in merchant_keys}:
+                base_key = key.split("::", 1)[-1]
+                merchant_keys_upper = {mk.upper() for mk in merchant_keys}
+                if key in merchant_keys or key.upper() in merchant_keys_upper or base_key.upper() in merchant_keys_upper:
                     filtered_groups[key] = merchant_groups[key]
                     filtered_names[key] = display_names.get(key, key)
             merchant_groups = filtered_groups
@@ -1056,7 +1242,7 @@ class RecurringDetector:
         # Filter out dismissed merchants (Layer 0 already filtered above)
         recurring = [
             r for r in recurring
-            if r.get("merchant", "") not in dismissed_merchants
+            if not _is_dismissed_match(dismissed_merchants, r.get("merchant", ""), r.get("profile") or profile)
                and r.get("matched_by") != "dismissed"
         ]
 
@@ -1079,7 +1265,7 @@ class RecurringDetector:
                                 is_active = (TODAY - dates[-1]).days <= (nominal + grace)
                                 r["status"] = "active" if is_active else "inactive"
                                 if is_active:
-                                    r["next_expected_date"] = (dates[-1] + timedelta(days=nominal)).isoformat()
+                                    r["next_expected_date"] = advance_recurring_date(dates[-1], freq).isoformat()
                         break
 
         recurring.sort(
@@ -1138,6 +1324,7 @@ class RecurringDetector:
             raw_merchant = (t.get("merchant_name") or "").strip()
             raw_key = canonicalize_merchant_key(t.get("merchant_key") or "")
             raw_desc = (t.get("description") or "").strip()
+            profile_id = t.get("profile_id") or t.get("profile") or ""
 
             extracted = _extract_merchant_pattern(raw_desc)
 
@@ -1152,15 +1339,19 @@ class RecurringDetector:
             else:
                 key = extracted if extracted else (raw_desc.upper() or "UNKNOWN")
 
-            if key not in display_names or raw_merchant:
-                display_names[key] = raw_merchant if raw_merchant else raw_desc
-            merchant_groups[key].append({
+            group_key = f"{profile_id}::{key}" if profile_id else key
+
+            if group_key not in display_names or raw_merchant:
+                display_names[group_key] = raw_merchant if raw_merchant else raw_desc
+            merchant_groups[group_key].append({
+                "id":            t.get("id"),
                 "amount":        abs(float(t.get("amount", 0))),
                 "date":          t["date"][:10],
                 "category":      t.get("category", "Other"),
                 "description":   raw_desc,
                 "merchant_name": raw_merchant,
                 "merchant_key": raw_key,
+                "profile_id":    profile_id or None,
             })
 
         return merchant_groups, display_names
@@ -1221,7 +1412,8 @@ class RecurringDetector:
         # Apply splits
         for original_key, seed_name, matching, remaining in splits_to_apply:
             # Create a new group for the seed-matching transactions
-            seed_key = f"__seed__{seed_name}"
+            seed_profile = _profile_from_group(matching, "")
+            seed_key = f"{seed_profile}::__seed__{seed_name}" if seed_profile else f"__seed__{seed_name}"
             if seed_key in merchant_groups:
                 # Another group already claimed this seed — merge into it
                 merchant_groups[seed_key].extend(matching)
@@ -1246,12 +1438,14 @@ class RecurringDetector:
             )
             if seed:
                 seed_name = seed["name"]
-                if seed_name in seed_merge_map:
-                    existing_key = seed_merge_map[seed_name]
+                seed_profile = _profile_from_group(group_txns, "")
+                seed_merge_id = f"{seed_profile}::{seed_name}" if seed_profile else seed_name
+                if seed_merge_id in seed_merge_map:
+                    existing_key = seed_merge_map[seed_merge_id]
                     if key != existing_key:
                         merge_targets[key] = existing_key
                 else:
-                    seed_merge_map[seed_name] = key
+                    seed_merge_map[seed_merge_id] = key
                     display_names[key] = seed_name
 
         for src_key, dst_key in merge_targets.items():
@@ -1283,6 +1477,7 @@ class RecurringDetector:
         for merchant_key, group_txns in merchant_groups.items():
             if not group_txns:
                 continue
+            item_profile = _profile_from_group(group_txns)
 
             seed, _pat = _match_seed_from_group(
                 group_txns, seeds_cache, suppressed_cache,
@@ -1317,7 +1512,7 @@ class RecurringDetector:
                 )
                 last_date = dates_sorted[-1]
                 is_active = (today - last_date).days <= (nominal + grace)
-                next_expected = (last_date + timedelta(days=nominal)) if is_active else None
+                next_expected = advance_recurring_date(last_date, detected_freq) if is_active else None
 
                 recurring.append({
                     "merchant":           seed.get("name", merchant_key),
@@ -1327,13 +1522,16 @@ class RecurringDetector:
                     "category":           seed_category if seed_category else txn_category,
                     "confidence":         "low",
                     "is_subscription":    True,
-                    "status":             "active" if is_active else "inactive",
+                    "status":             "candidate" if is_active else "inactive",
                     "last_date":          last_date.isoformat(),
                     "next_expected_date": next_expected.isoformat() if next_expected else None,
                     "months_paid":        1,
                     "matched_by":         "seed",
                     "annual_cost":        round(_annualize(amounts[0], detected_freq), 2),
                     "price_change":       None,
+                    "profile":            item_profile,
+                    "seed_pattern":        _pat,
+                    **_transaction_evidence(group_txns),
                 })
                 seen_merchants.add(merchant_key)
                 continue
@@ -1365,7 +1563,7 @@ class RecurringDetector:
                 )
                 last_date = dates_sorted[-1]
                 is_active = (today - last_date).days <= (nominal + grace)
-                next_expected = (last_date + timedelta(days=nominal)) if is_active else None
+                next_expected = advance_recurring_date(last_date, detected_freq) if is_active else None
                 distinct_months = len({d.strftime("%Y-%m") for d in dates_sorted})
 
                 recurring.append({
@@ -1383,6 +1581,9 @@ class RecurringDetector:
                     "matched_by":         "seed",
                     "annual_cost":        round(_annualize(avg_amt, detected_freq), 2),
                     "price_change":       _detect_price_change(group_txns),
+                    "profile":            item_profile,
+                    "seed_pattern":        _pat,
+                    **_transaction_evidence(group_txns),
                 })
                 seen_merchants.add(merchant_key)
                 continue
@@ -1403,6 +1604,9 @@ class RecurringDetector:
                 "matched_by":         "seed",
                 "annual_cost":        result["annual_cost"],
                 "price_change":       result["price_change"],
+                "profile":            item_profile,
+                "seed_pattern":        _pat,
+                **_result_evidence_fields(result),
             })
             seen_merchants.add(merchant_key)
 
@@ -1422,6 +1626,7 @@ class RecurringDetector:
         Category exclusions are strictly enforced (no seed override here).
         """
         for merchant_key, group_txns in merchant_groups.items():
+            item_profile = _profile_from_group(group_txns)
             if merchant_key in seen_merchants:
                 continue
             if len(group_txns) < self.ALGO_MIN_CHARGES:
@@ -1460,6 +1665,8 @@ class RecurringDetector:
                 "matched_by":         "algorithm",
                 "annual_cost":        result["annual_cost"],
                 "price_change":       result["price_change"],
+                "profile":            item_profile,
+                **_result_evidence_fields(result),
             })
             seen_merchants.add(merchant_key)
 
@@ -1473,15 +1680,16 @@ class RecurringDetector:
         today,
     ):
         """
-        Layer 3: Detect recurring charges for merchants already categorized
-        as "Subscriptions" by the LLM/rules. Same CV/date validation as Layer 2.
+        Layer 3: Detect recurring charges for merchants already categorized as
+        recurring-bill classes by the LLM/rules. Same CV/date validation as Layer 2.
         """
         for merchant_key, group_txns in merchant_groups.items():
+            item_profile = _profile_from_group(group_txns)
             if merchant_key in seen_merchants:
                 continue
 
             cat = (group_txns[0].get("category") or "").strip()
-            if cat != "Subscriptions":
+            if cat not in self.RECURRING_BILL_CATEGORIES:
                 continue
 
             if len(group_txns) < 2:
@@ -1514,6 +1722,8 @@ class RecurringDetector:
                 "matched_by":         "category",
                 "annual_cost":        result["annual_cost"],
                 "price_change":       result["price_change"],
+                "profile":            item_profile,
+                **_result_evidence_fields(result),
             })
             seen_merchants.add(merchant_key)
 
@@ -1533,11 +1743,14 @@ def write_detection_results_to_db(
     profile_id = profile or "household"
 
     with get_db_conn() as conn:
+        items_by_profile: dict[str, list[dict]] = defaultdict(list)
         for item in items:
             merchant_name = item.get("merchant", "")
-            merchant_key = merchant_name.upper().strip()
+            item_profile = item.get("profile") or profile_id
+            merchant_key = recurring_canonical_key(merchant_name)
             if not merchant_key:
                 continue
+            items_by_profile[item_profile].append(item)
 
             conn.execute(
                 """INSERT INTO merchants
@@ -1554,17 +1767,16 @@ def write_detection_results_to_db(
                        subscription_frequency = excluded.subscription_frequency,
                        subscription_amount = excluded.subscription_amount,
                        subscription_status = CASE
-                           WHEN merchants.cancelled_by_user = 1 AND excluded.subscription_status = 'active'
-                           THEN 'active' ELSE excluded.subscription_status END,
+                           WHEN merchants.cancelled_by_user = 1
+                           THEN COALESCE(merchants.subscription_status, 'cancelled')
+                           ELSE excluded.subscription_status END,
                        last_charge_date = excluded.last_charge_date,
-                       next_expected_date = excluded.next_expected_date,
+                       next_expected_date = CASE
+                           WHEN merchants.cancelled_by_user = 1
+                           THEN NULL ELSE excluded.next_expected_date END,
                        charge_count = excluded.charge_count,
-                       cancelled_by_user = CASE
-                           WHEN merchants.cancelled_by_user = 1 AND excluded.subscription_status = 'active'
-                           THEN 0 ELSE merchants.cancelled_by_user END,
-                       cancelled_at = CASE
-                           WHEN merchants.cancelled_by_user = 1 AND excluded.subscription_status = 'active'
-                           THEN NULL ELSE merchants.cancelled_at END,
+                       cancelled_by_user = merchants.cancelled_by_user,
+                       cancelled_at = merchants.cancelled_at,
                        updated_at = datetime('now')""",
                 (
                     merchant_key,
@@ -1575,22 +1787,54 @@ def write_detection_results_to_db(
                     item.get("avg_amount"),
                     item.get("status"),
                     item.get("last_date"),
-                    item.get("next_expected_date"),
-                    item.get("occurrences", 0),
-                    profile_id,
-                ),
-            )
+	                    item.get("next_expected_date"),
+	                    item.get("occurrences", 0),
+	                    item_profile,
+	                ),
+	            )
 
         # Write events
         for event in events:
+            event_profile = event.get("profile_id", profile_id)
+            try:
+                detail_obj = _json.loads(event.get("detail", "{}") or "{}")
+            except Exception:
+                detail_obj = {}
+            detail_obj.setdefault("period_bucket", event_period_bucket(event))
+            event_detail = _json.dumps(detail_obj, sort_keys=True)
+            event_key = recurring_event_key({**event, "detail": detail_obj}, event_profile)
+            merchant_key = recurring_canonical_key(event.get("merchant_name", ""))
             conn.execute(
-                """INSERT INTO subscription_events
-                   (event_type, merchant_name, profile_id, detail)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO subscription_events
+	                   (event_type, merchant_name, profile_id, detail, event_key)
+	                   VALUES (?, ?, ?, ?, ?)""",
                 (
                     event["event_type"],
                     event["merchant_name"],
-                    event.get("profile_id", profile_id),
-                    event.get("detail", "{}"),
+                    event_profile,
+                    event_detail,
+                    event_key,
                 ),
-            )            
+            )
+            if merchant_key:
+                conn.execute(
+                    """INSERT OR IGNORE INTO recurring_events_v2
+                       (merchant_key, profile_id, event_type, period_bucket, payload_json)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        merchant_key,
+                        event_profile,
+                        event["event_type"],
+                        detail_obj["period_bucket"],
+                        event_detail,
+                    ),
+                )
+
+        for scoped_profile, scoped_items in items_by_profile.items():
+            sync_detection_results(
+                conn,
+                scoped_items,
+                profile_id=scoped_profile,
+                txn_count=0,
+                mode="shadow",
+            )

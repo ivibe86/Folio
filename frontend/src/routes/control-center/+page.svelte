@@ -13,6 +13,7 @@
     const allTabs = [
         { key: 'connections', label: 'Connections' },
         { key: 'accounts',    label: 'Accounts' },
+        { key: 'investments', label: 'Investments' },
         { key: 'merchants',   label: 'Merchants' },
         { key: 'rules',       label: 'Rules' },
         { key: 'categories',  label: 'Categories' },
@@ -70,6 +71,9 @@
     // ── Connections ──────────────────────────────────────────────
     let tellerEnrollments = [];
     let simplefinConnections = [];
+    let dataHealth = null;
+    let backupStatus = null;
+    let backupExporting = false;
     let connectionsLoading = false;
     let accountsLoading = false;
     let accountItems = [];
@@ -79,6 +83,22 @@
     let manualAccountSavingId = null;
     let simplefinRef;
     let migrationRef;
+    let investmentsLoading = false;
+    let investmentsData = { holdings: [], allocation: [], summary: {} };
+    let holdingDraft = {
+        account_id: '',
+        symbol: '',
+        name: '',
+        asset_class: 'stock',
+        quantity: '',
+        cost_basis: '',
+        current_price: '',
+        manual_value: '',
+        target_percent: '',
+        notes: ''
+    };
+    let holdingSaving = false;
+    let holdingEditId = null;
     let tellerConfig = null;
     let appConfig = {
         demoMode: false,
@@ -250,6 +270,10 @@
     $: localLlmPresetOptions = Object.entries(localLlmCatalog?.presets || {}).map(([key, value]) => ({ key, ...value }));
     $: localLlmTierGroups = Array.isArray(localLlmCatalog?.tiers) ? localLlmCatalog.tiers : [];
     $: localLlmInstalledCount = Array.isArray(localLlmStatus?.installedModels) ? localLlmStatus.installedModels.length : 0;
+    $: investmentAccounts = accountItems.filter((account) => account.provider === 'manual' && account.account_type === 'investment');
+    $: holdings = Array.isArray(investmentsData?.holdings) ? investmentsData.holdings : [];
+    $: allocation = Array.isArray(investmentsData?.allocation) ? investmentsData.allocation : [];
+    $: investmentSummary = investmentsData?.summary || {};
 
     // ── Lifecycle ────────────────────────────────────────────────
     onMount(async () => {
@@ -329,6 +353,7 @@
             await Promise.all([
                 loadConnections(),
                 loadAccounts(),
+                loadInvestments(),
                 loadMerchants(),
                 loadRules(),
                 loadCategories(),
@@ -349,6 +374,8 @@
                 api.getSimpleFINConnections().catch(() => []),
                 api.getTellerConfig().catch(() => null),
             ]);
+            dataHealth = await api.getDataHealth().catch(() => null);
+            backupStatus = await api.getBackupStatus().catch(() => null);
             const [llmCatalogResult, llmStatusResult] = await Promise.allSettled([
                 api.getLocalLlmCatalog(),
                 api.getLocalLlmStatus(),
@@ -587,6 +614,125 @@
         } finally {
             merchantsLoading = false;
         }
+    }
+
+    async function loadInvestments() {
+        investmentsLoading = true;
+        try {
+            investmentsData = await api.getInvestments();
+        } catch (_) {
+            investmentsData = { holdings: [], allocation: [], summary: {} };
+        } finally {
+            investmentsLoading = false;
+        }
+    }
+
+    function normalizeHoldingPayload(source) {
+        return {
+            account_id: source.account_id || null,
+            symbol: source.symbol || '',
+            name: source.name || source.symbol || '',
+            asset_class: source.asset_class || 'other',
+            quantity: Number(source.quantity || 0),
+            cost_basis: Number(source.cost_basis || 0),
+            current_price: Number(source.current_price || 0),
+            manual_value: source.manual_value === '' || source.manual_value == null ? null : Number(source.manual_value),
+            target_percent: source.target_percent === '' || source.target_percent == null ? null : Number(source.target_percent),
+            notes: source.notes || ''
+        };
+    }
+
+    function resetHoldingDraft() {
+        holdingDraft = {
+            account_id: '',
+            symbol: '',
+            name: '',
+            asset_class: 'stock',
+            quantity: '',
+            cost_basis: '',
+            current_price: '',
+            manual_value: '',
+            target_percent: '',
+            notes: ''
+        };
+        holdingEditId = null;
+    }
+
+    function editHolding(item) {
+        holdingEditId = item.id;
+        holdingDraft = {
+            account_id: item.account_id || '',
+            symbol: item.symbol || '',
+            name: item.name || '',
+            asset_class: item.asset_class || 'other',
+            quantity: item.quantity ?? '',
+            cost_basis: item.cost_basis ?? '',
+            current_price: item.current_price ?? '',
+            manual_value: item.manual_value ?? '',
+            target_percent: item.target_percent ?? '',
+            notes: item.notes || ''
+        };
+        setTab('investments');
+    }
+
+    async function saveHolding() {
+        if (holdingSaving || !(holdingDraft.name || holdingDraft.symbol).trim()) return;
+        holdingSaving = true;
+        try {
+            const payload = normalizeHoldingPayload(holdingDraft);
+            if (holdingEditId) {
+                await api.updateInvestmentHolding(holdingEditId, payload);
+                setNotice('Holding updated.');
+            } else {
+                await api.createInvestmentHolding(payload);
+                setNotice('Holding added.');
+            }
+            resetHoldingDraft();
+            invalidateCache();
+            await Promise.all([loadInvestments(), loadAccounts()]);
+        } catch (error) {
+            setNotice(error?.message || 'Failed to save holding.');
+        } finally {
+            holdingSaving = false;
+        }
+    }
+
+    async function removeHolding(id) {
+        if (!id) return;
+        try {
+            await api.deleteInvestmentHolding(id);
+            setNotice('Holding removed.');
+            invalidateCache();
+            await loadInvestments();
+        } catch (error) {
+            setNotice(error?.message || 'Failed to remove holding.');
+        }
+    }
+
+    async function exportBackup() {
+        if (backupExporting) return;
+        backupExporting = true;
+        try {
+            const { blob, filename } = await api.exportBackup(false);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            setNotice('Backup export created.');
+        } catch (error) {
+            setNotice(error?.message || 'Failed to export backup.');
+        } finally {
+            backupExporting = false;
+        }
+    }
+
+    function merchantInitials(item) {
+        const label = item.clean_name || item.merchant_key || '?';
+        return label.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?';
     }
 
     async function loadSelectedMerchantTransactions(item) {
@@ -855,6 +1001,82 @@
                     </button>
                 {/if}
             </div>
+
+            {#if dataHealth}
+                <div class="cc-conn-section">
+                    <div class="cc-conn-section-header">
+                        <div class="cc-conn-section-title">
+                            <span class="cc-provider-badge">Data Health</span>
+                            <span class="cc-conn-count">{dataHealth.summary?.warnings || 0} warning{(dataHealth.summary?.warnings || 0) !== 1 ? 's' : ''}</span>
+                        </div>
+                        <span class="cc-badge" class:cc-badge-positive={dataHealth.status === 'healthy'} class:cc-badge-muted={dataHealth.status !== 'healthy'}>
+                            {dataHealth.status === 'healthy' ? 'Healthy' : 'Needs attention'}
+                        </span>
+                    </div>
+                    <div class="cc-local-llm-grid">
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Accounts</span>
+                            <strong>{dataHealth.summary?.total_accounts || 0}</strong>
+                            <small>{dataHealth.summary?.stale_accounts || 0} stale</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Latest Update</span>
+                            <strong>{dataHealth.summary?.latest_account_update ? formatDate(dataHealth.summary.latest_account_update) : '—'}</strong>
+                            <small>Across active accounts</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Credential Storage</span>
+                            <strong>{dataHealth.encryption?.status === 'encrypted' ? 'Encrypted' : 'Plaintext risk'}</strong>
+                            <small>{dataHealth.encryption?.key_present ? 'TOKEN_ENCRYPTION_KEY set' : 'No encryption key'}</small>
+                        </div>
+                    </div>
+                    {#if dataHealth.warnings?.length}
+                        <div class="cc-list-wrap" style="margin-top: 0.75rem;">
+                            {#each dataHealth.warnings.slice(0, 5) as warning}
+                                <div class="cc-conn-row">
+                                    <div class="cc-conn-info">
+                                        <div class="cc-conn-name">{warning.account_name || warning.type}</div>
+                                        <div class="cc-conn-meta">{warning.message}</div>
+                                    </div>
+                                    <span class="cc-badge cc-badge-muted">{warning.provider || 'security'}</span>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+
+            {#if backupStatus}
+                <div class="cc-conn-section">
+                    <div class="cc-conn-section-header">
+                        <div class="cc-conn-section-title">
+                            <span class="cc-provider-badge cc-provider-local-ai">Backup</span>
+                            <span class="cc-conn-count">{backupStatus.export_format?.toUpperCase() || 'JSON'} export</span>
+                        </div>
+                        <button class="cc-secondary-btn" type="button" on:click={exportBackup} disabled={backupExporting}>
+                            <span class="material-symbols-outlined text-[14px]">download</span>
+                            {backupExporting ? 'Exporting…' : 'Export Data'}
+                        </button>
+                    </div>
+                    <div class="cc-local-llm-grid">
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Database</span>
+                            <strong>{backupStatus.db_size_bytes ? `${(backupStatus.db_size_bytes / 1024 / 1024).toFixed(1)} MB` : '—'}</strong>
+                            <small>{backupStatus.profile_scope || 'household'} scope</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Tables</span>
+                            <strong>{backupStatus.included_tables?.length || 0}</strong>
+                            <small>{backupStatus.excluded_tables?.length || 0} credential table{(backupStatus.excluded_tables?.length || 0) === 1 ? '' : 's'} excluded</small>
+                        </div>
+                        <div class="cc-local-llm-stat">
+                            <span class="cc-insight-label">Credential Storage</span>
+                            <strong>{backupStatus.encryption?.status === 'encrypted' ? 'Encrypted' : 'Plaintext risk'}</strong>
+                            <small>{backupStatus.encryption?.message || 'Encryption status unknown'}</small>
+                        </div>
+                    </div>
+                </div>
+            {/if}
 
             <!-- Teller Enrollments -->
             <div class="cc-conn-section">
@@ -1287,6 +1509,168 @@
             </div>
         </section>
 
+    {:else if activeTab === 'investments'}
+        <section class="cc-pane cc-pane-primary fade-in-up" style="max-width: 940px; margin: 0 auto;">
+            <div class="cc-pane-header">
+                <div class="cc-pane-title">
+                    <h3>Investments</h3>
+                    <p>Manual holdings, local prices, and allocation drift. No broker sync or automatic price refresh runs in this version.</p>
+                </div>
+            </div>
+
+            <div class="cc-insights">
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Portfolio</span>
+                    <strong>{formatCurrency(investmentSummary.total_value || 0, 2)}</strong>
+                    <small>{investmentSummary.holding_count || 0} holding{(investmentSummary.holding_count || 0) === 1 ? '' : 's'}</small>
+                </div>
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Gain / Loss</span>
+                    <strong>{formatCurrency(investmentSummary.gain_loss || 0, 2)}</strong>
+                    <small>{investmentSummary.gain_loss_percent == null ? 'No cost basis yet' : `${investmentSummary.gain_loss_percent.toFixed(1)}% total return`}</small>
+                </div>
+                <div class="cc-insight-card">
+                    <span class="cc-insight-label">Privacy</span>
+                    <strong>Manual</strong>
+                    <small>No symbols leave this device</small>
+                </div>
+            </div>
+
+            <div class="cc-conn-section">
+                <div class="cc-conn-section-header">
+                    <div class="cc-conn-section-title">
+                        <span class="cc-provider-badge cc-provider-local-ai">{holdingEditId ? 'Edit Holding' : 'New Holding'}</span>
+                        <span class="cc-conn-count">{activeProfileId === 'household' ? 'Household' : activeProfileId}</span>
+                    </div>
+                </div>
+                <div class="cc-form-grid">
+                    <div class="cc-field">
+                        <span>Account</span>
+                        <select class="cc-select" bind:value={holdingDraft.account_id}>
+                            <option value="">Unassigned</option>
+                            {#each investmentAccounts as account}
+                                <option value={account.id}>{account.name}</option>
+                            {/each}
+                        </select>
+                    </div>
+                    <div class="cc-field">
+                        <span>Symbol</span>
+                        <input class="cc-input" bind:value={holdingDraft.symbol} placeholder="VTI" />
+                    </div>
+                    <div class="cc-field">
+                        <span>Name</span>
+                        <input class="cc-input" bind:value={holdingDraft.name} placeholder="Vanguard Total Stock Market" />
+                    </div>
+                    <div class="cc-field">
+                        <span>Asset Class</span>
+                        <select class="cc-select" bind:value={holdingDraft.asset_class}>
+                            <option value="stock">Stocks</option>
+                            <option value="bond">Bonds</option>
+                            <option value="cash">Cash</option>
+                            <option value="fund">Funds</option>
+                            <option value="retirement">Retirement</option>
+                            <option value="crypto">Crypto</option>
+                            <option value="real_estate">Real Estate</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                    <div class="cc-field">
+                        <span>Quantity</span>
+                        <input class="cc-input" type="number" step="0.0001" bind:value={holdingDraft.quantity} />
+                    </div>
+                    <div class="cc-field">
+                        <span>Cost / Share</span>
+                        <input class="cc-input" type="number" step="0.01" bind:value={holdingDraft.cost_basis} />
+                    </div>
+                    <div class="cc-field">
+                        <span>Price / Share</span>
+                        <input class="cc-input" type="number" step="0.01" bind:value={holdingDraft.current_price} />
+                    </div>
+                    <div class="cc-field">
+                        <span>Manual Value</span>
+                        <input class="cc-input" type="number" step="0.01" bind:value={holdingDraft.manual_value} placeholder="Overrides shares × price" />
+                    </div>
+                    <div class="cc-field">
+                        <span>Target %</span>
+                        <input class="cc-input" type="number" step="0.1" bind:value={holdingDraft.target_percent} />
+                    </div>
+                    <div class="cc-field cc-field-full">
+                        <span>Notes</span>
+                        <input class="cc-input" bind:value={holdingDraft.notes} placeholder="Optional context" />
+                    </div>
+                </div>
+                <div class="cc-actions">
+                    <button class="cc-primary-btn" type="button" disabled={holdingSaving || !(holdingDraft.name || holdingDraft.symbol).trim()} on:click={saveHolding}>
+                        {holdingSaving ? 'Saving…' : holdingEditId ? 'Update Holding' : 'Add Holding'}
+                    </button>
+                    {#if holdingEditId}
+                        <button class="cc-secondary-btn" type="button" on:click={resetHoldingDraft}>Cancel</button>
+                    {/if}
+                </div>
+            </div>
+
+            <div class="cc-list-wrap">
+                {#if investmentsLoading}
+                    <div class="cc-empty">Loading holdings…</div>
+                {:else if holdings.length === 0}
+                    <div class="cc-empty">No holdings yet. Add manual holdings to make Folio feel like a full net-worth app without broker sync.</div>
+                {:else}
+                    <div class="cc-table">
+                        <div class="cc-table-header" style="--cc-cols: 1.25fr 0.7fr 0.7fr 0.8fr 0.8fr 0.6fr;">
+                            <div>Holding</div>
+                            <div>Class</div>
+                            <div>Quantity</div>
+                            <div>Value</div>
+                            <div>Gain / Loss</div>
+                            <div></div>
+                        </div>
+                        {#each holdings as item}
+                            <div class="cc-table-row" style="--cc-cols: 1.25fr 0.7fr 0.7fr 0.8fr 0.8fr 0.6fr;">
+                                <div class="cc-cell-primary">
+                                    <div class="cc-cell-title">{item.symbol || item.name}</div>
+                                    <div class="cc-cell-subtitle">{item.symbol ? item.name : 'Manual holding'}{item.account_name ? ` · ${item.account_name}` : ''}</div>
+                                </div>
+                                <div class="cc-cell-subtitle">{item.asset_class_label}</div>
+                                <div class="cc-cell-subtitle">{Number(item.quantity || 0).toLocaleString()}</div>
+                                <div class="cc-cell-subtitle">{formatCurrency(item.market_value || 0, 2)}</div>
+                                <div class="cc-cell-subtitle">{formatCurrency(item.gain_loss || 0, 2)}</div>
+                                <div>
+                                    <button class="cc-conn-remove" type="button" on:click={() => editHolding(item)} title="Edit holding">
+                                        <span class="material-symbols-outlined text-[16px]">edit</span>
+                                    </button>
+                                    <button class="cc-conn-remove" type="button" on:click={() => removeHolding(item.id)} title="Remove holding">
+                                        <span class="material-symbols-outlined text-[16px]">close</span>
+                                    </button>
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+
+            {#if allocation.length > 0}
+                <div class="cc-conn-section">
+                    <div class="cc-conn-section-header">
+                        <div class="cc-conn-section-title">
+                            <span class="cc-provider-badge">Allocation</span>
+                            <span class="cc-conn-count">Manual targets optional</span>
+                        </div>
+                    </div>
+                    {#each allocation as bucket}
+                        <div class="cc-conn-row">
+                            <div class="cc-conn-info">
+                                <div class="cc-conn-name">{bucket.label}</div>
+                                <div class="cc-conn-meta">{formatCurrency(bucket.value || 0, 2)} · {(bucket.actual_percent || 0).toFixed(1)}% actual{bucket.target_percent != null ? ` · ${bucket.target_percent.toFixed(1)}% target` : ''}</div>
+                            </div>
+                            <span class="cc-badge" class:cc-badge-positive={bucket.drift_percent == null || Math.abs(bucket.drift_percent) < 5} class:cc-badge-muted={bucket.drift_percent != null && Math.abs(bucket.drift_percent) >= 5}>
+                                {bucket.drift_percent == null ? 'No target' : `${bucket.drift_percent > 0 ? '+' : ''}${bucket.drift_percent.toFixed(1)}% drift`}
+                            </span>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+        </section>
+
     {:else if activeTab === 'merchants'}
         <!-- ── MERCHANTS ─────────────────────────────────────────── -->
         <section class="cc-pane cc-pane-primary cc-pane-merchants fade-in-up">
@@ -1374,10 +1758,17 @@
                                     on:click={() => handleMerchantRowClick(rowKey)}
                                     on:keydown={(event) => handleMerchantRowKeydown(event, rowKey)}>
                                     <div class="cc-cell-primary">
-                                        <div class="cc-cell-title" style="display:flex;align-items:center;gap:0.4rem;">
-                                            {item.clean_name || item.merchant_key}
+                                        <div class="cc-cell-title" style="display:flex;align-items:center;gap:0.55rem;min-width:0;">
+                                            <span style="width:30px;height:30px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;background:color-mix(in srgb, var(--accent) 13%, var(--surface-100));border:1px solid var(--card-border);overflow:hidden;font-size:0.68rem;font-weight:800;color:var(--accent);">
+                                                {#if item.logo_url}
+                                                    <img src={item.logo_url} alt="" style="width:100%;height:100%;object-fit:contain;" />
+                                                {:else}
+                                                    {merchantInitials(item)}
+                                                {/if}
+                                            </span>
+                                            <span class="truncate">{item.clean_name || item.merchant_key}</span>
                                             {#if item.is_subscription}
-                                                <span class="material-symbols-outlined" style="font-size:13px;color:var(--accent);opacity:0.75" title="Subscription">event_repeat</span>
+                                                <span class="material-symbols-outlined" style="font-size:13px;color:var(--accent);opacity:0.75;flex:0 0 auto;" title="Subscription">event_repeat</span>
                                             {/if}
                                             <span class="material-symbols-outlined cc-row-chevron" class:cc-row-chevron-open={expandedMerchantKey === rowKey}>expand_more</span>
                                         </div>
