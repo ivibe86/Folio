@@ -2384,7 +2384,8 @@ def dashboard_bundle(
     Replaces 5 separate API calls.
     """
     def _load_bundle():
-        return get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db)
+        bundle = get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db)
+        return {**bundle, "config": _app_config_payload(db)}
 
     try:
         import copilot_cache

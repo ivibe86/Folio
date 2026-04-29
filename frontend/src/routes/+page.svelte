@@ -39,7 +39,8 @@
         demoMode: false,
         bankLinkingEnabled: true,
         manualSyncEnabled: true,
-        demoPersistence: 'persistent'
+        demoPersistence: 'persistent',
+        ...(data.config || {})
     };
     let connectionChooserOpen = false;
     let tellerConnectRef;

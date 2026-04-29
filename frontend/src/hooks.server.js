@@ -9,12 +9,14 @@
  */
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const DEMO_MODE = String(process.env.DEMO_MODE || '').trim().toLowerCase();
 const ALLOWED_HOSTS = new Set(
-    (process.env.FRONTEND_ALLOWED_HOSTS || 'localhost,127.0.0.1,::1')
+    (process.env.FRONTEND_ALLOWED_HOSTS || process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost,127.0.0.1,::1')
         .split(',')
         .map((host) => host.trim().toLowerCase())
         .filter(Boolean)
 );
+const ALLOW_ANY_HOST = ALLOWED_HOSTS.has('*') || ['1', 'true', 'yes', 'on'].includes(DEMO_MODE);
 
 function normalizeHost(hostHeader) {
     const host = (hostHeader || '').trim().toLowerCase();
@@ -26,6 +28,11 @@ function normalizeHost(hostHeader) {
     }
 
     return host.split(':')[0];
+}
+
+function isAllowedHost(host) {
+    if (ALLOW_ANY_HOST) return true;
+    return ALLOWED_HOSTS.has(host);
 }
 
 /** Headers that should NOT be forwarded to the backend */
@@ -41,7 +48,7 @@ const HOP_BY_HOP = new Set([
 
 export async function handle({ event, resolve }) {
     const host = normalizeHost(event.request.headers.get('host'));
-    if (!ALLOWED_HOSTS.has(host)) {
+    if (!isAllowedHost(host)) {
         return new Response('Not found', { status: 404 });
     }
 

@@ -49,5 +49,6 @@ export async function load({ fetch }) {
         scheduled: bundle.scheduled || null,
         cashFlowForecast: bundle.cashFlowForecast || null,
         investments: bundle.investments || null,
+        config: bundle.config || null,
     };
 }
