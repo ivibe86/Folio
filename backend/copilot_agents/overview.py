@@ -7,6 +7,7 @@ from typing import Any
 
 import llm_client
 from copilot_tools import execute_tool
+from mira import answer_composer, domain_actions, provenance
 
 from .base import emit_done_with_memory
 
@@ -43,8 +44,39 @@ def build_prompt(question: str, profile: str | None) -> tuple[dict, list[dict], 
     return cache, trace, prompt, core._fast_watch_system(profile)
 
 
-def run(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
+def _deterministic_overview(question: str, profile: str | None, route: dict | None) -> dict | None:
     import copilot_agent as core
+
+    steps = domain_actions.tool_plan_for_route(route, {"OverviewSummary"})
+    if not steps:
+        return None
+    cache: dict = {}
+    trace: list[dict] = []
+    for step in steps:
+        start = datetime.now()
+        execute_tool(step["name"], step.get("args") or {}, profile, cache=cache)
+        trace.append({"name": step["name"], "args": step.get("args") or {}, "duration_ms": int((datetime.now() - start).total_seconds() * 1000)})
+    answer = answer_composer.compose_finance_answer(route, trace, cache, profile) or "I checked Folio's dashboard data."
+    result = core._finalize_answer(
+        question=question,
+        profile=profile,
+        raw_answer=answer,
+        trace=trace,
+        cache=cache,
+        iterations=0,
+        run_detector=True,
+        route=route,
+    )
+    result["llm_calls"] = 0
+    return provenance.attach_completed_action(result, profile=profile, question=question, route=route, trace=trace, cache=cache)
+
+
+def run(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None) -> dict:
+    import copilot_agent as core
+
+    deterministic = _deterministic_overview(question, profile, route)
+    if deterministic is not None:
+        return deterministic
 
     cache, trace, prompt, system = build_prompt(question, profile)
     response = llm_client.chat_with_tools(
@@ -67,8 +99,32 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
     return result
 
 
-def stream(question: str, profile: str | None, history: list[dict] | None = None):
+def stream(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None):
     import copilot_agent as core
+
+    steps = domain_actions.tool_plan_for_route(route, {"OverviewSummary"})
+    if steps:
+        cache: dict = {}
+        trace: list[dict] = []
+        yield {"type": "reset_text"}
+        for step in steps:
+            yield {"type": "tool_call", "name": step["name"], "args": step.get("args") or {}}
+            start = datetime.now()
+            execute_tool(step["name"], step.get("args") or {}, profile, cache=cache)
+            duration_ms = int((datetime.now() - start).total_seconds() * 1000)
+            trace.append({"name": step["name"], "args": step.get("args") or {}, "duration_ms": duration_ms})
+            yield {"type": "tool_result", "name": step["name"], "duration_ms": duration_ms}
+        yield from emit_done_with_memory(
+            question=question,
+            profile=profile,
+            final_answer=answer_composer.compose_finance_answer(route, trace, cache, profile) or "I checked Folio's dashboard data.",
+            trace=trace,
+            cache=cache,
+            iterations=0,
+            llm_calls=0,
+            route=route,
+        )
+        return
 
     cache: dict = {}
     trace: list[dict] = []

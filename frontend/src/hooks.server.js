@@ -9,6 +9,24 @@
  */
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const ALLOWED_HOSTS = new Set(
+    (process.env.FRONTEND_ALLOWED_HOSTS || 'localhost,127.0.0.1,::1')
+        .split(',')
+        .map((host) => host.trim().toLowerCase())
+        .filter(Boolean)
+);
+
+function normalizeHost(hostHeader) {
+    const host = (hostHeader || '').trim().toLowerCase();
+    if (!host) return '';
+
+    if (host.startsWith('[')) {
+        const end = host.indexOf(']');
+        return end > 0 ? host.slice(1, end) : host;
+    }
+
+    return host.split(':')[0];
+}
 
 /** Headers that should NOT be forwarded to the backend */
 const HOP_BY_HOP = new Set([
@@ -22,6 +40,11 @@ const HOP_BY_HOP = new Set([
 ]);
 
 export async function handle({ event, resolve }) {
+    const host = normalizeHost(event.request.headers.get('host'));
+    if (!ALLOWED_HOSTS.has(host)) {
+        return new Response('Not found', { status: 404 });
+    }
+
     // Only intercept /api/* requests
     if (!event.url.pathname.startsWith('/api')) {
         return resolve(event);

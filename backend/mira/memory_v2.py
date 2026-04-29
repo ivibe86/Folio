@@ -337,17 +337,22 @@ def retrieve_relevant_memories(
 ) -> dict[str, Any]:
     allowed, reason = retrieval_allowed(question, route, force=force)
     if not allowed:
-        return {"memories": [], "memory_trace": trace_for_memories([], allowed=False, reason=reason)}
+        trace = trace_for_memories([], allowed=False, reason=reason, intent=_memory_intent(route))
+        packet = compact_memory_packet([], question=question, route=route, allowed=False, reason=reason, excluded_count=0)
+        return {"memories": [], "memory_trace": trace, "compact_memory": packet, "compact_memory_trace": packet}
     memories = list_memories(conn, profile, include_expired=include_expired, limit=200)
     ranked = _rank_memories(memories, question)
     selected = ranked[: max(1, min(int(limit), 12))]
+    excluded_count = max(0, len(memories) - len(selected))
     if selected:
         ids = [int(item["id"]) for item in selected]
         conn.execute(
             f"UPDATE mira_memories SET last_used_at = datetime('now') WHERE id IN ({','.join('?' for _ in ids)})",
             ids,
         )
-    return {"memories": selected, "memory_trace": trace_for_memories(selected, allowed=True, reason=reason)}
+    trace = trace_for_memories(selected, allowed=True, reason=reason, intent=_memory_intent(route), excluded_count=excluded_count)
+    packet = compact_memory_packet(selected, question=question, route=route, allowed=True, reason=reason, excluded_count=excluded_count)
+    return {"memories": selected, "memory_trace": trace, "compact_memory": packet, "compact_memory_trace": packet}
 
 
 def retrieval_allowed(question: str, route: dict[str, Any] | None = None, *, force: bool = False) -> tuple[bool, str]:
@@ -373,12 +378,20 @@ def retrieval_allowed(question: str, route: dict[str, Any] | None = None, *, for
     return False, "memory_not_relevant"
 
 
-def trace_for_memories(memories: list[dict[str, Any]], *, allowed: bool, reason: str) -> dict[str, Any]:
+def trace_for_memories(
+    memories: list[dict[str, Any]],
+    *,
+    allowed: bool,
+    reason: str,
+    intent: str = "",
+    excluded_count: int = 0,
+) -> dict[str, Any]:
     items = []
     for item in memories:
         items.append(
             {
                 "id": item.get("id"),
+                "type": item.get("memory_type"),
                 "memory_type": item.get("memory_type"),
                 "topic": item.get("topic"),
                 "sensitivity": item.get("sensitivity"),
@@ -390,8 +403,11 @@ def trace_for_memories(memories: list[dict[str, Any]], *, allowed: bool, reason:
     return {
         "version": 2,
         "allowed": bool(allowed),
+        "used": bool(items),
+        "intent": intent,
         "reason": reason,
         "used_count": len(items),
+        "excluded_count": max(0, int(excluded_count or 0)),
         "used_memory_ids": [item["id"] for item in items if item.get("id") is not None],
         "sensitive_used": any(item.get("sensitivity") == "high" for item in items),
         "items": items,
@@ -399,15 +415,47 @@ def trace_for_memories(memories: list[dict[str, Any]], *, allowed: bool, reason:
 
 
 def context_block(memories: list[dict[str, Any]]) -> str:
-    if not memories:
+    packet = compact_memory_packet(memories, question="", route=None, allowed=bool(memories), reason="prompt_context")
+    return context_block_from_packet(packet)
+
+
+def context_block_from_packet(packet: dict[str, Any] | None) -> str:
+    if not isinstance(packet, dict) or not packet.get("items"):
         return ""
-    lines = ["Relevant Mira memories (use only as soft context; live Folio data wins):"]
-    for item in memories[:6]:
-        text = item.get("normalized_text") or ""
-        lines.append(f"- [{item.get('memory_type')}/{item.get('sensitivity')}] {text}")
-    if any(item.get("sensitivity") == "high" for item in memories):
-        lines.append("Sensitive memory is present: be gentle, do not joke, and phrase stale/low-confidence items cautiously.")
-    return "\n".join(lines)
+    return "Compact relevant Mira memory packet:\n" + json.dumps(packet, ensure_ascii=True, sort_keys=True)
+
+
+def compact_memory_packet(
+    memories: list[dict[str, Any]],
+    *,
+    question: str,
+    route: dict[str, Any] | None,
+    allowed: bool,
+    reason: str,
+    excluded_count: int = 0,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in memories[:12]:
+        items.append(
+            {
+                "id": str(item.get("id")),
+                "type": item.get("memory_type"),
+                "topic": item.get("topic") or "general",
+                "summary": _memory_summary(item),
+                "confidence": item.get("confidence"),
+                "sensitivity": _packet_sensitivity(item.get("sensitivity")),
+            }
+        )
+    return {
+        "version": 1,
+        "used": bool(allowed and items),
+        "allowed": bool(allowed),
+        "intent": _memory_intent(route),
+        "items": items,
+        "excluded_count": max(0, int(excluded_count or 0)),
+        "reason": reason,
+        "sensitive_used": any(item.get("sensitivity") == "high" for item in memories),
+    }
 
 
 def parse_memory_command(question: str) -> dict[str, Any] | None:
@@ -568,6 +616,45 @@ def _rank_memories(memories: list[dict[str, Any]], query: str) -> list[dict[str,
             ranked.append((score, item))
     ranked.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _, item in ranked]
+
+
+def _memory_intent(route: dict[str, Any] | None) -> str:
+    route = route or {}
+    operation = str(route.get("operation") or "").strip()
+    intent = str(route.get("intent") or "").strip()
+    if operation:
+        return operation
+    return intent or "unknown"
+
+
+def _packet_sensitivity(value: Any) -> str:
+    raw = str(value or "low").lower()
+    if raw == "high":
+        return "sensitive"
+    if raw == "medium":
+        return "caution"
+    return "normal"
+
+
+def _memory_summary(item: dict[str, Any]) -> str:
+    text = " ".join(str(item.get("normalized_text") or "").strip().split())
+    memory_type = str(item.get("memory_type") or "memory")
+    topic = str(item.get("topic") or "general").strip()
+    if not text:
+        return f"{memory_type.replace('_', ' ').title()} about {topic}."
+
+    summary = text.rstrip(".")
+    summary = re.sub(r"^User\s+", "", summary, flags=re.I)
+    summary = re.sub(r"^does not want\s+", "Does not want ", summary, flags=re.I)
+    summary = re.sub(r"^wants\s+", "Wants ", summary, flags=re.I)
+    summary = re.sub(r"^is\s+", "Is ", summary, flags=re.I)
+    summary = re.sub(r"^prefers\s+", "Prefers ", summary, flags=re.I)
+    summary = re.sub(r"^user\s+", "", summary, flags=re.I)
+    if summary and summary[0].islower():
+        summary = summary[0].upper() + summary[1:]
+    if not summary:
+        summary = f"{memory_type.replace('_', ' ').title()} about {topic}"
+    return summary[:220].rstrip(" ,;:") + "."
 
 
 def _tokens(text: str) -> list[str]:

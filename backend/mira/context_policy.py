@@ -22,8 +22,9 @@ _SUBJECT_CLUE_FILLERS = {
     "charge", "charges", "current", "did", "do", "does", "expense", "expenses",
     "for", "from", "how", "i", "in", "instead", "last", "me", "month", "months",
     "much", "my", "no", "not", "now", "of", "on", "paid", "pay", "please",
-    "previous", "prior", "show", "spend", "spending", "spent", "that", "the",
+    "past", "previous", "prior", "show", "spend", "spending", "spent", "that", "the",
     "this", "to", "total", "transaction", "transactions", "what", "with",
+    "week", "weeks", "year", "years", "ytd", "today", "date", "far", "so",
 }
 
 _RANGE_BOUNDARY_TOKENS = {

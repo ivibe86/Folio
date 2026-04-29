@@ -3,8 +3,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+    expose:
+      - "8000"
     volumes:
       - ./data:/data
       - ./certs:/certs:ro
@@ -12,6 +12,7 @@ services:
       - .env
     environment:
       - DB_FILE=/data/Folio.db
+      - SQLITE_JOURNAL_MODE=DELETE
       - TELLER_CERT_PATH=/certs/teller-cert.pem
       - TELLER_KEY_PATH=/certs/teller-key.pem
       - SSL_CERT_FILE=${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}
@@ -27,11 +28,12 @@ services:
         VITE_TELLER_APP_ID: ${VITE_TELLER_APP_ID:-}
         VITE_TELLER_ENVIRONMENT: ${VITE_TELLER_ENVIRONMENT:-sandbox}
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
     environment:
       - ORIGIN=http://localhost:${FRONTEND_PORT:-3000}
       - BACKEND_URL=http://backend:8000
       - BODY_SIZE_LIMIT=16777216
+      - FRONTEND_ALLOWED_HOSTS=localhost,127.0.0.1,::1
     depends_on:
       backend:
         condition: service_healthy

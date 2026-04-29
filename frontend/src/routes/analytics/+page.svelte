@@ -834,20 +834,27 @@
        S7: MONTH-OVER-MONTH DIFF TABLE
        ═══════════════════════════════════════ */
     $: momDiff = (() => {
-        if (!monthCategories.length) return [];
-        return monthCategories.map(cat => {
-            const prev = prevMonthCategories.find(c => c.category === cat.category);
+        if (!monthCategories.length && !prevMonthCategories.length) return [];
+        const categoryNames = new Set([
+            ...monthCategories.map(c => c.category),
+            ...prevMonthCategories.map(c => c.category)
+        ]);
+
+        return Array.from(categoryNames).map(category => {
+            const current = monthCategories.find(c => c.category === category);
+            const prev = prevMonthCategories.find(c => c.category === category);
+            const currentTotal = current ? current.total : 0;
             const prevTotal = prev ? prev.total : 0;
-            const delta = cat.total - prevTotal;
-            const deltaPct = prevTotal > 0 ? ((cat.total - prevTotal) / prevTotal) * 100 : (cat.total > 0 ? 100 : 0);
+            const delta = currentTotal - prevTotal;
+            const deltaPct = prevTotal > 0 ? ((currentTotal - prevTotal) / prevTotal) * 100 : (currentTotal > 0 ? 100 : 0);
             return {
-                category: cat.category,
-                currentTotal: cat.total,
+                category,
+                currentTotal,
                 prevTotal,
                 delta,
                 deltaPct,
-                color: CATEGORY_COLORS[cat.category] || '#627d98',
-                icon: CATEGORY_ICONS[cat.category] || 'label'
+                color: CATEGORY_COLORS[category] || '#627d98',
+                icon: CATEGORY_ICONS[category] || 'label'
             };
         }).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
     })();
@@ -2449,23 +2456,23 @@
                     <span class="mom-glass-cell mom-cell-right">Change</span>
                 </div>
 
-                <!-- Data rows -->
-                {#each momDiff.slice(0, 8) as row}
-                    {@const isPositiveChange = row.delta <= 0}
-                    <div class="mom-glass-row"
-                         style="--row-tint: {row.color}">
-                        <div class="mom-glass-cell mom-cell-category">
-                            <span class="text-[11px] font-medium" style="color: var(--text-primary)">{row.category}</span>
-                        </div>
-                        <span class="mom-glass-cell mom-cell-right text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(row.currentTotal)}</span>
-                        <span class="mom-glass-cell mom-cell-right text-[11px] font-mono" style="color: var(--text-muted)">{formatCurrency(row.prevTotal)}</span>
-                        <span class="mom-glass-cell mom-cell-right">
-                            <span class="delta-badge {row.delta <= 0 ? 'delta-up' : 'delta-down'}">
-                                {row.delta > 0 ? '▲' : '▼'} {formatCurrency(Math.abs(row.delta))}
+                <div class="mom-glass-body">
+                    {#each momDiff as row}
+                        <div class="mom-glass-row"
+                             style="--row-tint: {row.color}">
+                            <div class="mom-glass-cell mom-cell-category">
+                                <span class="text-[11px] font-medium" style="color: var(--text-primary)">{row.category}</span>
+                            </div>
+                            <span class="mom-glass-cell mom-cell-right text-[11px] font-mono font-medium" style="color: var(--text-primary)">{formatCurrency(row.currentTotal)}</span>
+                            <span class="mom-glass-cell mom-cell-right text-[11px] font-mono" style="color: var(--text-muted)">{formatCurrency(row.prevTotal)}</span>
+                            <span class="mom-glass-cell mom-cell-right">
+                                <span class="delta-badge {row.delta <= 0 ? 'delta-up' : 'delta-down'}">
+                                    {row.delta > 0 ? '▲' : '▼'} {formatCurrency(Math.abs(row.delta))}
+                                </span>
                             </span>
-                        </span>
-                    </div>
-                {/each}
+                        </div>
+                    {/each}
+                </div>
 
                 {#if bestWorstMonth}
                     <div class="mom-glass-footer">

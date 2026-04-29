@@ -82,12 +82,14 @@ _RANGE_FILLER_TOKENS = {
     "a", "about", "actually", "am", "and", "asking", "asked", "before", "after",
     "during", "earlier", "for", "from", "how", "i", "in", "instead", "later",
     "last", "me", "month", "months", "next", "no", "not", "now", "of", "one", "prior",
-    "previous", "the", "this", "to", "what",
+    "past", "previous", "the", "this", "to", "what",
+    "week", "weeks", "year", "years", "ytd", "today", "date", "far", "so",
 } | set(MONTH_LOOKUP)
 _SUBJECT_STOP_TOKENS = _RANGE_FILLER_TOKENS | _SPEND_TOKENS | _TRANSACTION_TOKENS | _CHART_TOKENS | _PLAN_TOKENS | _WRITE_TOKENS | _DISPLAY_TOKENS | _CONTEXT_REF_TOKENS | {
     "all", "any", "can", "could", "did", "do", "does", "give", "help", "is",
-    "just", "kind", "like", "look", "much", "my", "please", "talk", "tell",
+    "just", "kind", "like", "look", "man", "mean", "much", "my", "please", "talk", "tell",
     "there", "was", "were", "with", "you",
+    "merchant", "merchants", "category", "categories",
 }
 
 
@@ -334,6 +336,8 @@ def _has_subject_shift_marker(tokens: list[str]) -> bool:
         or contains(tokens, ("same", "for"))
         or contains(tokens, ("now", "for"))
         or contains(tokens, ("and", "for"))
+        or contains(tokens, ("i", "mean"))
+        or contains(tokens, ("mean",))
         or contains(tokens, ("asking", "about"))
         or contains(tokens, ("asked", "about"))
     )

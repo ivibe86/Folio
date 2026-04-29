@@ -509,7 +509,9 @@ def upsert_obligation_from_item(
     anchor_month = _anchor_month(item)
     last_seen = parse_date(item.get("last_date") or item.get("last_charge"))
     next_expected = parse_date(item.get("next_expected_date") or item.get("next_expected"))
-    if next_expected is None:
+    if state in {"inactive", "stale", "dismissed", "cancelled"}:
+        next_expected = None
+    elif next_expected is None:
         next_expected = due_from_anchor(
             last_seen=last_seen,
             frequency=frequency,
@@ -537,7 +539,12 @@ def upsert_obligation_from_item(
                anchor_day = excluded.anchor_day,
                anchor_month = excluded.anchor_month,
                anchor_mode = excluded.anchor_mode,
-               next_expected_date = excluded.next_expected_date,
+               next_expected_date = CASE
+                   WHEN recurring_obligations.state IN ('cancelled', 'dismissed')
+                    AND recurring_obligations.last_user_action_at IS NOT NULL
+                   THEN NULL
+                   ELSE excluded.next_expected_date
+               END,
                state = CASE
                    WHEN recurring_obligations.state IN ('confirmed', 'cancelled', 'dismissed')
                     AND recurring_obligations.last_user_action_at IS NOT NULL
@@ -1829,6 +1836,8 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
     legacy_totals = _legacy_subscription_totals(conn, profile)
     items: list[dict[str, Any]] = []
     dismissed: list[dict[str, Any]] = []
+    suppressed_event_keys: set[tuple[str, str]] = set()
+    suppressed_event_merchants: set[str] = set()
     active_count = inactive_count = cancelled_count = candidate_count = 0
     total_annual = 0.0
     total_monthly = 0.0
@@ -1841,6 +1850,8 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
         if fb and fb["feedback_type"] in {"dismissed", "cancelled"}:
             effective_state = "cancelled" if fb["feedback_type"] == "cancelled" else "dismissed"
         if effective_state == "dismissed":
+            suppressed_event_keys.add((profile_id, merchant_key))
+            suppressed_event_merchants.add(merchant_key)
             dismissed.append({
                 "merchant": row[3] or merchant_key,
                 "dismissed_at": fb["created_at"] if fb else row[15],
@@ -1897,6 +1908,8 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
         items.append(item)
 
         if cancelled:
+            suppressed_event_keys.add((profile_id, merchant_key))
+            suppressed_event_merchants.add(merchant_key)
             cancelled_count += 1
         elif effective_state in {"inactive", "stale"}:
             inactive_count += 1
@@ -1909,8 +1922,8 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
                 total_monthly += annual / 12
 
     event_rows = conn.execute(
-        f"""SELECT rowid, event_type, merchant_key, payload_json, created_at, 0 AS is_read
-            FROM recurring_events_v2
+        f"""SELECT id, event_type, merchant_name, detail, created_at, is_read, profile_id
+            FROM subscription_events
             {'WHERE profile_id = ?' if profile and profile != 'household' else ''}
             ORDER BY created_at DESC
             LIMIT 50""",
@@ -1918,6 +1931,12 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
     ).fetchall()
     events = []
     for row in event_rows:
+        event_profile = row[6] or "household"
+        event_merchant_key = canonical_key(row[2]) or str(row[2] or "").strip().upper()
+        if (event_profile, event_merchant_key) in suppressed_event_keys:
+            continue
+        if not (profile and profile != "household") and event_merchant_key in suppressed_event_merchants:
+            continue
         try:
             detail = json.loads(row[3] or "{}")
         except Exception:
@@ -1930,6 +1949,7 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
             "created_at": row[4],
             "is_read": bool(row[5]),
         })
+    unread_event_count = sum(1 for event in events if not event["is_read"])
 
     return {
         "items": items,
@@ -1941,7 +1961,7 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
         "total_monthly": round(total_monthly, 2),
         "total_annual": round(total_annual, 2),
         "events": events,
-        "unread_event_count": 0,
+        "unread_event_count": unread_event_count,
         "dismissed": dismissed,
     }
 
@@ -1960,6 +1980,64 @@ def upcoming_group(merchant: str, category: str | None) -> dict[str, str]:
         if category_name.lower() == label.lower() or any(needle in text for needle in needles):
             return {"key": key, "label": label}
     return {"key": "other", "label": "Other"}
+
+
+VARIABLE_RECURRING_BILL_CATEGORIES = {
+    "Insurance",
+    "Auto Insurance",
+    "Home Insurance",
+    "Health Insurance",
+    "Renters Insurance",
+    "Life Insurance",
+    "Utilities",
+    "Electric",
+    "Gas",
+    "Water",
+    "Internet",
+    "Wireless",
+    "Cable",
+}
+
+
+def _is_variable_recurring_bill(category: str | None, group_key: str | None = None) -> bool:
+    if group_key in {"insurance", "utilities"}:
+        return True
+    return (category or "").strip() in VARIABLE_RECURRING_BILL_CATEGORIES
+
+
+def _variable_bill_forecast_amount(
+    *,
+    stored_amount: float,
+    category: str | None,
+    group_key: str | None,
+    history: dict[str, Any],
+) -> tuple[float, dict[str, Any] | None]:
+    """
+    Subscriptions forecast from the configured amount. Variable bills forecast
+    from the latest current-cycle charge, while the stored amount remains the
+    user's confirmation/seed value.
+    """
+    if not _is_variable_recurring_bill(category, group_key):
+        return stored_amount, None
+
+    latest_charge = None
+    for tx in history.get("recent_transactions") or []:
+        if (tx.get("kind") or "charge") != "charge":
+            continue
+        amount = float(tx.get("amount") or 0)
+        if amount > 0:
+            latest_charge = round(amount, 2)
+            break
+
+    if latest_charge is None:
+        return stored_amount, None
+
+    return latest_charge, {
+        "basis": "latest_variable_bill_charge",
+        "stored_amount": round(stored_amount, 2),
+        "latest_amount": latest_charge,
+        "latest_date": history.get("last_paid"),
+    }
 
 
 def get_scheduled_bundle(
@@ -2004,8 +2082,8 @@ def get_scheduled_bundle(
             continue
         if state in {"inactive", "stale", "dismissed", "cancelled"}:
             continue
-        amount = dollars(row[5])
-        if amount <= 0:
+        stored_amount = dollars(row[5])
+        if stored_amount <= 0:
             continue
         frequency = row[6] or "monthly"
         score = int(row[13] or 0)
@@ -2028,7 +2106,7 @@ def get_scheduled_bundle(
             history = _summarize_current_history(
                 history,
                 frequency=frequency,
-                expected_amount=amount,
+                expected_amount=stored_amount,
             )
         history_last_paid = history.get("last_paid")
         last_seen = parse_date(row[16])
@@ -2061,16 +2139,22 @@ def get_scheduled_bundle(
         if state == "candidate":
             schedule_status = "candidate"
         group = upcoming_group(row[3] or merchant_key, row[4])
-        monthly = annualize_amount(amount, frequency) / 12
         evidence_occurrences = int(evidence.get("occurrences") or evidence.get("charge_count") or 0)
         seen_count = int(history.get("seen_count") if history else evidence_occurrences)
         evidence_amounts = _float_list(evidence.get("amounts"))
         amount_min = history.get("amount_min")
         amount_max = history.get("amount_max")
         if amount_min is None:
-            amount_min = round(min(evidence_amounts), 2) if evidence_amounts else amount
+            amount_min = round(min(evidence_amounts), 2) if evidence_amounts else stored_amount
         if amount_max is None:
-            amount_max = round(max(evidence_amounts), 2) if evidence_amounts else amount
+            amount_max = round(max(evidence_amounts), 2) if evidence_amounts else stored_amount
+        amount, forecast_amount = _variable_bill_forecast_amount(
+            stored_amount=stored_amount,
+            category=row[4],
+            group_key=group["key"],
+            history=history,
+        )
+        monthly = annualize_amount(amount, frequency) / 12
         source = row[12] or "algorithm"
         if confirmed:
             source_label = "User confirmed" if source == "user" else "Confirmed"
@@ -2120,6 +2204,7 @@ def get_scheduled_bundle(
                 "last_paid": last_paid,
                 "amount_min": amount_min,
                 "amount_max": amount_max,
+                "forecast_amount": forecast_amount,
                 "prior_transactions": history.get("prior_transactions") or [],
                 "adjustments": history.get("adjustments") or [],
                 "current_cycle_charge_count": history.get("current_cycle_charge_count") or 0,

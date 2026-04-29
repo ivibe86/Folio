@@ -145,6 +145,7 @@ def startup():
     repair_polluted_merchant_categories()
     repair_cc_income_misclassifications()
     reclassify_transfers()
+    schedule_prewarm_selected_model("controller")
     schedule_prewarm_selected_model("copilot")
 
 
@@ -387,10 +388,22 @@ class MemoryProposalAccept(BaseModel):
     section: str | None = None
 
 
+class MiraMemoryUpdate(BaseModel):
+    normalized_text: str | None = None
+    memory_type: str | None = None
+    topic: str | None = None
+    sensitivity: str | None = None
+    confidence: float | None = None
+    pinned: bool | None = None
+    expires_at: str | None = None
+    status: str | None = None
+
+
 class LocalLlmSettingsUpdate(BaseModel):
     llm_provider: str | None = None
     preset: str | None = None
     categorize_model: str | None = None
+    controller_model: str | None = None
     copilot_model: str | None = None
     categorize_batch_size: int | None = None
     inter_batch_delay_ms: int | None = None
@@ -462,6 +475,7 @@ def local_llm_catalog(db=Depends(get_db_session)):
 
 @app.get("/api/local-llm/status")
 def local_llm_status(db=Depends(get_db_session)):
+    schedule_prewarm_selected_model("controller", db)
     schedule_prewarm_selected_model("copilot", db)
     return get_status_response(db)
 
@@ -475,6 +489,8 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
         payload["local_ai_profile"] = body.preset
     if body.categorize_model is not None:
         payload["categorize_model"] = body.categorize_model
+    if body.controller_model is not None:
+        payload["controller_model"] = body.controller_model
     if body.copilot_model is not None:
         payload["copilot_model"] = body.copilot_model
     if body.categorize_batch_size is not None:
@@ -491,6 +507,8 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
     except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    if body.controller_model is not None or body.llm_provider is not None:
+        schedule_prewarm_selected_model("controller", db, force=True)
     if body.copilot_model is not None or body.llm_provider is not None:
         schedule_prewarm_selected_model("copilot", db, force=True)
 
@@ -1369,7 +1387,7 @@ async def copilot_ask_stream(body: CopilotRequest, profile: str | None = Query(N
                     route = final_event.get("route") or {}
                     route_intent = route.get("intent") or final_event.get("intent")
                     operation = "write_preview" if pending_write else (route_intent or "read")
-                    generated_sql = pending_write.get("sql") or ""
+                    generated_sql = ""
                     rows_affected = final_event.get("rows_affected")
                     if rows_affected is None:
                         rows_affected = len(final_event.get("data") or []) if isinstance(final_event.get("data"), list) else 0
@@ -1402,26 +1420,42 @@ async def copilot_ask_stream(body: CopilotRequest, profile: str | None = Query(N
 
 
 @app.post("/api/copilot/confirm")
-async def copilot_confirm(body: CopilotConfirm, profile: str | None = Query(None)):
+async def copilot_confirm(body: CopilotConfirm, profile: str | None = Query(None), db=Depends(get_db_session)):
     """
     Confirm and execute a write operation previewed by the copilot.
-    [FIX M2] Client sends a confirmation_id that references server-stored SQL.
-    The client can no longer supply arbitrary SQL.
+    Client sends a confirmation_id that references a server-stored structured operation.
+    The client can no longer supply arbitrary SQL, and Mira no longer stores SQL for previews.
     """
-    from copilot import ask_copilot, retrieve_pending_sql
+    from data_manager import execute_pending_write_operation
+    from pending_operations import pending_error_message, retrieve_pending_operation
 
-    pending = retrieve_pending_sql(body.confirmation_id)
+    validated_profile = validate_profile(profile)
+    pending, code = retrieve_pending_operation(body.confirmation_id, validated_profile, conn=db)
     if pending is None:
+        status = 410 if code in {"confirmation_expired", "confirmation_consumed"} else 404
         raise HTTPException(
-            status_code=404,
-            detail="Confirmation expired or not found. Please re-ask the question.",
+            status_code=status,
+            detail={"code": code or "confirmation_not_found", "message": pending_error_message(code)},
         )
 
-    result = ask_copilot(
-        question=body.question,
-        profile=profile,
-        confirm_write=True,
-        pending_sql=pending["sql"],
+    try:
+        result = execute_pending_write_operation(
+            pending["operation"],
+            pending.get("params") or {},
+            validated_profile,
+            conn=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "write_rejected", "message": str(exc)})
+    from copilot import _log_conversation
+    _log_conversation(
+        validated_profile,
+        body.question,
+        "",
+        json.dumps({"operation": pending["operation"], "params": pending.get("params") or {}}, default=str),
+        result.get("answer") or "",
+        "write_executed",
+        int(result.get("rows_affected") or 0),
     )
     _invalidate_copilot_cache()
     return result
@@ -1689,6 +1723,81 @@ def memory_consolidate(
     return {"proposals_created": len(proposals), "items": proposals}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MIRA MEMORY V2
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/mira/memories")
+def mira_memory_list(
+    profile: str | None = Depends(validate_profile),
+    include_inactive: bool = Query(False),
+    include_expired: bool = Query(False),
+    memory_type: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db=Depends(get_db_session),
+):
+    from mira import memory_v2
+
+    return {
+        "items": memory_v2.list_memories(
+            db,
+            profile,
+            include_inactive=include_inactive,
+            include_expired=include_expired,
+            memory_type=memory_type,
+            limit=limit,
+        )
+    }
+
+
+@app.patch("/api/mira/memories/{memory_id}")
+def mira_memory_update(
+    memory_id: int,
+    body: MiraMemoryUpdate,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    from mira import memory_v2
+
+    try:
+        updated = memory_v2.update_memory(
+            conn=db,
+            profile=profile,
+            memory_id=memory_id,
+            normalized_text=body.normalized_text,
+            memory_type=body.memory_type,
+            topic=body.topic,
+            sensitivity=body.sensitivity,
+            confidence=body.confidence,
+            pinned=body.pinned,
+            expires_at=body.expires_at,
+            status=body.status,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not updated:
+        raise HTTPException(status_code=404, detail="memory not found")
+    db.commit()
+    _invalidate_copilot_cache()
+    return updated
+
+
+@app.delete("/api/mira/memories/{memory_id}")
+def mira_memory_delete(
+    memory_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    from mira import memory_v2
+
+    result = memory_v2.forget_memory(conn=db, profile=profile, memory_id=memory_id)
+    if not result.get("forgot"):
+        raise HTTPException(status_code=404, detail=result.get("reason") or "memory not found")
+    db.commit()
+    _invalidate_copilot_cache()
+    return {"deleted": True, "id": memory_id}
+
+
 @app.get("/api/copilot/explain-category")
 def copilot_explain_category(
     merchant: str = Query(..., description="Merchant name or description fragment"),
@@ -1780,7 +1889,7 @@ def copilot_bulk_recategorize_preview(
     Deterministic tool: preview moving all transactions for a merchant to a new category.
     Returns a confirmation_id so the existing /copilot/confirm route can execute it.
     """
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     data = bulk_recategorize_preview(
         merchant_query=body.merchant_query,
@@ -1802,7 +1911,14 @@ def copilot_bulk_recategorize_preview(
             "needs_confirmation": False,
         }
 
-    confirmation_id = store_pending_sql(data["update_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data["samples"]},
+        conn=db,
+    )
 
     preview_changes = [
         {"column": "category", "raw_value": body.new_category, "new_value": body.new_category}
@@ -1840,7 +1956,7 @@ def copilot_preview_rule(
     Deterministic tool: preview creating a new user category rule.
     Returns a confirmation_id so the existing /copilot/confirm route can execute the INSERT.
     """
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     data = preview_rule_creation(
         raw_pattern=body.pattern,
@@ -1852,7 +1968,14 @@ def copilot_preview_rule(
     existing = data["existing_rule"]
     pattern = data["pattern"]
 
-    confirmation_id = store_pending_sql(data["insert_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data["samples"]},
+        conn=db,
+    )
 
     preview_changes = [
         {"column": "rule", "raw_value": f"{pattern} → {body.category}", "new_value": body.category}
@@ -1900,7 +2023,7 @@ def copilot_rename_merchant_preview(
     Deterministic tool: preview renaming a merchant across all matching transactions.
     Returns a confirmation_id so the existing /copilot/confirm route can execute both UPDATEs.
     """
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     data = rename_merchant_variants(
         old_pattern=body.old_name,
@@ -1919,7 +2042,14 @@ def copilot_rename_merchant_preview(
             "needs_confirmation": False,
         }
 
-    confirmation_id = store_pending_sql(data["update_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data["samples"]},
+        conn=db,
+    )
     preview_changes = [
         {"column": "merchant_name", "raw_value": body.new_name, "new_value": body.new_name}
     ]
@@ -2253,7 +2383,57 @@ def dashboard_bundle(
     and net-worth time series — all using SQL-level aggregation.
     Replaces 5 separate API calls.
     """
-    return get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db)
+    def _load_bundle():
+        return get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db)
+
+    try:
+        import copilot_cache
+
+        fingerprint = copilot_cache.db_fingerprint(db, profile)
+        return copilot_cache.get_or_set(
+            "dashboard_bundle",
+            copilot_cache.make_key(nw_interval, profile or "household", fingerprint),
+            _load_bundle,
+        )
+    except Exception:
+        return _load_bundle()
+
+
+@app.get("/api/proactive-insights")
+def proactive_insights_endpoint(
+    include_dismissed: bool = Query(False),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    from proactive_insights import list_insights
+
+    return {"items": list_insights(profile=profile, include_dismissed=include_dismissed, conn=db, generate=True)}
+
+
+@app.post("/api/proactive-insights/{insight_id}/dismiss")
+def dismiss_proactive_insight_endpoint(
+    insight_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    from proactive_insights import dismiss_insight
+
+    if not dismiss_insight(insight_id, profile=profile, conn=db):
+        raise HTTPException(status_code=404, detail="Insight not found.")
+    return {"status": "dismissed", "id": insight_id}
+
+
+@app.post("/api/proactive-insights/{insight_id}/restore")
+def restore_proactive_insight_endpoint(
+    insight_id: int,
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    from proactive_insights import restore_insight
+
+    if not restore_insight(insight_id, profile=profile, conn=db):
+        raise HTTPException(status_code=404, detail="Insight not found.")
+    return {"status": "active", "id": insight_id}
 
 
 @app.get("/api/analytics/net-worth-series")

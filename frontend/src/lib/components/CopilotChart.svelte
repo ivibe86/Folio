@@ -4,15 +4,32 @@
     import { formatCurrency, formatCompact, CATEGORY_COLORS } from '$lib/utils.js';
     import { privacyMode, darkMode } from '$lib/stores.js';
 
-    /** Chart spec: { type, title, series_name, labels, values, unit } */
+    /** Chart spec: { type, title, series_name, labels, values, series, annotations, unit } */
     export let spec;
 
     $: labels = spec?.labels ?? [];
-    $: values = spec?.values ?? [];
     $: type = spec?.type ?? 'line';
     $: title = spec?.title ?? '';
     $: seriesName = spec?.series_name ?? '';
     $: unit = spec?.unit ?? 'currency';
+    $: rawSeries = Array.isArray(spec?.series) ? spec.series : [];
+    $: singleValues = Array.isArray(spec?.values) ? spec.values.map(v => Number(v) || 0) : [];
+    $: seriesList = rawSeries.length
+        ? rawSeries
+            .map((s, i) => ({
+                name: s?.name || `Series ${i + 1}`,
+                values: Array.isArray(s?.values) ? s.values.map(v => Number(v) || 0) : [],
+                color: s?.color || null
+            }))
+            .filter(s => s.values.length === labels.length)
+        : [{ name: seriesName || 'Value', values: singleValues, color: null }];
+    $: values = seriesList[0]?.values ?? [];
+    $: allValues = seriesList.flatMap(s => s.values);
+    $: annotations = Array.isArray(spec?.annotations)
+        ? spec.annotations
+            .map(a => ({ label: a?.label || '', value: Number(a?.value), color: a?.color || null }))
+            .filter(a => Number.isFinite(a.value))
+        : [];
 
     const WIDTH = 520;
     const HEIGHT = 200;
@@ -27,6 +44,7 @@
     const NEGATIVE = '#F87171';
     const AXIS_COLOR = 'rgba(148, 163, 184, 0.55)';
     const GRID_COLOR = 'rgba(148, 163, 184, 0.18)';
+    const SERIES_COLORS = ['#6366F1', '#10B981', '#F59E0B', '#EC4899'];
 
     // Donut palette — cycles through category colors, falls back to indigos
     $: palette = Object.values(CATEGORY_COLORS || {});
@@ -49,12 +67,12 @@
     // ─────────── LINE ───────────
     // scalePoint is the correct ordinal scale for line charts (no padding needed)
     $: lineX = scalePoint().domain(labels).range([0, innerW]).padding(0.5);
-    $: maxV = Math.max(...values, 1);
-    $: minV = Math.min(...values, 0);
+    $: maxV = Math.max(...allValues, ...annotations.map(a => a.value), 1);
+    $: minV = Math.min(...allValues, ...annotations.map(a => a.value), 0);
     $: lineY = scaleLinear().domain([minV, maxV]).nice().range([innerH, 0]);
-    $: linePath = (() => {
+    function buildLinePath(seriesValues) {
         try {
-            const pts = values.map((d, i) => {
+            const pts = seriesValues.map((d, i) => {
                 const x = lineX(labels[i]);
                 const y = lineY(d);
                 return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
@@ -62,14 +80,16 @@
             if (pts.length < 2) return null;
             return 'M ' + pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' L ');
         } catch { return null; }
-    })();
+    }
+    $: linePath = buildLinePath(values);
     $: ticks = lineY.ticks(4);
 
     // ─────────── BAR ───────────
     $: barX = scaleBand().domain(labels).range([0, innerW]).padding(0.25);
-    $: barMax = Math.max(...values.map(v => Math.abs(v)), 1);
+    $: barMax = Math.max(...allValues.map(v => Math.abs(v)), ...annotations.map(a => Math.abs(a.value)), 1);
     $: barY = scaleLinear().domain([0, barMax]).nice().range([innerH, 0]);
     $: barTicks = barY.ticks(4);
+    $: groupedBarWidth = Math.max(3, (barX.bandwidth() || 0) / Math.max(seriesList.length, 1));
 
     // ─────────── DONUT ───────────
     $: total = values.reduce((a, b) => a + b, 0);
@@ -98,21 +118,36 @@
                     <line x1="0" x2={innerW} y1={lineY(t)} y2={lineY(t)} stroke={GRID_COLOR} stroke-width="1" />
                     <text x="-8" y={lineY(t)} text-anchor="end" dominant-baseline="central" class="axis-label">{fmtAxis(t)}</text>
                 {/each}
-                {#if linePath}
+                {#each annotations as a}
+                    {@const ay = lineY(a.value)}
+                    {#if Number.isFinite(ay)}
+                        <line x1="0" x2={innerW} y1={ay} y2={ay} stroke={a.color || AXIS_COLOR} stroke-width="1.25" stroke-dasharray="4 4" />
+                        {#if a.label}
+                            <text x={innerW - 4} y={ay - 5} text-anchor="end" class="axis-label">{a.label}</text>
+                        {/if}
+                    {/if}
+                {/each}
+                {#if linePath && seriesList.length === 1}
                 <!-- area fill -->
                 <path d="{linePath} L {(lineX(labels[labels.length - 1]) ?? innerW)},{innerH} L {(lineX(labels[0]) ?? 0)},{innerH} Z" fill="url(#line-fill)" />
-                <!-- line -->
-                <path d={linePath} fill="none" stroke={ACCENT} stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />
-                <!-- points (only if few enough to not crowd) -->
-                {#if labels.length <= 20}
-                    {#each values as v, i}
-                        {@const cx = lineX(labels[i])}
-                        {#if Number.isFinite(cx)}
-                            <circle cx={cx} cy={lineY(v)} r="3" fill={ACCENT} stroke="var(--card-bg, #fff)" stroke-width="1.5" />
+                {/if}
+                {#each seriesList as s, seriesIndex}
+                    {@const path = buildLinePath(s.values)}
+                    {@const stroke = s.color || SERIES_COLORS[seriesIndex % SERIES_COLORS.length]}
+                    {#if path}
+                        <!-- line -->
+                        <path d={path} fill="none" stroke={stroke} stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />
+                        <!-- points (only if few enough to not crowd) -->
+                        {#if labels.length <= 20}
+                            {#each s.values as v, i}
+                                {@const cx = lineX(labels[i])}
+                                {#if Number.isFinite(cx)}
+                                    <circle cx={cx} cy={lineY(v)} r="3" fill={stroke} stroke="var(--card-bg, #fff)" stroke-width="1.5" />
+                                {/if}
+                            {/each}
                         {/if}
-                    {/each}
-                {/if}
-                {/if}
+                    {/if}
+                {/each}
                 <!-- x labels (every Nth if many) -->
                 {#each labels as l, i}
                     {#if labels.length <= 8 || i % Math.ceil(labels.length / 8) === 0}
@@ -126,10 +161,14 @@
                 {/each}
             </g>
         </svg>
-        {#if seriesName}
+        {#if seriesList.length > 1 || seriesName}
             <div class="chart-legend">
-                <span class="legend-dot" style="background: {ACCENT}"></span>
-                {seriesName}
+                {#each seriesList as s, i}
+                    <span class="legend-entry">
+                        <span class="legend-dot" style="background: {s.color || SERIES_COLORS[i % SERIES_COLORS.length]}"></span>
+                        {s.name}
+                    </span>
+                {/each}
             </div>
         {/if}
 
@@ -140,12 +179,25 @@
                     <line x1="0" x2={innerW} y1={barY(t)} y2={barY(t)} stroke={GRID_COLOR} stroke-width="1" />
                     <text x="-8" y={barY(t)} text-anchor="end" dominant-baseline="central" class="axis-label">{fmtAxis(t)}</text>
                 {/each}
-                {#each values as v, i}
-                    {@const absv = Math.abs(v)}
-                    {@const x = barX(labels[i]) ?? 0}
-                    {@const h = innerH - barY(absv)}
-                    <rect x={x} y={barY(absv)} width={barX.bandwidth()} height={h} rx="3" fill={v < 0 ? NEGATIVE : ACCENT} opacity="0.92" />
-                    <text x={x + barX.bandwidth() / 2} y={barY(absv) - 4} text-anchor="middle" class="bar-value">{fmt(v)}</text>
+                {#each annotations as a}
+                    {@const ay = barY(Math.abs(a.value))}
+                    {#if Number.isFinite(ay)}
+                        <line x1="0" x2={innerW} y1={ay} y2={ay} stroke={a.color || AXIS_COLOR} stroke-width="1.25" stroke-dasharray="4 4" />
+                    {/if}
+                {/each}
+                {#each labels as label, labelIndex}
+                    {@const groupX = barX(label) ?? 0}
+                    {#each seriesList as s, seriesIndex}
+                        {@const v = s.values[labelIndex] ?? 0}
+                        {@const absv = Math.abs(v)}
+                        {@const x = groupX + groupedBarWidth * seriesIndex}
+                        {@const h = innerH - barY(absv)}
+                        {@const fill = s.color || (v < 0 ? NEGATIVE : SERIES_COLORS[seriesIndex % SERIES_COLORS.length])}
+                        <rect x={x} y={barY(absv)} width={Math.max(2, groupedBarWidth - 2)} height={h} rx="3" fill={fill} opacity="0.92" />
+                        {#if seriesList.length === 1}
+                            <text x={x + groupedBarWidth / 2} y={barY(absv) - 4} text-anchor="middle" class="bar-value">{fmt(v)}</text>
+                        {/if}
+                    {/each}
                 {/each}
                 {#each labels as l, i}
                     {#if labels.length <= 10 || i % Math.ceil(labels.length / 10) === 0}
@@ -156,6 +208,16 @@
                 {/each}
             </g>
         </svg>
+        {#if seriesList.length > 1}
+            <div class="chart-legend">
+                {#each seriesList as s, i}
+                    <span class="legend-entry">
+                        <span class="legend-dot" style="background: {s.color || SERIES_COLORS[i % SERIES_COLORS.length]}"></span>
+                        {s.name}
+                    </span>
+                {/each}
+            </div>
+        {/if}
 
     {:else if type === 'donut'}
         <div class="donut-wrap">
@@ -214,9 +276,16 @@
         margin-top: 6px;
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 6px;
         font-size: 11px;
         color: var(--text-secondary);
+    }
+    .legend-entry {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
     }
     .legend-dot {
         width: 8px;

@@ -669,6 +669,10 @@ def ground_text(
         if candidate.confidence >= 0.98 and candidate.match_type in {"exact", "synonym"}
     ]
     if exact_matches:
+        if entity_type == "category":
+            direct = [candidate for candidate in exact_matches if candidate.match_type == "exact"]
+            if direct:
+                exact_matches = direct
         unique = []
         seen_values = set()
         for candidate in exact_matches:

@@ -24,16 +24,24 @@ CATALOG_PATHS = [
     ROOT_DIR / "model_presets.json",
 ]
 
-DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
+DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower() or "ollama"
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+DEFAULT_LLAMACPP_BASE_URL = os.getenv("LLAMACPP_BASE_URL", "http://host.docker.internal:8081")
+DEFAULT_LLAMACPP_MODEL = os.getenv("LLAMACPP_MODEL", "local")
 DEFAULT_CATEGORIZE_MODEL = os.getenv("OLLAMA_MODEL_CATEGORIZE", "gemma4:e4b")
+DEFAULT_CONTROLLER_MODEL = os.getenv("OLLAMA_MODEL_CONTROLLER", DEFAULT_CATEGORIZE_MODEL)
 DEFAULT_COPILOT_MODEL = os.getenv("OLLAMA_MODEL_COPILOT", "gemma4:26b")
 DEFAULT_MEMORY_TIER = os.getenv("LOCAL_LLM_MEMORY_TIER", "16gb").strip().lower()
+ENABLE_EXPERIMENTAL_LOCAL_MODELS = os.getenv(
+    "ENABLE_EXPERIMENTAL_LOCAL_MODELS",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 SETTINGS_DEFAULTS = {
     "llm_provider": None,
     "local_ai_profile": None,
     "categorize_model": None,
+    "controller_model": None,
     "copilot_model": None,
     "categorize_batch_size": None,
     "inter_batch_delay_ms": None,
@@ -43,6 +51,8 @@ SETTINGS_DEFAULTS = {
 
 _OLLAMA_CACHE = {"ts": 0.0, "payload": None}
 _OLLAMA_CACHE_TTL = 8.0
+_LLAMACPP_CACHE = {"ts": 0.0, "payload": None}
+_LLAMACPP_CACHE_TTL = 8.0
 _PREWARM_LOCK = threading.Lock()
 _PREWARM_IN_FLIGHT: set[tuple[str, str]] = set()
 _PREWARM_LAST_RUN: dict[tuple[str, str], float] = {}
@@ -54,7 +64,15 @@ def _load_catalog() -> dict:
     for path in CATALOG_PATHS:
         if path.exists():
             with path.open("r", encoding="utf-8") as fh:
-                return json.load(fh)
+                catalog = json.load(fh)
+            if not ENABLE_EXPERIMENTAL_LOCAL_MODELS:
+                catalog = dict(catalog)
+                catalog["models"] = {
+                    model_id: meta
+                    for model_id, meta in catalog.get("models", {}).items()
+                    if not meta.get("experimental")
+                }
+            return catalog
     raise FileNotFoundError(f"Could not find model catalog in any of: {', '.join(str(p) for p in CATALOG_PATHS)}")
 
 
@@ -196,9 +214,74 @@ def _fetch_ollama_state(base_url: str) -> dict:
     return payload
 
 
+def _fetch_llamacpp_state(base_url: str) -> dict:
+    now = time.time()
+    cached = _LLAMACPP_CACHE["payload"]
+    if cached and now - _LLAMACPP_CACHE["ts"] < _LLAMACPP_CACHE_TTL and cached.get("baseUrl") == base_url:
+        return cached
+
+    candidates = [base_url]
+    stripped = base_url.rstrip("/")
+    if "host.docker.internal" in stripped:
+        candidates.append(stripped.replace("host.docker.internal", "localhost"))
+    elif "localhost" in stripped:
+        candidates.append(stripped.replace("localhost", "host.docker.internal"))
+
+    payload = {
+        "baseUrl": base_url,
+        "requestedBaseUrl": base_url,
+        "reachable": False,
+        "models": [],
+        "error": None,
+    }
+    seen = set()
+    last_error = None
+    for candidate in candidates:
+        candidate = candidate.rstrip("/")
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            health = httpx.get(f"{candidate}/health", timeout=2.5)
+            health.raise_for_status()
+            models_resp = httpx.get(f"{candidate}/v1/models", timeout=2.5)
+            models_resp.raise_for_status()
+            data = models_resp.json()
+            model_items = data.get("data") or data.get("models") or []
+            models = []
+            for item in model_items:
+                if isinstance(item, dict):
+                    name = item.get("id") or item.get("model") or item.get("name")
+                    if isinstance(name, str) and name:
+                        models.append(name)
+            payload.update({
+                "baseUrl": candidate,
+                "reachable": True,
+                "models": sorted(models),
+                "error": None,
+            })
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if not payload["reachable"] and last_error is not None:
+        payload["error"] = str(last_error)
+
+    _LLAMACPP_CACHE["ts"] = now
+    _LLAMACPP_CACHE["payload"] = payload
+    return payload
+
+
 def _invalidate_ollama_cache() -> None:
     _OLLAMA_CACHE["ts"] = 0.0
     _OLLAMA_CACHE["payload"] = None
+
+
+def _model_installed(installed_models: list[str] | set[str], model: str | None) -> bool:
+    if not model:
+        return False
+    installed = {item.lower() for item in installed_models if isinstance(item, str)}
+    return model.lower() in installed
 
 
 def _prewarm_model(base_url: str, model: str) -> None:
@@ -241,18 +324,19 @@ def schedule_prewarm_selected_model(purpose: str = "copilot", conn=None, force: 
     if resolved.get("provider") != "ollama":
         return False
 
-    model = (
-        resolved.get("selectedCategorizeModel")
-        if purpose == "categorize"
-        else resolved.get("selectedCopilotModel")
-    )
+    if purpose == "categorize":
+        model = resolved.get("selectedCategorizeModel")
+    elif purpose == "controller":
+        model = resolved.get("selectedControllerModel")
+    else:
+        model = resolved.get("selectedCopilotModel")
     if not model:
         return False
 
     ollama_state = _fetch_ollama_state(resolved["ollamaBaseUrl"])
     if not ollama_state.get("reachable"):
         return False
-    if model not in set(ollama_state.get("installedModels", [])):
+    if not _model_installed(ollama_state.get("installedModels", []), model):
         return False
 
     base_url = ollama_state["baseUrl"].rstrip("/")
@@ -314,18 +398,17 @@ def update_settings(conn, payload: dict) -> dict:
     presets = catalog.get("presets", {})
     models = catalog.get("models", {})
 
-    provider = (next_settings.get("llm_provider") or DEFAULT_PROVIDER or "anthropic").strip().lower()
-    if provider not in {"anthropic", "ollama"}:
-        raise ValueError("Unsupported llm_provider.")
-    if next_settings.get("llm_provider") is None:
-        next_settings["llm_provider"] = provider
+    provider = (next_settings.get("llm_provider") or DEFAULT_PROVIDER).strip().lower()
+    if provider not in {"ollama", "llamacpp"}:
+        raise ValueError("Mira only supports local Ollama or experimental llama.cpp LLMs.")
+    next_settings["llm_provider"] = provider
 
     preset = next_settings.get("local_ai_profile")
     if preset and preset not in presets:
         raise ValueError("Unknown local_ai_profile.")
 
     expert_mode = bool(next_settings.get("expert_mode"))
-    for key in ["categorize_model", "copilot_model"]:
+    for key in ["categorize_model", "controller_model", "copilot_model"]:
         selected = next_settings.get(key)
         if not selected:
             continue
@@ -370,12 +453,16 @@ def resolve_runtime_settings(conn=None) -> dict:
     else:
         settings = _read_settings(conn)
 
-    provider = (settings.get("llm_provider") or DEFAULT_PROVIDER or "anthropic").strip().lower()
-    if provider not in {"anthropic", "ollama"}:
-        provider = DEFAULT_PROVIDER or "anthropic"
+    provider = (settings.get("llm_provider") or DEFAULT_PROVIDER).strip().lower()
+    if provider not in {"ollama", "llamacpp"}:
+        provider = "ollama"
 
     ollama_state = _fetch_ollama_state(DEFAULT_OLLAMA_BASE_URL)
     active_ollama_base_url = ollama_state["baseUrl"] if ollama_state.get("reachable") else DEFAULT_OLLAMA_BASE_URL
+    llamacpp_state = _fetch_llamacpp_state(DEFAULT_LLAMACPP_BASE_URL)
+    active_llamacpp_base_url = (
+        llamacpp_state["baseUrl"] if llamacpp_state.get("reachable") else DEFAULT_LLAMACPP_BASE_URL
+    )
 
     explicit_preset_key = settings.get("local_ai_profile")
     preset_key = explicit_preset_key or defaults.get("preset") or "balanced"
@@ -394,6 +481,7 @@ def resolve_runtime_settings(conn=None) -> dict:
     )
 
     categorize_model = settings.get("categorize_model") or default_categorize_model or DEFAULT_CATEGORIZE_MODEL
+    controller_model = settings.get("controller_model") or DEFAULT_CONTROLLER_MODEL or categorize_model
     copilot_model = settings.get("copilot_model") or default_copilot_model or DEFAULT_COPILOT_MODEL
 
     if categorize_model in models:
@@ -404,6 +492,11 @@ def resolve_runtime_settings(conn=None) -> dict:
 
     if copilot_model in models and models[copilot_model].get("expert_only") and not expert_mode:
         copilot_model = preset.get("copilot_model") or defaults.get("copilot_model") or DEFAULT_COPILOT_MODEL
+    if controller_model in models:
+        if models[controller_model].get("expert_only") and not expert_mode:
+            controller_model = categorize_model
+        elif models[controller_model].get("categorize_default") == "avoid" and not expert_mode:
+            controller_model = categorize_model
 
     batch_size = settings.get("categorize_batch_size") or preset.get("default_batch_size") or 20
     delay_ms = settings.get("inter_batch_delay_ms") or preset.get("inter_batch_delay_ms") or 600
@@ -415,12 +508,15 @@ def resolve_runtime_settings(conn=None) -> dict:
     return {
         "provider": provider,
         "ollamaBaseUrl": active_ollama_base_url,
+        "llamaCppBaseUrl": active_llamacpp_base_url,
+        "llamaCppModel": DEFAULT_LLAMACPP_MODEL,
         "memory": memory,
         "preset": preset_key,
         "presetMeta": preset,
         "expertMode": expert_mode,
         "lowPowerMode": low_power_mode,
         "selectedCategorizeModel": categorize_model,
+        "selectedControllerModel": controller_model,
         "selectedCopilotModel": copilot_model,
         "categorizeBatchSize": max(1, int(batch_size)),
         "interBatchDelayMs": max(0, int(delay_ms)),
@@ -444,8 +540,9 @@ def get_catalog_response(conn=None) -> dict:
             enriched = {
                 "id": model_id,
                 **meta,
-                "installed": model_id in installed,
+                "installed": _model_installed(installed, model_id),
                 "selectedForCategorize": resolved["selectedCategorizeModel"] == model_id,
+                "selectedForController": resolved["selectedControllerModel"] == model_id,
                 "selectedForCopilot": resolved["selectedCopilotModel"] == model_id,
             }
             tier_models.append(enriched)
@@ -471,14 +568,20 @@ def get_catalog_response(conn=None) -> dict:
 def get_status_response(conn=None) -> dict:
     resolved = resolve_runtime_settings(conn)
     ollama_state = _fetch_ollama_state(resolved["ollamaBaseUrl"])
+    llamacpp_state = _fetch_llamacpp_state(resolved["llamaCppBaseUrl"])
     return {
         "provider": resolved["provider"],
         "ollamaReachable": ollama_state.get("reachable", False),
+        "llamaCppReachable": llamacpp_state.get("reachable", False),
+        "llamaCppModels": llamacpp_state.get("models", []),
+        "llamaCppBaseUrl": resolved["llamaCppBaseUrl"],
+        "llamaCppModel": resolved["llamaCppModel"],
         "memoryTier": resolved["memory"]["memoryTier"],
         "memoryLabel": resolved["memory"]["memoryLabel"],
         "ramGb": resolved["memory"]["ramGb"],
         "installedModels": ollama_state.get("installedModels", []),
         "selectedCategorizeModel": resolved["selectedCategorizeModel"],
+        "selectedControllerModel": resolved["selectedControllerModel"],
         "selectedCopilotModel": resolved["selectedCopilotModel"],
         "preset": resolved["preset"],
         "lowPowerMode": resolved["lowPowerMode"],
@@ -492,13 +595,14 @@ def get_status_response(conn=None) -> dict:
 def get_frontend_flags(conn=None) -> dict:
     resolved = resolve_runtime_settings(conn)
     return {
-        "localLlmEnabled": resolved["provider"] == "ollama",
+        "localLlmEnabled": resolved["provider"] in {"ollama", "llamacpp"},
         "localLlmProvider": resolved["provider"],
         "memoryTier": resolved["memory"]["memoryTier"],
         "localAiProfile": resolved["preset"],
         "lowPowerMode": resolved["lowPowerMode"],
         "expertMode": resolved["expertMode"],
         "selectedCategorizeModel": resolved["selectedCategorizeModel"],
+        "selectedControllerModel": resolved["selectedControllerModel"],
         "selectedCopilotModel": resolved["selectedCopilotModel"],
     }
 
@@ -510,6 +614,8 @@ def install_model(model_id: str, conn=None) -> dict[str, Any]:
         raise ValueError(f"Unsupported model: {model_id}")
 
     resolved = resolve_runtime_settings(conn)
+    if resolved.get("provider") != "ollama":
+        raise ValueError("Install is only supported for Ollama models. Start llama.cpp models on the host.")
     ollama_state = _fetch_ollama_state(resolved["ollamaBaseUrl"])
     if not ollama_state.get("reachable"):
         raise ValueError("Ollama is not reachable from the backend container.")
@@ -540,7 +646,7 @@ def install_model(model_id: str, conn=None) -> dict[str, Any]:
     status = get_status_response(conn)
     return {
         "model": model_id,
-        "completed": model_id in status.get("installedModels", []),
+        "completed": _model_installed(status.get("installedModels", []), model_id),
         "bytesCompleted": last_completed,
         "finalStatus": final_status,
         "status": status,
@@ -556,7 +662,16 @@ def get_ollama_config() -> dict:
     return {
         "base_url": resolved["ollamaBaseUrl"],
         "categorize_model": resolved["selectedCategorizeModel"],
+        "controller_model": resolved["selectedControllerModel"],
         "copilot_model": resolved["selectedCopilotModel"],
+    }
+
+
+def get_llamacpp_config() -> dict:
+    resolved = resolve_runtime_settings()
+    return {
+        "base_url": resolved["llamaCppBaseUrl"],
+        "model": resolved["llamaCppModel"],
     }
 
 

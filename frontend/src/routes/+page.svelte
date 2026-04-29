@@ -162,7 +162,6 @@
     $: showSankeyLoadingStage = forceSankeyEmptyLoading || (sankeyLoading && !hasRenderableSankeyData);
     $: showLiveSankeySyncState = sankeyLoading && hasRenderableSankeyData && !showSankeyLoadingStage;
     $: showSankeyChart = Boolean(periodSummary) && !showSankeyLoadingStage && !showLiveSankeySyncState;
-
     function handleTheaterMouseMove(e) {
         if (!sankeyTheaterEl) return;
         const rect = sankeyTheaterEl.getBoundingClientRect();
@@ -242,10 +241,13 @@
     let scheduled = data.scheduled || null;
     let cashFlowForecast = data.cashFlowForecast || null;
     let investments = data.investments || null;
+    let proactiveInsights = [];
+    let proactiveLoading = false;
     let manualQuickBalances = {};
     let manualQuickSavingId = null;
     let manualQuickMessage = '';
     let reviewToastDismissed = false;
+    let monthlyPlanCollapsed = false;
     let expandedUpcomingGroup = '';
     let upcomingActionKey = '';
     let expandedUpcomingItemKey = '';
@@ -306,9 +308,9 @@
             planSnapshot = bundle.planSnapshot || null;
             reviewQueue = bundle.reviewQueue || null;
         dataHealth = bundle.dataHealth || null;
-        scheduled = bundle.scheduled || null;
-        cashFlowForecast = bundle.cashFlowForecast || null;
-        investments = bundle.investments || null;
+            scheduled = bundle.scheduled || null;
+            cashFlowForecast = bundle.cashFlowForecast || null;
+            investments = bundle.investments || null;
             netWorthTrendData = (Array.isArray(bundle.netWorthSeries) && bundle.netWorthSeries.length >= 2)
                 ? bundle.netWorthSeries.map(d => ({ month: d.month || d.date, value: d.value }))
                 : [];
@@ -345,6 +347,7 @@
             if (!initialLoadComplete) {
                 initialLoadComplete = true;
             }
+            await loadProactiveInsights();
 
             console.info('🎉 Dashboard refreshed with new data.');
         } finally {
@@ -425,6 +428,7 @@
             requestAnimationFrame(() => animateNumbers());
 
             await tick();
+            await loadProactiveInsights();
             // Only mark complete if we actually have data to show
             initialLoadComplete = !!(summary && accounts && accounts.length > 0);
 
@@ -490,10 +494,14 @@
         loadProfiles();
     }
 
-    $: dataHealthWarnings = Array.isArray(dataHealth?.warnings) ? dataHealth.warnings.slice(0, 4) : [];
+    $: visibleDataHealthWarnings = Array.isArray(dataHealth?.warnings)
+        ? dataHealth.warnings.filter((warning) => !(appConfig.demoMode && warning?.type === 'credential_encryption'))
+        : [];
+    $: dataHealthWarnings = visibleDataHealthWarnings.slice(0, 4);
     $: staleManualAccounts = Array.isArray(accounts)
         ? accounts.filter((account) => account.provider === 'manual' && (account.manual_is_stale || (account.manual_stale_days ?? 0) > 30)).slice(0, 4)
         : [];
+    $: dataHealthAttentionCount = visibleDataHealthWarnings.length || staleManualAccounts.length;
     $: upcomingScheduledItems = Array.isArray(scheduled?.items)
         ? scheduled.items.filter((item) => item.next_date)
         : [];
@@ -725,6 +733,33 @@
         } finally {
             upcomingActionKey = '';
         }
+    }
+
+    $: visibleProactiveInsights = Array.isArray(proactiveInsights) ? proactiveInsights.slice(0, 3) : [];
+
+    function insightMeta(insight) {
+        const confidence = insight?.confidence ? `Confidence: ${insight.confidence}` : '';
+        const caveats = Array.isArray(insight?.caveats) ? insight.caveats : (Array.isArray(insight?.evidence?.caveats) ? insight.evidence.caveats : []);
+        const caveat = caveats.length > 0 ? caveats[0] : '';
+        return [confidence, caveat].filter(Boolean).join(' · ');
+    }
+
+    async function loadProactiveInsights() {
+        proactiveLoading = true;
+        try {
+            const result = await api.getProactiveInsights();
+            proactiveInsights = Array.isArray(result?.items) ? result.items : [];
+        } catch (e) {
+            console.error('Failed to load proactive insights:', e);
+        } finally {
+            proactiveLoading = false;
+        }
+    }
+
+    async function dismissProactiveInsight(id) {
+        if (!id) return;
+        await api.dismissProactiveInsight(id);
+        proactiveInsights = proactiveInsights.filter(item => item.id !== id);
     }
     $: investmentSummary = investments?.summary || null;
     $: investmentAllocation = Array.isArray(investments?.allocation) ? investments.allocation.slice(0, 4) : [];
@@ -1822,6 +1857,15 @@
         }
     }
 
+    function toggleMonthlyPlan() {
+        monthlyPlanCollapsed = !monthlyPlanCollapsed;
+        if (monthlyPlanCollapsed) {
+            expandedUpcomingGroup = '';
+            expandedUpcomingItemKey = '';
+            upcomingEditKey = '';
+        }
+    }
+
     // ══════════════════════════════════════════
     // S4: INCOME vs SPENDING (Luminous Overlap)
     // ══════════════════════════════════════════
@@ -2218,7 +2262,7 @@
                     <div style="min-width: 220px;">
                         <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--warning)">Data Confidence</p>
                         <h3 class="folio-section-title" style="margin:0.15rem 0 0">
-                            {dataHealth?.summary?.warnings || dataHealthWarnings.length} item{(dataHealth?.summary?.warnings || dataHealthWarnings.length) === 1 ? '' : 's'} need attention
+                            {dataHealthAttentionCount} item{dataHealthAttentionCount === 1 ? '' : 's'} need attention
                         </h3>
                         <p class="text-xs mt-1" style="color: var(--text-muted)">
                             {dataHealth?.summary?.stale_accounts || staleManualAccounts.length} stale account{(dataHealth?.summary?.stale_accounts || staleManualAccounts.length) === 1 ? '' : 's'} · latest update {dataHealth?.summary?.latest_account_update ? formatDate(dataHealth.summary.latest_account_update) : 'unknown'}
@@ -2269,6 +2313,50 @@
         </section>
     {/if}
 
+    {#if visibleProactiveInsights.length > 0}
+        <section class="mb-6 fade-in-up" style="animation-delay: 54ms">
+            <div class="card" style="padding: 1rem;">
+                <div class="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                        <p class="text-[10px] font-bold tracking-[0.14em] uppercase" style="color: var(--accent)">Mira Noticed</p>
+                        <h3 class="folio-section-title" style="margin:0.15rem 0 0">Top money signals</h3>
+                    </div>
+                    {#if proactiveLoading}
+                        <span class="text-xs" style="color: var(--text-muted)">Refreshing</span>
+                    {/if}
+                </div>
+                <div class="grid gap-2">
+                    {#each visibleProactiveInsights as insight}
+                        <article class="flex gap-3 items-start" style="border: 1px solid var(--card-border); border-radius: 0.5rem; padding: 0.75rem; background: var(--surface-50);">
+                            <span class="material-symbols-outlined text-[18px]" style="color: {insight.severity === 'critical' ? 'var(--negative)' : insight.severity === 'warning' ? 'var(--warning)' : 'var(--accent)'}">
+                                {insight.kind === 'cashflow_shortfall' ? 'warning' : insight.kind?.includes('recurring') ? 'event_repeat' : insight.kind?.includes('goal') ? 'flag' : 'insights'}
+                            </span>
+                            <div class="min-w-0 flex-1">
+                                <strong class="block text-sm" style="color: var(--text-primary)">{insight.title}</strong>
+                                <p class="text-xs mt-1" style="color: var(--text-muted)">{insight.body}</p>
+                                {#if insight.recommended_action}
+                                    <p class="text-xs mt-2" style="color: var(--text-primary)">{insight.recommended_action}</p>
+                                {/if}
+                                {#if insightMeta(insight)}
+                                    <small class="block mt-2 text-[10px]" style="color: var(--text-muted)">{insightMeta(insight)}</small>
+                                {/if}
+                            </div>
+                            <button
+                                type="button"
+                                class="privacy-toggle-btn"
+                                on:click={() => dismissProactiveInsight(insight.id)}
+                                aria-label="Dismiss insight"
+                                title="Dismiss insight"
+                            >
+                                <span class="material-symbols-outlined text-[12px]">close</span>
+                            </button>
+                        </article>
+                    {/each}
+                </div>
+            </div>
+        </section>
+    {/if}
+
     <!-- ═══ HEADER ═══ -->
     <div class="dashboard-hero-header mb-8 fade-in">
         <div class="dashboard-hero-meta-row">
@@ -2305,7 +2393,7 @@
         {/if}
     </div>
 
-    {#if reviewQueue && reviewQueue.unreviewed_count > 0 && !reviewToastDismissed}
+    {#if !appConfig.demoMode && reviewQueue && reviewQueue.unreviewed_count > 0 && !reviewToastDismissed}
         <aside class="dashboard-review-toast fade-in">
             <div class="dashboard-review-toast-icon">
                 <span class="material-symbols-outlined">fact_check</span>
@@ -2566,7 +2654,10 @@
          â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
     {#if planSnapshot}
         <section class="mb-6 fade-in-up" style="animation-delay: 88ms">
-            <div class="dashboard-monthly-island card" class:dashboard-monthly-island-expanded={!!expandedUpcomingGroup}>
+            <div
+                class="dashboard-monthly-island card"
+                class:dashboard-monthly-island-expanded={!!expandedUpcomingGroup}
+                class:dashboard-monthly-island-collapsed={monthlyPlanCollapsed}>
                 <div class="dashboard-monthly-header">
                     <div>
                         <p>{formatMonth(planSnapshot.month)} · This month</p>
@@ -2575,6 +2666,14 @@
                     <div class="dashboard-monthly-header-meta">
                         <span>{scheduled?.scheduled_count || 0} due in {scheduled?.window_days || 45} days</span>
                         <a href="/budget" class="dashboard-plan-link">Open plan</a>
+                        <button
+                            class="dashboard-monthly-toggle"
+                            type="button"
+                            on:click|stopPropagation={toggleMonthlyPlan}
+                            aria-expanded={!monthlyPlanCollapsed}
+                            aria-label={monthlyPlanCollapsed ? 'Expand monthly plan' : 'Collapse monthly plan'}>
+                            <span class="material-symbols-outlined">{monthlyPlanCollapsed ? 'expand_more' : 'expand_less'}</span>
+                        </button>
                     </div>
                 </div>
 
@@ -2596,98 +2695,118 @@
                         style="width: {Math.max(0, Math.min(100, ((planSnapshot.safe_to_spend || 0) / Math.max(planSnapshot.planned_income || 0, 1)) * 100))}%;">
                     </div>
                 </div>
-                <div class="dashboard-monthly-legend">
-                    <span><i class="dashboard-monthly-legend-save"></i>Save target</span>
-                    <span><i class="dashboard-monthly-legend-fixed"></i>Mandatory</span>
-                    <span><i class="dashboard-monthly-legend-used"></i>Variable used</span>
-                    <span><i class="dashboard-monthly-legend-open"></i>Remaining</span>
-                </div>
+                {#if monthlyPlanCollapsed}
+                    <div class="dashboard-monthly-summary">
+                        <div>
+                            <span>Safe to spend</span>
+                            <strong class:text-negative={(planSnapshot.safe_to_spend || 0) < 0}>{(void privacyKey, formatCurrency(planSnapshot.safe_to_spend || 0))}</strong>
+                        </div>
+                        <div>
+                            <span>Save target</span>
+                            <strong>{(void privacyKey, formatCurrency(planSnapshot.save_first_target || 0))}</strong>
+                        </div>
+                        <div>
+                            <span>Mandatory</span>
+                            <strong>{(void privacyKey, formatCurrency(planSnapshot.mandatory_spend || 0))}</strong>
+                        </div>
+                        <div>
+                            <span>Upcoming</span>
+                            <strong>{(void privacyKey, formatCurrency(confirmedUpcomingTotal || 0))}</strong>
+                        </div>
+                    </div>
+                {:else}
+                    <div class="dashboard-monthly-legend">
+                        <span><i class="dashboard-monthly-legend-save"></i>Save target</span>
+                        <span><i class="dashboard-monthly-legend-fixed"></i>Mandatory</span>
+                        <span><i class="dashboard-monthly-legend-used"></i>Variable used</span>
+                        <span><i class="dashboard-monthly-legend-open"></i>Remaining</span>
+                    </div>
 
-                <div class="dashboard-monthly-cells">
-                    <div class="dashboard-monthly-cell">
-                        <span>Save first</span>
-                        <strong>{(void privacyKey, formatCurrency(planSnapshot.save_first_target || 0))}</strong>
-                        <small>{(void privacyKey, formatCurrency(planSnapshot.save_first_actual || 0))} saved · {(void privacyKey, formatCurrency(planSnapshot.save_first_remaining || 0))} left</small>
-                        <div class="dashboard-monthly-progress" aria-hidden="true">
-                            <i style="width: {progressPct(planSnapshot.save_first_actual, planSnapshot.save_first_target)}%; background: var(--positive);"></i>
-                        </div>
-                        <em>{Math.round((planSnapshot.save_first_rate || 0.2) * 100)}% target</em>
-                    </div>
-                    <div class="dashboard-monthly-cell">
-                        <span>Mandatory</span>
-                        <strong>{(void privacyKey, formatCurrency(planSnapshot.mandatory_spend || 0))}</strong>
-                        <small>
-                            spent of {(void privacyKey, formatCurrency(planSnapshot.mandatory_projected || planSnapshot.mandatory_spend || 0))}
-                            {#if (planSnapshot.mandatory_remaining || 0) > 0} · {(void privacyKey, formatCurrency(planSnapshot.mandatory_remaining || 0))} left{/if}
-                        </small>
-                        <div class="dashboard-monthly-progress" aria-hidden="true">
-                            <i style="width: {progressPct(planSnapshot.mandatory_spend, planSnapshot.mandatory_projected || planSnapshot.mandatory_spend)}%; background: var(--monthly-fixed-color, #687487);"></i>
-                        </div>
-                        <em>Fixed spend</em>
-                    </div>
-	                    <div class="dashboard-monthly-cell dashboard-monthly-upcoming">
-	                        <div>
-	                            <span>Upcoming bills</span>
-	                            <strong>{(void privacyKey, formatCurrency(confirmedUpcomingTotal || 0))}</strong>
-	                            <small>
-	                                confirmed in {scheduled?.window_days || 45} days
-	                                {#if inferredUpcomingTotal > 0} · {(void privacyKey, formatCurrency(inferredUpcomingTotal))} inferred{/if}
-	                                {#if needsReviewUpcomingTotal > 0} · {(void privacyKey, formatCurrency(needsReviewUpcomingTotal))} review{/if}
-	                                {#if unscheduledRecurringCount > 0} · {unscheduledRecurringCount} need dates{/if}
-	                            </small>
-	                        </div>
-                        {#if upcomingGroups.length > 0}
-                            <div class="dashboard-upcoming-chips">
-                                {#each displayedUpcomingGroups as group}
-                                    <button
-                                        class="dashboard-upcoming-chip dashboard-upcoming-group-chip"
-                                        class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === group.key}
-                                        type="button"
-                                        on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === group.key ? '' : group.key}
-                                        aria-expanded={expandedUpcomingGroup === group.key}>
-                                        <span class="material-symbols-outlined">
-                                            {upcomingGroupIcon(group.key)}
-                                        </span>
-                                        <div>
-                                            <strong>{group.label}</strong>
-                                            <small>{group.scheduled_count} · {(void privacyKey, formatCurrency(group.amount || 0))}</small>
-                                        </div>
-                                    </button>
-                                {/each}
-                                {#if upcomingGroups.length > 2}
-                                    <button
-                                        class="dashboard-upcoming-chip dashboard-upcoming-group-chip dashboard-upcoming-more-chip"
-                                        class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}
-                                        type="button"
-                                        on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? '' : ALL_UPCOMING_GROUPS_KEY}
-                                        aria-expanded={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}>
-                                        <span class="material-symbols-outlined">{expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? 'unfold_less' : 'unfold_more'}</span>
-                                        <div>
-                                            <strong>+{upcomingGroups.length - 2} more</strong>
-                                            <small>groups</small>
-                                        </div>
-                                    </button>
-                                {/if}
+                    <div class="dashboard-monthly-cells">
+                        <div class="dashboard-monthly-cell">
+                            <span>Save first</span>
+                            <strong>{(void privacyKey, formatCurrency(planSnapshot.save_first_target || 0))}</strong>
+                            <small>{(void privacyKey, formatCurrency(planSnapshot.save_first_actual || 0))} saved · {(void privacyKey, formatCurrency(planSnapshot.save_first_remaining || 0))} left</small>
+                            <div class="dashboard-monthly-progress" aria-hidden="true">
+                                <i style="width: {progressPct(planSnapshot.save_first_actual, planSnapshot.save_first_target)}%; background: var(--positive);"></i>
                             </div>
-                        {/if}
-                        <a class="dashboard-upcoming-add-link" href="/transactions">Add from transactions</a>
-                    </div>
-                    <div class="dashboard-monthly-cell dashboard-monthly-safe-cell">
-                        <span>Safe to spend</span>
-                        <strong class:text-negative={(planSnapshot.safe_to_spend || 0) < 0}>{(void privacyKey, formatCurrency(planSnapshot.safe_to_spend || 0))}</strong>
-                        <small>
-                            {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_spent || 0))} used
-                            {#if (planSnapshot.safe_to_spend_limit || 0) > 0} of {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_limit || 0))}{/if}
-                        </small>
-                        <div class="dashboard-monthly-progress dashboard-monthly-progress-dark" aria-hidden="true">
-                            <i style="width: {progressPct(planSnapshot.safe_to_spend_spent, planSnapshot.safe_to_spend_limit)}%; background: var(--warning);"></i>
+                            <em>{Math.round((planSnapshot.save_first_rate || 0.2) * 100)}% target</em>
                         </div>
-                        <small>{planSnapshot.income_basis === 'trailing_average' ? 'Avg income basis' : 'Income basis'}</small>
-                        <em>{planSnapshot.active_goal_count || 0} goal{(planSnapshot.active_goal_count || 0) === 1 ? '' : 's'} active</em>
+                        <div class="dashboard-monthly-cell">
+                            <span>Mandatory</span>
+                            <strong>{(void privacyKey, formatCurrency(planSnapshot.mandatory_spend || 0))}</strong>
+                            <small>
+                                spent of {(void privacyKey, formatCurrency(planSnapshot.mandatory_projected || planSnapshot.mandatory_spend || 0))}
+                                {#if (planSnapshot.mandatory_remaining || 0) > 0} · {(void privacyKey, formatCurrency(planSnapshot.mandatory_remaining || 0))} left{/if}
+                            </small>
+                            <div class="dashboard-monthly-progress" aria-hidden="true">
+                                <i style="width: {progressPct(planSnapshot.mandatory_spend, planSnapshot.mandatory_projected || planSnapshot.mandatory_spend)}%; background: var(--monthly-fixed-color, #687487);"></i>
+                            </div>
+                            <em>Fixed spend</em>
+                        </div>
+                        <div class="dashboard-monthly-cell dashboard-monthly-upcoming">
+                            <div>
+                                <span>Upcoming bills</span>
+                                <strong>{(void privacyKey, formatCurrency(confirmedUpcomingTotal || 0))}</strong>
+                                <small>
+                                    confirmed in {scheduled?.window_days || 45} days
+                                    {#if inferredUpcomingTotal > 0} · {(void privacyKey, formatCurrency(inferredUpcomingTotal))} inferred{/if}
+                                    {#if needsReviewUpcomingTotal > 0} · {(void privacyKey, formatCurrency(needsReviewUpcomingTotal))} review{/if}
+                                    {#if unscheduledRecurringCount > 0} · {unscheduledRecurringCount} need dates{/if}
+                                </small>
+                            </div>
+                            {#if upcomingGroups.length > 0}
+                                <div class="dashboard-upcoming-chips">
+                                    {#each displayedUpcomingGroups as group}
+                                        <button
+                                            class="dashboard-upcoming-chip dashboard-upcoming-group-chip"
+                                            class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === group.key}
+                                            type="button"
+                                            on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === group.key ? '' : group.key}
+                                            aria-expanded={expandedUpcomingGroup === group.key}>
+                                            <span class="material-symbols-outlined">
+                                                {upcomingGroupIcon(group.key)}
+                                            </span>
+                                            <div>
+                                                <strong>{group.label}</strong>
+                                                <small>{group.scheduled_count} · {(void privacyKey, formatCurrency(group.amount || 0))}</small>
+                                            </div>
+                                        </button>
+                                    {/each}
+                                    {#if upcomingGroups.length > 2}
+                                        <button
+                                            class="dashboard-upcoming-chip dashboard-upcoming-group-chip dashboard-upcoming-more-chip"
+                                            class:dashboard-upcoming-group-chip-active={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}
+                                            type="button"
+                                            on:click|stopPropagation={() => expandedUpcomingGroup = expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? '' : ALL_UPCOMING_GROUPS_KEY}
+                                            aria-expanded={expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY}>
+                                            <span class="material-symbols-outlined">{expandedUpcomingGroup === ALL_UPCOMING_GROUPS_KEY ? 'unfold_less' : 'unfold_more'}</span>
+                                            <div>
+                                                <strong>+{upcomingGroups.length - 2} more</strong>
+                                                <small>groups</small>
+                                            </div>
+                                        </button>
+                                    {/if}
+                                </div>
+                            {/if}
+                            <a class="dashboard-upcoming-add-link" href="/transactions">Add from transactions</a>
+                        </div>
+                        <div class="dashboard-monthly-cell dashboard-monthly-safe-cell">
+                            <span>Safe to spend</span>
+                            <strong class:text-negative={(planSnapshot.safe_to_spend || 0) < 0}>{(void privacyKey, formatCurrency(planSnapshot.safe_to_spend || 0))}</strong>
+                            <small>
+                                {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_spent || 0))} used
+                                {#if (planSnapshot.safe_to_spend_limit || 0) > 0} of {(void privacyKey, formatCurrency(planSnapshot.safe_to_spend_limit || 0))}{/if}
+                            </small>
+                            <div class="dashboard-monthly-progress dashboard-monthly-progress-dark" aria-hidden="true">
+                                <i style="width: {progressPct(planSnapshot.safe_to_spend_spent, planSnapshot.safe_to_spend_limit)}%; background: var(--warning);"></i>
+                            </div>
+                            <small>{planSnapshot.income_basis === 'trailing_average' ? 'Avg income basis' : 'Income basis'}</small>
+                            <em>{planSnapshot.active_goal_count || 0} goal{(planSnapshot.active_goal_count || 0) === 1 ? '' : 's'} active</em>
+                        </div>
                     </div>
-                </div>
 
-                {#if expandedUpcomingGroup}
+                    {#if expandedUpcomingGroup}
                     <div class="dashboard-upcoming-details">
                         <div class="dashboard-upcoming-details-header">
                             <span>{expandedUpcomingTitle}</span>
@@ -2827,6 +2946,7 @@
                             </div>
                         {/each}
                     </div>
+                    {/if}
                 {/if}
             </div>
         </section>

@@ -2,8 +2,8 @@
 Copilot agent tools. Each tool wraps an existing analytic or persistence
 function so the LLM can reach live data through a narrow, named surface.
 
-Tool schemas follow JSON Schema draft-7 (compatible with both Anthropic's
-tool-use and Ollama's OpenAI-style tool-use format).
+Tool schemas follow JSON Schema draft-7 and are emitted in Ollama's
+OpenAI-style tool-use format.
 
 Time windows use a `range` token:
   current_month | last_month | prior_month | YYYY-MM
@@ -21,8 +21,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from database import get_db
+from range_parser import parse_range
 from data_manager import (
     get_category_analytics_data,
+    get_category_budgets,
     get_dashboard_bundle_data,
     get_merchant_insights_data,
     get_monthly_analytics_data,
@@ -30,11 +32,13 @@ from data_manager import (
     get_net_worth_series_data,
     get_recurring_from_db,
     get_summary_data,
-    get_transactions_for_merchant,
     get_transactions_paginated,
 )
+from mira import metric_registry
+from mira import cashflow_forecast
 
 logger = logging.getLogger(__name__)
+INTERNAL_TOOL_NAMES = {"run_sql"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,6 +70,9 @@ def _resolve_range(token: str | None) -> tuple[str | None, str | None, str]:
     if not token:
         token = "current_month"
     token = token.strip().lower()
+    parsed = parse_range(token)
+    if parsed.explicit:
+        token = parsed.token
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
@@ -236,7 +243,9 @@ def _t_get_category_spend(args: dict, profile: str | None, conn) -> Any:
         start_date=start, end_date=end, limit=10, offset=0,
     ) or {}
 
-    return {
+    recent = tx_page.get("data") or []
+    row_count = int(tx_page.get("total_count") or 0)
+    return _add_contract({
         "category": category,
         "range": label,
         "start": start, "end": end,
@@ -245,24 +254,31 @@ def _t_get_category_spend(args: dict, profile: str | None, conn) -> Any:
         "refunds": (match or {}).get("refunds", 0),
         "percent_of_month": (match or {}).get("percent"),
         "expense_type": (match or {}).get("expense_type"),
-        "recent": tx_page.get("data") or [],
-        "total_count": tx_page.get("total_count", 0),
-    }
+        "recent": recent,
+        "total_count": row_count,
+    }, tool="get_category_spend", args=args, label=label, start=start, end=end, row_count=row_count, sample_transaction_ids=_sample_transaction_ids(recent), filters={"category": category})
 
 
 def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
     """Lookup a specific merchant by fragment, using the same include_unenriched path as get_top_merchants."""
+    from merchant_identity import canonicalize_merchant_key
+
     merchant = (args.get("merchant") or "").strip()
     if not merchant:
         return {"error": "merchant required"}
     month, start, end, label = _range_to_kwargs(args)
+    merchant_key = canonicalize_merchant_key(merchant)
 
     all_merchants = get_merchant_insights_data(
         month=month, profile=profile, conn=conn,
         start_date=start, end_date=end, include_unenriched=True,
     ) or []
     needle = merchant.lower()
-    matched = [m for m in all_merchants if needle in (m.get("name") or "").lower()]
+    matched = [
+        m for m in all_merchants
+        if needle in (m.get("name") or "").lower()
+        or (merchant_key and canonicalize_merchant_key(m.get("name") or "") == merchant_key)
+    ]
 
     search = f"%{merchant.upper()}%"
     params: list[Any] = list(_NON_SPENDING_CATEGORIES)
@@ -271,14 +287,14 @@ def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
         f"category NOT IN ({','.join('?' for _ in _NON_SPENDING_CATEGORIES)})",
         "(expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))",
         """(
-            UPPER(COALESCE(description, '')) LIKE ?
+            UPPER(COALESCE(merchant_key, '')) = ?
+            OR UPPER(COALESCE(description, '')) LIKE ?
             OR UPPER(COALESCE(raw_description, '')) LIKE ?
             OR UPPER(COALESCE(merchant_key, '')) LIKE ?
             OR UPPER(COALESCE(merchant_name, '')) LIKE ?
-            OR UPPER(COALESCE(category, '')) LIKE ?
         )""",
     ]
-    params.extend([search, search, search, search, search])
+    params.extend([merchant_key, search, search, search, search])
     if profile and profile != "household":
         where.append("profile_id = ?")
         params.append(profile)
@@ -319,26 +335,28 @@ def _t_get_merchant_spend(args: dict, profile: str | None, conn) -> Any:
         tx["enriched"] = bool(tx.get("enriched", 0))
         tx["is_excluded"] = bool(tx.get("is_excluded", 0))
 
-    return {
+    row_count = int(total_row[1] if total_row else 0)
+    return _add_contract({
         "merchant_query": merchant,
         "range": label,
         "start": start, "end": end,
         "matched_merchants": matched[:5],
         "total": _fmt_money(total_row[0] if total_row else 0),
-        "txn_count": int(total_row[1] if total_row else 0),
+        "txn_count": row_count,
         "recent": recent,
-        "total_matching_transactions": int(total_row[1] if total_row else 0),
-    }
+        "total_matching_transactions": row_count,
+    }, tool="get_merchant_spend", args=args, label=label, start=start, end=end, row_count=row_count, sample_transaction_ids=_sample_transaction_ids(recent), filters={"merchant": merchant})
 
 
 def _t_get_transactions(args: dict, profile: str | None, conn) -> Any:
     """General-purpose transaction search — same source as the Transactions page."""
     month, start, end, label = _range_to_kwargs(args) if (args.get("range") or args.get("month")) else (None, None, None, "all")
-    return get_transactions_paginated(
+    search = args.get("search") or args.get("merchant")
+    result = get_transactions_paginated(
         month=month,
         category=args.get("category"),
         account=args.get("account"),
-        search=args.get("search"),
+        search=search,
         profile=profile,
         limit=int(args.get("limit") or 25),
         offset=int(args.get("offset") or 0),
@@ -346,6 +364,21 @@ def _t_get_transactions(args: dict, profile: str | None, conn) -> Any:
         start_date=start,
         end_date=end,
     ) or {}
+    if isinstance(result, dict):
+        rows = _semantic_rows(result)
+        row_count = _semantic_count(result, rows)
+        return _add_contract(
+            result,
+            tool="get_transactions",
+            args=args,
+            label=label,
+            start=start,
+            end=end,
+            row_count=row_count,
+            sample_transaction_ids=_sample_transaction_ids(rows),
+            filters={k: v for k, v in args.items() if k not in {"range", "month", "offset"} and v not in (None, "", [])},
+        )
+    return result
 
 
 def _t_get_category_breakdown(args: dict, profile: str | None, conn) -> Any:
@@ -365,9 +398,513 @@ def _t_get_dashboard_bundle(args: dict, profile: str | None, conn) -> Any:
     return get_dashboard_bundle_data(profile=profile, conn=conn) or {}
 
 
+def _sample_transaction_ids(rows: list[dict[str, Any]] | None, limit: int = 5) -> list[str]:
+    samples: list[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        tx_id = row.get("original_id") or row.get("id") or row.get("transaction_id")
+        if tx_id and str(tx_id) not in samples:
+            samples.append(str(tx_id))
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def _metric_contract(
+    *,
+    tool: str,
+    args: dict[str, Any],
+    label: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    row_count: int | None = None,
+    sample_transaction_ids: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    calculation_basis: str | None = None,
+    caveats: list[str] | None = None,
+) -> dict[str, Any]:
+    metric_ids = metric_registry.metric_ids_for_tool(tool, args)
+    metric_id = metric_ids[0] if metric_ids else None
+    metric = metric_registry.metric_payload(metric_id)
+    payload: dict[str, Any] = {
+        "metric_id": metric_id,
+        "metric_ids": metric_ids,
+        "metric_definition": metric,
+        "metric_definition_summary": metric_registry.metric_summary(metric_id),
+        "range": label,
+        "start": start,
+        "end": end,
+        "filters": filters or {},
+        "row_count": int(row_count or 0),
+        "count": int(row_count or 0),
+        "sample_transaction_ids": list(sample_transaction_ids or [])[:8],
+        "calculation_basis": calculation_basis or ((metric or {}).get("default_provenance_text") if metric else "Computed from Folio tool results."),
+        "data_quality": {
+            "caveats": list(caveats or []),
+        },
+        "caveats": list(caveats or []),
+    }
+    return payload
+
+
+def _add_contract(
+    result: dict[str, Any],
+    *,
+    tool: str,
+    args: dict[str, Any],
+    label: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    row_count: int | None = None,
+    sample_transaction_ids: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    calculation_basis: str | None = None,
+    caveats: list[str] | None = None,
+) -> dict[str, Any]:
+    contract = _metric_contract(
+        tool=tool,
+        args=args,
+        label=label,
+        start=start,
+        end=end,
+        row_count=row_count,
+        sample_transaction_ids=sample_transaction_ids,
+        filters=filters,
+        calculation_basis=calculation_basis,
+        caveats=caveats,
+    )
+    result.update(contract)
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    result["provenance"] = {**provenance, **contract, "tool": tool, "args": {k: v for k, v in (args or {}).items() if v not in (None, "", [])}}
+    return result
+
+
+def _semantic_provenance(
+    *,
+    tool: str,
+    args: dict[str, Any],
+    label: str,
+    start: str | None = None,
+    end: str | None = None,
+    row_count: int = 0,
+    sample_transaction_ids: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    caveats: list[str] | None = None,
+) -> dict[str, Any]:
+    contract = _metric_contract(
+        tool=tool,
+        args=args,
+        label=label,
+        start=start,
+        end=end,
+        row_count=row_count,
+        sample_transaction_ids=sample_transaction_ids,
+        filters=filters,
+        caveats=caveats,
+    )
+    return {
+        "tool": tool,
+        "args": {k: v for k, v in (args or {}).items() if v not in (None, "", [])},
+        **contract,
+    }
+
+
+def _semantic_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("transactions", "data", "recent"):
+        rows = result.get(key)
+        if isinstance(rows, list):
+            return [dict(row) for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _semantic_count(result: dict[str, Any], rows: list[dict[str, Any]]) -> int:
+    for key in ("total_count", "txn_count", "total_matching_transactions", "row_count", "active_count"):
+        try:
+            if result.get(key) is not None:
+                return int(result.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return len(rows)
+
+
+def _t_get_dashboard_snapshot(args: dict, profile: str | None, conn) -> Any:
+    caveats: list[str] = []
+    try:
+        bundle = get_dashboard_bundle_data(profile=profile, conn=conn) or {}
+    except Exception:
+        caveats.append("Full dashboard bundle was unavailable; snapshot used fixture-safe summary/category/merchant/recurring fallbacks.")
+        bundle = {
+            "summary": get_summary_data(profile=profile, conn=conn) or {},
+            "categories": (_t_get_top_categories({"range": "current_month", "limit": 5}, profile, conn) or {}).get("categories") or [],
+            "merchants": (_t_get_top_merchants({"range": "current_month", "limit": 5}, profile, conn) or {}).get("merchants") or [],
+            "recurring": _t_get_recurring_summary({"limit": 5}, profile, conn),
+        }
+    sections = {
+        key: bundle.get(key)
+        for key in ("summary", "accounts", "monthly", "categories", "net_worth", "recurring", "budgets")
+        if key in bundle
+    }
+    if not sections:
+        sections = bundle
+    if not sections:
+        caveats.append("Dashboard bundle returned no sections.")
+    return _add_contract({
+        "summary": "Dashboard snapshot from Folio's dashboard bundle.",
+        "sections": sections,
+        "provenance": _semantic_provenance(
+            tool="get_dashboard_snapshot",
+            args=args,
+            label="dashboard",
+            filters={"profile": profile or "household"},
+            caveats=caveats,
+        ),
+    }, tool="get_dashboard_snapshot", args=args, label="dashboard", filters={"profile": profile or "household"}, caveats=caveats)
+
+
+def _t_find_transactions(args: dict, profile: str | None, conn) -> Any:
+    merchant = str(args.get("merchant") or "").strip()
+    query_args = {
+        "range": args.get("range"),
+        "category": args.get("category"),
+        "account": args.get("account"),
+        "search": args.get("search") or merchant or args.get("query"),
+        "limit": max(1, min(int(args.get("limit") or 25), 50)),
+        "offset": max(0, int(args.get("offset") or 0)),
+    }
+    query_args = {k: v for k, v in query_args.items() if v not in (None, "", [])}
+    result = _t_get_transactions(query_args, profile, conn)
+    if not isinstance(result, dict):
+        result = {}
+    rows = _semantic_rows(result)
+    _, start, end, label = _range_to_kwargs(query_args) if query_args.get("range") else (None, None, None, "all")
+    row_count = _semantic_count(result, rows)
+    return _add_contract({
+        **result,
+        "range": label,
+        "start": start,
+        "end": end,
+        "transactions": rows,
+        "row_count": row_count,
+        "summary": f"Found {row_count} matching transaction{'s' if row_count != 1 else ''}.",
+        "provenance": _semantic_provenance(
+            tool="find_transactions",
+            args=query_args,
+            label=label,
+            start=start,
+            end=end,
+            row_count=row_count,
+            sample_transaction_ids=_sample_transaction_ids(rows),
+            filters={k: v for k, v in query_args.items() if k not in {"range", "offset"}},
+        ),
+    }, tool="find_transactions", args=query_args, label=label, start=start, end=end, row_count=row_count, sample_transaction_ids=_sample_transaction_ids(rows), filters={k: v for k, v in query_args.items() if k not in {"range", "offset"}})
+
+
+def _subject_spend_tool(subject_type: str):
+    if subject_type == "category":
+        return _t_get_category_spend, "category"
+    if subject_type == "merchant":
+        return _t_get_merchant_spend, "merchant"
+    return None, ""
+
+
+def _t_analyze_subject(args: dict, profile: str | None, conn) -> Any:
+    subject_type = str(args.get("subject_type") or "").strip().lower()
+    subject = str(args.get("subject") or args.get(subject_type) or "").strip()
+    range_token = args.get("range") or "current_month"
+    tool, key = _subject_spend_tool(subject_type)
+    if not tool or not subject:
+        return {"error": "subject_type must be merchant or category and subject is required"}
+    spend = tool({key: subject, "range": range_token}, profile, conn) or {}
+    rows = _semantic_rows(spend)
+    row_count = _semantic_count(spend, rows)
+    trend = None
+    if subject_type == "category":
+        trend = _t_get_monthly_spending_trend({"category": subject, "months": 6}, profile, conn)
+    budget = None
+    if subject_type == "category":
+        budget = _t_get_budget_status({"category": subject, "range": range_token}, profile, conn)
+    return _add_contract({
+        "subject_type": subject_type,
+        "subject": subject,
+        "range": spend.get("range") or range_token,
+        "start": spend.get("start"),
+        "end": spend.get("end"),
+        "total": spend.get("total", 0),
+        "count": row_count,
+        "recent": rows[:10],
+        "trend": trend,
+        "budget": budget,
+        "summary": f"{subject} totals {spend.get('total', 0)} across {row_count} transaction(s).",
+        "provenance": _semantic_provenance(
+            tool="analyze_subject",
+            args={"subject_type": subject_type, "subject": subject, "range": range_token},
+            label=str(spend.get("range") or range_token),
+            start=spend.get("start"),
+            end=spend.get("end"),
+            row_count=row_count,
+            sample_transaction_ids=_sample_transaction_ids(rows),
+            filters={subject_type: subject},
+        ),
+    }, tool="analyze_subject", args={"subject_type": subject_type, "subject": subject, "range": range_token}, label=str(spend.get("range") or range_token), start=spend.get("start"), end=spend.get("end"), row_count=row_count, sample_transaction_ids=_sample_transaction_ids(rows), filters={subject_type: subject})
+
+
+def _t_compare_periods(args: dict, profile: str | None, conn) -> Any:
+    subject_type = str(args.get("subject_type") or "").strip().lower()
+    subject = str(args.get("subject") or args.get(subject_type) or "").strip()
+    range_a = args.get("range_a") or args.get("range") or "current_month"
+    range_b = args.get("range_b") or "last_month"
+    tool, key = _subject_spend_tool(subject_type)
+    if not tool or not subject:
+        return {"error": "subject_type must be merchant or category and subject is required"}
+    left = tool({key: subject, "range": range_a}, profile, conn) or {}
+    right = tool({key: subject, "range": range_b}, profile, conn) or {}
+    total_a = _fmt_money(left.get("total"))
+    total_b = _fmt_money(right.get("total"))
+    delta = _fmt_money(total_a - total_b)
+    rows = _semantic_rows(left) + _semantic_rows(right)
+    row_count = _semantic_count(left, _semantic_rows(left)) + _semantic_count(right, _semantic_rows(right))
+    return _add_contract({
+        "subject_type": subject_type,
+        "subject": subject,
+        "range_a": left.get("range") or range_a,
+        "range_b": right.get("range") or range_b,
+        "start_a": left.get("start"),
+        "end_a": left.get("end"),
+        "start_b": right.get("start"),
+        "end_b": right.get("end"),
+        "total_a": total_a,
+        "total_b": total_b,
+        "delta": delta,
+        "left": left,
+        "right": right,
+        "summary": f"{subject} is {total_a} for {left.get('range') or range_a} versus {total_b} for {right.get('range') or range_b}.",
+        "provenance": _semantic_provenance(
+            tool="compare_periods",
+            args={"subject_type": subject_type, "subject": subject, "range_a": range_a, "range_b": range_b},
+            label=f"{left.get('range') or range_a} vs {right.get('range') or range_b}",
+            row_count=row_count,
+            sample_transaction_ids=_sample_transaction_ids(rows),
+            filters={subject_type: subject},
+        ),
+    }, tool="compare_periods", args={"subject_type": subject_type, "subject": subject, "range_a": range_a, "range_b": range_b}, label=f"{left.get('range') or range_a} vs {right.get('range') or range_b}", row_count=row_count, sample_transaction_ids=_sample_transaction_ids(rows), filters={subject_type: subject})
+
+
+def _t_get_budget_status(args: dict, profile: str | None, conn) -> Any:
+    category = str(args.get("category") or "").strip()
+    if not category:
+        return {"error": "category required"}
+    range_token = args.get("range") or "current_month"
+    spend = _t_get_category_spend({"category": category, "range": range_token}, profile, conn) or {}
+    budgets = get_category_budgets(profile=profile, conn=conn) or []
+    budget = next((item for item in budgets if str(item.get("category") or "").lower() == category.lower()), None)
+    amount = _fmt_money((budget or {}).get("amount"))
+    actual = _fmt_money(spend.get("total"))
+    remaining = _fmt_money(amount - actual)
+    rows = _semantic_rows(spend)
+    row_count = _semantic_count(spend, rows)
+    caveats = [] if budget and amount > 0 else [f"No budget is configured for {category}."]
+    return _add_contract({
+        "category": category,
+        "range": spend.get("range") or range_token,
+        "start": spend.get("start"),
+        "end": spend.get("end"),
+        "budget": amount,
+        "actual": actual,
+        "remaining": remaining,
+        "over_budget": actual > amount if amount > 0 else False,
+        "has_budget": bool(budget and amount > 0),
+        "recent": rows[:10],
+        "row_count": row_count,
+        "summary": f"{category} has {remaining} remaining against a {amount} budget." if amount > 0 else f"No budget is set for {category}.",
+        "provenance": _semantic_provenance(
+            tool="get_budget_status",
+            args={"category": category, "range": range_token},
+            label=str(spend.get("range") or range_token),
+            start=spend.get("start"),
+            end=spend.get("end"),
+            row_count=row_count,
+            sample_transaction_ids=_sample_transaction_ids(rows),
+            filters={"category": category},
+            caveats=caveats,
+        ),
+    }, tool="get_budget_status", args={"category": category, "range": range_token}, label=str(spend.get("range") or range_token), start=spend.get("start"), end=spend.get("end"), row_count=row_count, sample_transaction_ids=_sample_transaction_ids(rows), filters={"category": category}, caveats=caveats)
+
+
+def _t_explain_metric(args: dict, profile: str | None, conn) -> Any:
+    metric = str(args.get("metric") or "spending").strip().lower().replace(" ", "_")
+    range_token = args.get("range") or "current_month"
+    if metric in {"net_worth", "networth", "balance"}:
+        result = _t_get_net_worth_delta(args, profile, conn)
+        return _add_contract({
+            "metric": "net_worth",
+            "components": result,
+            "summary": "Net worth explanation from Folio's dashboard delta metrics.",
+            "provenance": _semantic_provenance(tool="explain_metric", args={"metric": "net_worth"}, label="dashboard"),
+        }, tool="explain_metric", args={"metric": "net_worth"}, label="dashboard")
+    if metric in {"recurring", "subscriptions", "subscription"}:
+        result = _t_get_recurring_changes({"range": range_token, "limit": args.get("limit") or 10}, profile, conn)
+        return _add_contract(
+            {"metric": "recurring", "components": result, "summary": result.get("summary"), "provenance": result.get("provenance")},
+            tool="explain_metric",
+            args={"metric": "recurring", "range": range_token},
+            label=str(result.get("range") or range_token),
+            row_count=int(result.get("row_count") or result.get("active_count") or 0),
+            filters={"metric": "recurring"},
+            caveats=result.get("caveats") if isinstance(result.get("caveats"), list) else [],
+        )
+    breakdown = _t_get_category_breakdown({"range": range_token}, profile, conn) or {}
+    categories = breakdown.get("categories") if isinstance(breakdown.get("categories"), list) else []
+    rows = [row for row in categories if isinstance(row, dict)]
+    return _add_contract({
+        "metric": "spending",
+        "range": breakdown.get("range") or range_token,
+        "start": breakdown.get("start"),
+        "end": breakdown.get("end"),
+        "components": rows[:10],
+        "summary": "Spending explanation from category contribution breakdown.",
+        "provenance": _semantic_provenance(
+            tool="explain_metric",
+            args={"metric": metric, "range": range_token},
+            label=str(breakdown.get("range") or range_token),
+            start=breakdown.get("start"),
+            end=breakdown.get("end"),
+            row_count=len(rows),
+            filters={"metric": metric},
+        ),
+    }, tool="explain_metric", args={"metric": metric, "range": range_token}, label=str(breakdown.get("range") or range_token), start=breakdown.get("start"), end=breakdown.get("end"), row_count=len(rows), filters={"metric": metric})
+
+
+def _t_get_recurring_changes(args: dict, profile: str | None, conn) -> Any:
+    summary = _t_get_recurring_summary({"limit": args.get("limit") or 25}, profile, conn) or {}
+    items = summary.get("items") if isinstance(summary.get("items"), list) else []
+    changed = [
+        item for item in items
+        if str(item.get("subscription_status") or item.get("state") or "").lower() in {"active", "cancelled", "inactive", "candidate"}
+    ]
+    return _add_contract({
+        "range": args.get("range") or "recent",
+        "active_count": summary.get("active_count", 0),
+        "inactive_count": summary.get("inactive_count", 0),
+        "cancelled_count": summary.get("cancelled_count", 0),
+        "total_monthly": summary.get("total_monthly", 0),
+        "items": changed[: int(args.get("limit") or 10)],
+        "summary": f"Found {len(changed)} recurring item(s) with current status data.",
+        "provenance": _semantic_provenance(
+            tool="get_recurring_changes",
+            args=args,
+            label=str(args.get("range") or "recent"),
+            row_count=len(changed),
+            filters={"kind": "recurring"},
+        ),
+    }, tool="get_recurring_changes", args=args, label=str(args.get("range") or "recent"), row_count=len(changed), filters={"kind": "recurring"}, caveats=[] if changed else ["No recurring status rows were available for this scope."])
+
+
+def _t_get_cashflow_forecast(args: dict, profile: str | None, conn) -> Any:
+    return cashflow_forecast.get_cashflow_forecast(
+        conn,
+        profile,
+        horizon_days=args.get("horizon_days"),
+        buffer_amount=args.get("buffer_amount"),
+    )
+
+
+def _t_predict_shortfall(args: dict, profile: str | None, conn) -> Any:
+    return cashflow_forecast.predict_shortfall(
+        conn,
+        profile,
+        horizon_days=args.get("horizon_days"),
+        buffer_amount=args.get("buffer_amount"),
+    )
+
+
+def _t_check_affordability(args: dict, profile: str | None, conn) -> Any:
+    return cashflow_forecast.check_affordability(
+        conn,
+        profile,
+        amount=float(args.get("amount") or 0),
+        purpose=str(args.get("purpose") or ""),
+        category=str(args.get("category") or ""),
+        horizon_days=args.get("horizon_days"),
+        buffer_amount=args.get("buffer_amount"),
+        question=str(args.get("question") or ""),
+    )
+
+
+def _t_find_low_confidence_transactions(args: dict, profile: str | None, conn) -> Any:
+    from transaction_enrichment import find_low_confidence
+
+    try:
+        threshold = float(args.get("threshold") or 0.7)
+    except (TypeError, ValueError):
+        threshold = 0.7
+    result = find_low_confidence(
+        conn,
+        profile,
+        threshold=threshold,
+        limit=int(args.get("limit") or 25),
+    )
+    rows = result.get("transactions") if isinstance(result, dict) else []
+    if isinstance(result, dict):
+        return _add_contract(
+            result,
+            tool="find_low_confidence_transactions",
+            args=args,
+            label="current",
+            row_count=int(result.get("count") or 0),
+            sample_transaction_ids=_sample_transaction_ids(rows if isinstance(rows, list) else []),
+            filters={"threshold": threshold, "profile": profile or "household"},
+            caveats=[] if rows else ["No low-confidence enrichment rows matched the requested threshold."],
+        )
+    return result
+
+
+def _t_explain_transaction_enrichment(args: dict, profile: str | None, conn) -> Any:
+    from transaction_enrichment import explain_transaction
+
+    tx_id = str(args.get("transaction_id") or args.get("tx_id") or "").strip()
+    if not tx_id:
+        return {"error": "transaction_id required"}
+    result = explain_transaction(conn, tx_id, profile)
+    if isinstance(result, dict):
+        return _add_contract(
+            result,
+            tool="explain_transaction_enrichment",
+            args=args,
+            label="current",
+            row_count=1 if not result.get("error") else 0,
+            sample_transaction_ids=[tx_id] if tx_id and not result.get("error") else [],
+            filters={"transaction_id": tx_id, "profile": profile or "household"},
+            caveats=[str(result.get("error"))] if result.get("error") else [],
+        )
+    return result
+
+
+def _t_get_enrichment_quality_summary(args: dict, profile: str | None, conn) -> Any:
+    from transaction_enrichment import quality_summary, taxonomy_snapshot
+
+    summary = quality_summary(conn, profile)
+    if args.get("include_taxonomy"):
+        summary["taxonomy"] = taxonomy_snapshot()
+    missing = int(summary.get("transaction_count") or 0) - int(summary.get("persisted_enrichment_count") or 0)
+    caveats = []
+    if missing > 0:
+        caveats.append(f"{missing} transaction(s) do not have persisted enrichment yet.")
+    return _add_contract(
+        summary,
+        tool="get_enrichment_quality_summary",
+        args=args,
+        label="current",
+        row_count=int(summary.get("transaction_count") or 0),
+        filters={"profile": profile or "household"},
+        caveats=caveats,
+    )
+
+
 def _t_get_net_worth_delta(args: dict, profile: str | None, conn) -> Any:
     """Month-over-month net worth deltas (same numbers the dashboard shows)."""
-    return get_net_worth_delta_metrics(profile=profile, conn=conn) or {}
+    result = get_net_worth_delta_metrics(profile=profile, conn=conn) or {}
+    return _add_contract(result, tool="get_net_worth_delta", args=args, label="dashboard", filters={"profile": profile or "household"})
 
 
 def _t_get_recurring_summary(args: dict, profile: str | None, conn) -> Any:
@@ -376,14 +913,15 @@ def _t_get_recurring_summary(args: dict, profile: str | None, conn) -> Any:
     status_filter = args.get("status")
     if status_filter:
         items = [i for i in items if (i.get("subscription_status") or "").lower() == status_filter.lower()]
-    return {
+    rows = items[: int(args.get("limit") or 25)]
+    return _add_contract({
         "active_count": data.get("active_count", 0),
         "inactive_count": data.get("inactive_count", 0),
         "cancelled_count": data.get("cancelled_count", 0),
         "total_monthly": data.get("total_monthly", 0),
         "total_annual": data.get("total_annual", 0),
-        "items": items[: int(args.get("limit") or 25)],
-    }
+        "items": rows,
+    }, tool="get_recurring_summary", args=args, label="current", row_count=len(items), filters={"status": status_filter} if status_filter else {}, caveats=[] if items else ["No recurring obligations are configured or detected for this scope."])
 
 
 def _t_get_net_worth_trend(args: dict, profile: str | None, conn) -> Any:
@@ -399,7 +937,16 @@ def _t_get_net_worth_trend(args: dict, profile: str | None, conn) -> Any:
         label = "all"
 
     limit = int(args.get("limit") or 24)
-    return {"interval": interval, "range": label, "series": series[-limit:]}
+    limited = series[-limit:]
+    return _add_contract(
+        {"interval": interval, "range": label, "series": limited},
+        tool="get_net_worth_trend",
+        args=args,
+        label=label,
+        row_count=len(limited),
+        filters={"interval": interval, "profile": profile or "household"},
+        caveats=[] if limited else ["No net worth history points were available for this scope."],
+    )
 
 
 def _t_get_monthly_spending_trend(args: dict, profile: str | None, conn) -> Any:
@@ -453,7 +1000,7 @@ def _t_get_monthly_spending_trend(args: dict, profile: str | None, conn) -> Any:
     ).fetchall()
     by_month = {r["month"]: _fmt_money(r["total"]) for r in rows}
     series = [{"month": m, "total": by_month.get(m, 0.0)} for m in month_keys]
-    return {
+    return _add_contract({
         "category": category or None,
         "months": months,
         "start": start_date,
@@ -461,20 +1008,89 @@ def _t_get_monthly_spending_trend(args: dict, profile: str | None, conn) -> Any:
         "series": series,
         "labels": [s["month"] for s in series],
         "values": [s["total"] for s in series],
-    }
+    }, tool="get_monthly_spending_trend", args=args, label=f"last_{months}_months", start=start_date, end=end_date, row_count=len(series), filters={"category": category} if category else {}, caveats=[] if any(s["total"] for s in series) else ["No matching spending rows were found for the trend period."])
 
 
 def _t_get_transactions_for_merchant(args: dict, profile: str | None, conn) -> Any:
+    from merchant_identity import canonicalize_merchant_key
+
     merchant = (args.get("merchant") or "").strip()
     if not merchant:
         return {"error": "merchant required"}
-    limit = int(args.get("limit") or 25)
-    rows = get_transactions_for_merchant(merchant=merchant, profile=profile, limit=limit, conn=conn) or []
-    return {"merchant": merchant, "transactions": rows}
+    limit = max(1, min(int(args.get("limit") or 25), 100))
+    offset = max(0, int(args.get("offset") or 0))
+    month, start, end, label = _range_to_kwargs(args) if (args.get("range") or args.get("month")) else (None, None, None, "all")
+    merchant_key = canonicalize_merchant_key(merchant) or merchant.upper()
+    search = f"%{merchant.upper()}%"
+    where = [
+        """(
+            UPPER(COALESCE(merchant_key, '')) = ?
+            OR UPPER(COALESCE(merchant_name, '')) LIKE ?
+            OR UPPER(COALESCE(description, '')) LIKE ?
+            OR UPPER(COALESCE(raw_description, '')) LIKE ?
+        )""",
+    ]
+    params: list[Any] = [merchant_key, search, search, search]
+    if profile and profile != "household":
+        where.append("profile_id = ?")
+        params.append(profile)
+    if month:
+        where.append("date LIKE ?")
+        params.append(month + "%")
+    else:
+        if start:
+            where.append("date >= ?")
+            params.append(start)
+        if end:
+            where.append("date <= ?")
+            params.append(end)
+    where_sql = " AND ".join(where)
+    total = int(conn.execute(f"SELECT COUNT(*) FROM transactions_visible WHERE {where_sql}", params).fetchone()[0] or 0)
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT id as original_id, profile_id as profile, date, description, raw_description,
+                   amount, category, original_category, categorization_source, confidence,
+                   transaction_type as type, account_name, account_type, merchant_name, merchant_key,
+                   enriched, is_excluded, expense_type
+            FROM transactions_visible
+            WHERE {where_sql}
+            ORDER BY date DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+    ]
+    for tx in rows:
+        tx["enriched"] = bool(tx.get("enriched", 0))
+        tx["is_excluded"] = bool(tx.get("is_excluded", 0))
+    return _add_contract(
+        {
+            "merchant": merchant,
+            "range": label,
+            "start": start,
+            "end": end,
+            "transactions": rows,
+            "row_count": total,
+            "total_count": total,
+            "limit": limit,
+            "offset": offset,
+        },
+        tool="get_transactions_for_merchant",
+        args=args,
+        label=label,
+        start=start,
+        end=end,
+        row_count=total,
+        sample_transaction_ids=_sample_transaction_ids(rows),
+        filters={"merchant": merchant, "profile": profile or "household", "limit": limit, "offset": offset},
+    )
 
 
 def _t_get_summary(args: dict, profile: str | None, conn) -> Any:
-    return get_summary_data(profile=profile, conn=conn) or {}
+    result = get_summary_data(profile=profile, conn=conn) or {}
+    return _add_contract(result, tool="get_summary", args=args, label="dashboard", filters={"profile": profile or "household"})
 
 
 def _t_get_account_balances(args: dict, profile: str | None, conn) -> Any:
@@ -549,11 +1165,126 @@ def _t_search_saved_insights(args: dict, profile: str | None, conn) -> Any:
     return {"insights": [dict(r) for r in rows]}
 
 
+def _t_remember_user_context(args: dict, profile: str | None, conn) -> Any:
+    from mira import memory_v2
+
+    text = str(args.get("text") or args.get("original_text") or "").strip()
+    if not text:
+        return {"saved": False, "reason": "text is required"}
+    return memory_v2.remember_user_context(
+        conn=conn,
+        profile=profile,
+        text=text,
+        memory_type=args.get("memory_type"),
+        topic=args.get("topic"),
+        source_summary=str(args.get("source_summary") or ""),
+        source_conversation_id=args.get("source_conversation_id"),
+        source_turn_id=args.get("source_turn_id"),
+        pinned=bool(args.get("pinned", False)),
+        expires_at=args.get("expires_at"),
+    )
+
+
+def _t_retrieve_relevant_memories(args: dict, profile: str | None, conn) -> Any:
+    from mira import memory_v2
+
+    return memory_v2.retrieve_relevant_memories(
+        conn=conn,
+        profile=profile,
+        question=str(args.get("question") or args.get("query") or ""),
+        route=args.get("route") if isinstance(args.get("route"), dict) else None,
+        limit=int(args.get("limit") or 5),
+        include_expired=bool(args.get("include_expired", False)),
+        force=bool(args.get("force", False)),
+    )
+
+
+def _t_update_memory(args: dict, profile: str | None, conn) -> Any:
+    from mira import memory_v2
+
+    memory_id = args.get("id") or args.get("memory_id")
+    if memory_id is None:
+        text = str(args.get("text") or args.get("original") or "").strip()
+        candidate = memory_v2.extract_memory_candidate(text)
+        topic = args.get("topic") or (candidate or {}).get("topic") or text
+        matches = memory_v2.retrieve_relevant_memories(
+            conn=conn,
+            profile=profile,
+            question=str(topic),
+            limit=1,
+            force=True,
+        ).get("memories") or []
+        if not matches:
+            return {"updated": False, "reason": "No matching active memory found."}
+        memory_id = matches[0]["id"]
+        if candidate and not args.get("normalized_text"):
+            args = {
+                **args,
+                "normalized_text": candidate["normalized_text"],
+                "memory_type": candidate["memory_type"],
+                "topic": candidate["topic"],
+                "sensitivity": candidate["sensitivity"],
+                "confidence": candidate["confidence"],
+            }
+    try:
+        updated = memory_v2.update_memory(
+            conn=conn,
+            profile=profile,
+            memory_id=int(memory_id),
+            normalized_text=args.get("normalized_text"),
+            memory_type=args.get("memory_type"),
+            topic=args.get("topic"),
+            sensitivity=args.get("sensitivity"),
+            confidence=args.get("confidence"),
+            pinned=args.get("pinned") if "pinned" in args else None,
+            expires_at=args.get("expires_at") if "expires_at" in args else None,
+            status=args.get("status"),
+            source_turn_id=args.get("source_turn_id"),
+        )
+    except ValueError as exc:
+        return {"updated": False, "reason": str(exc)}
+    if not updated:
+        return {"updated": False, "reason": "No matching active memory found."}
+    return {"updated": True, "memory": updated, "memory_trace": memory_v2.trace_for_memories([updated], allowed=True, reason="memory_update")}
+
+
+def _t_forget_memory(args: dict, profile: str | None, conn) -> Any:
+    from mira import memory_v2
+
+    memory_id = args.get("id") or args.get("memory_id")
+    try:
+        memory_id = int(memory_id) if memory_id is not None else None
+    except (TypeError, ValueError):
+        memory_id = None
+    return memory_v2.forget_memory(
+        conn=conn,
+        profile=profile,
+        memory_id=memory_id,
+        topic=args.get("topic"),
+        text=args.get("text"),
+        source_turn_id=args.get("source_turn_id"),
+    )
+
+
+def _t_list_mira_memories(args: dict, profile: str | None, conn) -> Any:
+    from mira import memory_v2
+
+    items = memory_v2.list_memories(
+        conn,
+        profile,
+        include_inactive=bool(args.get("include_inactive", False)),
+        include_expired=bool(args.get("include_expired", False)),
+        memory_type=args.get("memory_type"),
+        limit=int(args.get("limit") or 100),
+    )
+    return {"items": items, "count": len(items), "memory_trace": memory_v2.trace_for_memories(items, allowed=True, reason="explicit_memory_request")}
+
+
 def _t_preview_bulk_recategorize(args: dict, profile: str | None, conn) -> Any:
     """Preview moving all transactions for a merchant to a new category.
     Returns a write-preview payload with confirmation_id; user must confirm."""
     from data_manager import bulk_recategorize_preview
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     merchant = (args.get("merchant") or "").strip()
     category = (args.get("category") or "").strip()
@@ -568,13 +1299,19 @@ def _t_preview_bulk_recategorize(args: dict, profile: str | None, conn) -> Any:
             "count": 0,
             "note": f'No transactions found for "{merchant}" that aren\'t already categorized as "{category}".',
         }
-    confirmation_id = store_pending_sql(data["update_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data.get("samples", [])},
+        conn=conn,
+    )
     return {
         "_write_preview": True,
         "operation": "write_preview",
         "summary": f"Move {count} {merchant} transaction(s) to {category}",
         "confirmation_id": confirmation_id,
-        "sql": data["update_sql"],
         "rows_affected": count,
         "samples": data.get("samples", []),
         "preview_changes": [{"column": "category", "raw_value": category, "new_value": category}],
@@ -584,7 +1321,7 @@ def _t_preview_bulk_recategorize(args: dict, profile: str | None, conn) -> Any:
 def _t_preview_create_rule(args: dict, profile: str | None, conn) -> Any:
     """Preview creating a category rule (pattern → category)."""
     from data_manager import preview_rule_creation
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     pattern = (args.get("pattern") or "").strip()
     category = (args.get("category") or "").strip()
@@ -593,7 +1330,14 @@ def _t_preview_create_rule(args: dict, profile: str | None, conn) -> Any:
 
     data = preview_rule_creation(pattern, category, profile, conn)
     count = data.get("count", 0)
-    confirmation_id = store_pending_sql(data["insert_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data.get("samples", [])},
+        conn=conn,
+    )
     existing = data.get("existing_rule")
     return {
         "_write_preview": True,
@@ -604,7 +1348,6 @@ def _t_preview_create_rule(args: dict, profile: str | None, conn) -> Any:
             + (f". Replaces existing rule → {existing['category']}." if existing else "")
         ),
         "confirmation_id": confirmation_id,
-        "sql": data["insert_sql"],
         "rows_affected": count,
         "samples": data.get("samples", []),
         "existing_rule": existing,
@@ -615,7 +1358,7 @@ def _t_preview_create_rule(args: dict, profile: str | None, conn) -> Any:
 def _t_preview_rename_merchant(args: dict, profile: str | None, conn) -> Any:
     """Preview renaming a merchant (all its transaction variants)."""
     from data_manager import rename_merchant_variants
-    from copilot import store_pending_sql
+    from pending_operations import store_pending_operation
 
     old_name = (args.get("old_name") or "").strip()
     new_name = (args.get("new_name") or "").strip()
@@ -630,17 +1373,193 @@ def _t_preview_rename_merchant(args: dict, profile: str | None, conn) -> Any:
             "count": 0,
             "note": f'No transactions found matching "{old_name}".',
         }
-    confirmation_id = store_pending_sql(data["update_sql"], profile)
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data.get("samples", [])},
+        conn=conn,
+    )
     return {
         "_write_preview": True,
         "operation": "write_preview",
         "summary": f"Rename {count} transaction(s) from {old_name} to {new_name}",
         "confirmation_id": confirmation_id,
-        "sql": data["update_sql"],
         "rows_affected": count,
         "samples": data.get("samples", []),
         "preview_changes": [{"column": "merchant_name", "raw_value": new_name, "new_value": new_name}],
     }
+
+
+def _store_structured_preview(operation: str, params: dict, profile: str | None, conn) -> Any:
+    from data_manager import preview_general_write_operation
+    from pending_operations import store_pending_operation
+
+    data = preview_general_write_operation(operation, params, profile, conn)
+    count = int(data.get("count") or 0)
+    if count <= 0:
+        return {
+            "operation": "read",
+            "count": 0,
+            "note": data.get("summary") or "No matching records found for that change.",
+            "needs_confirmation": False,
+        }
+    pending = data["pending_operation"]
+    confirmation_id = store_pending_operation(
+        pending["operation"],
+        pending["params"],
+        profile,
+        {"rows_affected": count, "samples": data.get("samples", []), "preview_changes": data.get("preview_changes", [])},
+        conn=conn,
+    )
+    return {
+        "_write_preview": True,
+        "operation": "write_preview",
+        "summary": data.get("summary") or f"Preview {operation}",
+        "confirmation_id": confirmation_id,
+        "rows_affected": count,
+        "samples": data.get("samples", []),
+        "preview_changes": data.get("preview_changes", []),
+    }
+
+
+def _t_preview_set_budget(args: dict, profile: str | None, conn) -> Any:
+    category = (args.get("category") or "").strip()
+    if not category:
+        return {"error": "category is required"}
+    params = {
+        "category": category,
+        "amount": args.get("amount"),
+        "rollover_mode": args.get("rollover_mode"),
+        "rollover_balance": args.get("rollover_balance"),
+    }
+    return _store_structured_preview("set_budget", params, profile, conn)
+
+
+def _t_preview_create_goal(args: dict, profile: str | None, conn) -> Any:
+    name = (args.get("name") or args.get("goal_name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    params = {
+        "name": name,
+        "goal_type": (args.get("goal_type") or "custom").strip() or "custom",
+        "target_amount": args.get("target_amount") or 0,
+        "current_amount": args.get("current_amount") or 0,
+        "target_date": args.get("target_date"),
+        "linked_category": args.get("linked_category"),
+        "linked_account_id": args.get("linked_account_id"),
+    }
+    return _store_structured_preview("create_goal", params, profile, conn)
+
+
+def _t_preview_update_goal_target(args: dict, profile: str | None, conn) -> Any:
+    params = {
+        "goal_id": args.get("goal_id"),
+        "name": args.get("name") or args.get("goal_name"),
+        "target_amount": args.get("target_amount"),
+        "current_amount": args.get("current_amount"),
+        "target_date": args.get("target_date"),
+    }
+    return _store_structured_preview("update_goal_target", params, profile, conn)
+
+
+def _t_preview_mark_goal_funded(args: dict, profile: str | None, conn) -> Any:
+    params = {"goal_id": args.get("goal_id"), "name": args.get("name") or args.get("goal_name")}
+    return _store_structured_preview("mark_goal_funded", params, profile, conn)
+
+
+def _t_preview_set_transaction_note(args: dict, profile: str | None, conn) -> Any:
+    tx_id = (args.get("tx_id") or args.get("transaction_id") or "").strip()
+    if not tx_id:
+        return {"error": "transaction_id is required"}
+    return _store_structured_preview(
+        "set_transaction_note",
+        {"tx_id": tx_id, "note": args.get("note") or args.get("notes") or ""},
+        profile,
+        conn,
+    )
+
+
+def _t_preview_set_transaction_tags(args: dict, profile: str | None, conn) -> Any:
+    tx_id = (args.get("tx_id") or args.get("transaction_id") or "").strip()
+    if not tx_id:
+        return {"error": "transaction_id is required"}
+    tags = args.get("tags") if isinstance(args.get("tags"), list) else []
+    return _store_structured_preview("set_transaction_tags", {"tx_id": tx_id, "tags": tags}, profile, conn)
+
+
+def _t_preview_mark_reviewed(args: dict, profile: str | None, conn) -> Any:
+    tx_id = (args.get("tx_id") or args.get("transaction_id") or "").strip()
+    if not tx_id:
+        return {"error": "transaction_id is required"}
+    return _store_structured_preview("mark_reviewed", {"tx_id": tx_id, "reviewed": bool(args.get("reviewed", True))}, profile, conn)
+
+
+def _t_preview_bulk_mark_reviewed(args: dict, profile: str | None, conn) -> Any:
+    filters = {
+        "month": args.get("month"),
+        "category": args.get("category"),
+        "account": args.get("account"),
+        "search": args.get("search"),
+        "reviewed": args.get("current_reviewed"),
+        "start_date": args.get("start_date"),
+        "end_date": args.get("end_date"),
+    }
+    filters = {k: v for k, v in filters.items() if v not in (None, "", [])}
+    return _store_structured_preview(
+        "bulk_mark_reviewed",
+        {"filters": filters, "reviewed": bool(args.get("reviewed", True))},
+        profile,
+        conn,
+    )
+
+
+def _t_preview_update_manual_account_balance(args: dict, profile: str | None, conn) -> Any:
+    params = {
+        "account_id": args.get("account_id"),
+        "account_name": args.get("account_name") or args.get("name"),
+        "balance": args.get("balance"),
+        "notes": args.get("notes"),
+    }
+    return _store_structured_preview("update_manual_account_balance", params, profile, conn)
+
+
+def _t_preview_split_transaction(args: dict, profile: str | None, conn) -> Any:
+    tx_id = (args.get("tx_id") or args.get("transaction_id") or "").strip()
+    if not tx_id:
+        return {"error": "transaction_id is required"}
+    splits = args.get("splits") if isinstance(args.get("splits"), list) else []
+    return _store_structured_preview("split_transaction", {"tx_id": tx_id, "splits": splits}, profile, conn)
+
+
+def _t_preview_recurring_action(args: dict, profile: str | None, conn, operation: str) -> Any:
+    merchant = (args.get("merchant") or args.get("merchant_name") or "").strip()
+    if not merchant:
+        return {"error": "merchant is required"}
+    params = {
+        "merchant": merchant,
+        "pattern": args.get("pattern"),
+        "frequency": args.get("frequency") or args.get("frequency_hint"),
+        "category": args.get("category"),
+    }
+    return _store_structured_preview(operation, params, profile, conn)
+
+
+def _t_preview_confirm_recurring(args: dict, profile: str | None, conn) -> Any:
+    return _t_preview_recurring_action(args, profile, conn, "confirm_recurring_obligation")
+
+
+def _t_preview_dismiss_recurring(args: dict, profile: str | None, conn) -> Any:
+    return _t_preview_recurring_action(args, profile, conn, "dismiss_recurring_obligation")
+
+
+def _t_preview_cancel_recurring(args: dict, profile: str | None, conn) -> Any:
+    return _t_preview_recurring_action(args, profile, conn, "cancel_recurring")
+
+
+def _t_preview_restore_recurring(args: dict, profile: str | None, conn) -> Any:
+    return _t_preview_recurring_action(args, profile, conn, "restore_recurring")
 
 
 def _t_plot_chart(args: dict, profile: str | None, conn) -> Any:
@@ -665,17 +1584,53 @@ def _t_plot_chart(args: dict, profile: str | None, conn) -> Any:
 
     labels = args.get("labels") or []
     values = args.get("values") or []
-    if not isinstance(labels, list) or not isinstance(values, list):
-        return {"error": "labels and values must be arrays"}
-    if len(labels) != len(values):
-        return {"error": f"labels ({len(labels)}) and values ({len(values)}) must have same length"}
+    raw_series = args.get("series") if isinstance(args.get("series"), list) else []
+    if not isinstance(labels, list):
+        return {"error": "labels must be an array"}
     if not labels:
         return {"error": "at least one data point required"}
 
-    try:
-        values = [float(v) for v in values]
-    except (TypeError, ValueError):
-        return {"error": "values must be numeric"}
+    series: list[dict[str, Any]] = []
+    if raw_series:
+        for idx, item in enumerate(raw_series[:4]):
+            if not isinstance(item, dict):
+                return {"error": "series items must be objects"}
+            item_values = item.get("values") or []
+            if not isinstance(item_values, list):
+                return {"error": "series values must be arrays"}
+            if len(item_values) != len(labels):
+                return {"error": f"series {idx + 1} values must match labels length"}
+            try:
+                numeric_values = [float(v) for v in item_values]
+            except (TypeError, ValueError):
+                return {"error": "series values must be numeric"}
+            series.append(
+                {
+                    "name": str(item.get("name") or item.get("series_name") or f"Series {idx + 1}"),
+                    "values": numeric_values,
+                    "color": item.get("color"),
+                }
+            )
+        values = series[0]["values"] if series else []
+    else:
+        if not isinstance(values, list):
+            return {"error": "values must be an array"}
+        if len(labels) != len(values):
+            return {"error": f"labels ({len(labels)}) and values ({len(values)}) must have same length"}
+        try:
+            values = [float(v) for v in values]
+        except (TypeError, ValueError):
+            return {"error": "values must be numeric"}
+
+    annotations = []
+    for item in args.get("annotations") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            value = float(item.get("value"))
+        except (TypeError, ValueError):
+            continue
+        annotations.append({"label": str(item.get("label") or ""), "value": value, "color": item.get("color")})
 
     return {
         "_chart": True,
@@ -684,20 +1639,295 @@ def _t_plot_chart(args: dict, profile: str | None, conn) -> Any:
         "series_name": args.get("series_name") or "",
         "labels": [str(l) for l in labels],
         "values": values,
+        "series": series,
+        "annotations": annotations[:4],
         "unit": args.get("unit") or "currency",  # 'currency' | 'number' | 'percent'
     }
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _safe_count(conn, table_name: str, profile: str | None = None, profile_column: str = "profile_id") -> int | None:
+    if not _table_exists(conn, table_name):
+        return None
+    where = ""
+    params: list[Any] = []
+    if profile and profile != "household":
+        where = f" WHERE {profile_column} = ?"
+        params.append(profile)
+    try:
+        return int(conn.execute(f"SELECT COUNT(*) FROM {table_name}{where}", params).fetchone()[0] or 0)
+    except Exception:
+        return None
+
+
+def _safe_max(conn, table_name: str, column: str, profile: str | None = None, profile_column: str = "profile_id") -> str | None:
+    if not _table_exists(conn, table_name):
+        return None
+    where = ""
+    params: list[Any] = []
+    if profile and profile != "household":
+        where = f" WHERE {profile_column} = ?"
+        params.append(profile)
+    try:
+        value = conn.execute(f"SELECT MAX({column}) FROM {table_name}{where}", params).fetchone()[0]
+        return str(value) if value else None
+    except Exception:
+        return None
+
+
+def _days_old(iso_value: str | None) -> int | None:
+    if not iso_value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso_value)[:19])
+    except ValueError:
+        try:
+            dt = datetime.strptime(str(iso_value)[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    return max(0, (datetime.now().date() - dt.date()).days)
+
+
+def _transaction_anomaly_summary(
+    conn,
+    *,
+    profile: str | None,
+    transaction_count: int | None,
+    visible_transaction_count: int | None,
+) -> dict[str, Any]:
+    if not _table_exists(conn, "transactions_visible"):
+        return {
+            "duplicate_group_count": None,
+            "duplicate_transaction_count": None,
+            "missing_key_field_count": None,
+            "hidden_or_filtered_delta": None,
+            "sample_duplicate_groups": [],
+            "sample_missing_key_transactions": [],
+            "caveats": ["transactions_visible is unavailable; import anomaly checks were skipped."],
+        }
+
+    profile_clause = ""
+    params: list[Any] = []
+    if profile and profile != "household":
+        profile_clause = " AND profile_id = ?"
+        params.append(profile)
+
+    duplicate_group_count = 0
+    duplicate_transaction_count = 0
+    sample_duplicate_groups: list[dict[str, Any]] = []
+    try:
+        duplicate_summary = conn.execute(
+            f"""
+            SELECT COUNT(*) AS duplicate_group_count,
+                   COALESCE(SUM(duplicate_count), 0) AS duplicate_transaction_count
+              FROM (
+                    SELECT COUNT(*) AS duplicate_count
+                      FROM transactions_visible
+                     WHERE 1=1{profile_clause}
+                     GROUP BY profile_id,
+                              date,
+                              COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), NULLIF(description, ''), NULLIF(raw_description, ''), ''),
+                              amount,
+                              COALESCE(category, '')
+                    HAVING COUNT(*) > 1
+              ) duplicate_groups
+            """,
+            params,
+        ).fetchone()
+        duplicate_group_count = int(duplicate_summary["duplicate_group_count"] or 0)
+        duplicate_transaction_count = int(duplicate_summary["duplicate_transaction_count"] or 0)
+        duplicate_rows = conn.execute(
+            f"""
+            SELECT profile_id,
+                   date,
+                   COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), NULLIF(description, ''), NULLIF(raw_description, ''), '') AS identity_key,
+                   amount,
+                   COALESCE(category, '') AS category,
+                   COUNT(*) AS duplicate_count,
+                   GROUP_CONCAT(id) AS transaction_ids
+              FROM transactions_visible
+             WHERE 1=1{profile_clause}
+             GROUP BY profile_id, date, identity_key, amount, category
+            HAVING COUNT(*) > 1
+             ORDER BY duplicate_count DESC, date DESC
+             LIMIT 10
+            """,
+            params,
+        ).fetchall()
+        sample_duplicate_groups = [dict(row) for row in duplicate_rows]
+    except Exception:
+        sample_duplicate_groups = []
+
+    missing_key_field_count = 0
+    sample_missing: list[dict[str, Any]] = []
+    try:
+        missing_rows = conn.execute(
+            f"""
+            SELECT id, profile_id, date, description, raw_description, amount, category, merchant_name, merchant_key
+              FROM transactions_visible
+             WHERE (
+                    date IS NULL OR date = ''
+                 OR amount IS NULL
+                 OR (COALESCE(description, '') = '' AND COALESCE(raw_description, '') = '' AND COALESCE(merchant_name, '') = '' AND COALESCE(merchant_key, '') = '')
+                 OR category IS NULL OR category = ''
+             ){profile_clause}
+             ORDER BY date DESC
+             LIMIT 10
+            """,
+            params,
+        ).fetchall()
+        sample_missing = [dict(row) for row in missing_rows]
+        missing_key_field_count = int(conn.execute(
+            f"""
+            SELECT COUNT(*)
+              FROM transactions_visible
+             WHERE (
+                    date IS NULL OR date = ''
+                 OR amount IS NULL
+                 OR (COALESCE(description, '') = '' AND COALESCE(raw_description, '') = '' AND COALESCE(merchant_name, '') = '' AND COALESCE(merchant_key, '') = '')
+                 OR category IS NULL OR category = ''
+             ){profile_clause}
+            """,
+            params,
+        ).fetchone()[0] or 0)
+    except Exception:
+        sample_missing = []
+
+    hidden_delta = None
+    if transaction_count is not None and visible_transaction_count is not None:
+        hidden_delta = max(0, int(transaction_count or 0) - int(visible_transaction_count or 0))
+
+    caveats: list[str] = []
+    if duplicate_group_count:
+        caveats.append(f"{duplicate_group_count} likely duplicate transaction group(s) were detected.")
+    if missing_key_field_count:
+        caveats.append(f"{missing_key_field_count} visible transaction(s) are missing key fields.")
+    if hidden_delta:
+        caveats.append(f"{hidden_delta} transaction(s) are hidden or filtered out of transactions_visible.")
+
+    return {
+        "duplicate_group_count": duplicate_group_count,
+        "duplicate_transaction_count": duplicate_transaction_count,
+        "missing_key_field_count": missing_key_field_count,
+        "hidden_or_filtered_delta": hidden_delta,
+        "sample_duplicate_groups": sample_duplicate_groups[:5],
+        "sample_missing_key_transactions": sample_missing[:5],
+        "caveats": caveats,
+    }
+
+
+def _t_get_data_health_summary(args: dict, profile: str | None, conn) -> Any:
+    caveats: list[str] = []
+    try:
+        check_row = conn.execute("PRAGMA quick_check(1)").fetchone()
+        integrity_status = str(check_row[0] if check_row else "unknown")
+    except Exception as exc:
+        integrity_status = f"unavailable: {exc}"
+        caveats.append("DB quick_check was unavailable on this connection.")
+    if integrity_status.lower() != "ok":
+        caveats.append(f"DB quick_check reported: {integrity_status}")
+
+    transaction_count = _safe_count(conn, "transactions", profile)
+    visible_transaction_count = _safe_count(conn, "transactions_visible", profile)
+    latest_transaction_date = _safe_max(conn, "transactions_visible", "date", profile)
+    latest_transaction_update = _safe_max(conn, "transactions_visible", "updated_at", profile)
+    latest_days = _days_old(latest_transaction_date)
+    if transaction_count is None:
+        caveats.append("Transactions table is not available.")
+    if visible_transaction_count in (None, 0):
+        caveats.append("No visible transactions were available for this scope.")
+    if latest_days is not None and latest_days > 14:
+        caveats.append(f"Latest visible transaction is {latest_days} day(s) old; sync may be stale.")
+
+    enrichment_total = _safe_count(conn, "transaction_enrichment", profile)
+    coverage_ratio = None
+    if visible_transaction_count and enrichment_total is not None:
+        coverage_ratio = round(enrichment_total / visible_transaction_count, 4)
+        if coverage_ratio < 0.8:
+            caveats.append("Persisted transaction enrichment coverage is below 80%.")
+    elif enrichment_total is None:
+        caveats.append("Transaction enrichment table is missing; enrichment coverage is unavailable.")
+
+    budget_count = _safe_count(conn, "category_budgets", profile)
+    if budget_count in (None, 0):
+        caveats.append("No category budgets are configured for this profile scope.")
+
+    recurring_count = _safe_count(conn, "recurring_obligations", profile)
+    if recurring_count in (None, 0):
+        caveats.append("No recurring obligation data is configured or detected for this profile scope.")
+
+    anomaly_summary = _transaction_anomaly_summary(
+        conn,
+        profile=profile,
+        transaction_count=transaction_count,
+        visible_transaction_count=visible_transaction_count,
+    )
+    caveats.extend(anomaly_summary.get("caveats") or [])
+
+    try:
+        import copilot_cache
+
+        cache_stats = copilot_cache.stats()
+    except Exception:
+        cache_stats = {"available": False}
+
+    result = {
+        "profile_scope": profile or "household",
+        "db_integrity": {"check": "quick_check", "status": integrity_status},
+        "transaction_count": transaction_count or 0,
+        "visible_transaction_count": visible_transaction_count or 0,
+        "sync_freshness": {
+            "latest_transaction_date": latest_transaction_date,
+            "latest_transaction_updated_at": latest_transaction_update,
+            "latest_transaction_days_old": latest_days,
+        },
+        "enrichment_coverage": {
+            "persisted_enrichment_count": enrichment_total or 0,
+            "coverage_ratio": coverage_ratio,
+        },
+        "cache_freshness": cache_stats,
+        "import_anomalies": anomaly_summary,
+        "anomaly_summary": anomaly_summary,
+        "known_caveats": caveats,
+        "summary": "Data health looks usable." if not caveats else "Data health has caveats that can limit Mira answers.",
+    }
+    return _add_contract(
+        result,
+        tool="get_data_health_summary",
+        args=args,
+        label="current",
+        row_count=int(visible_transaction_count or 0),
+        filters={"profile": profile or "household"},
+        caveats=caveats,
+    )
+
+
 def _t_run_sql(args: dict, profile: str | None, conn) -> Any:
-    """Read-only SQL escape hatch. Delegates to copilot's existing validator."""
-    from copilot import _validate_read_sql, _rewrite_transaction_read_sources
+    """Internal read-only SQL escape hatch. Not exposed to normal Mira routing."""
+    from copilot import _validate_read_semantics, _validate_read_sql, _rewrite_transaction_read_sources
 
     query = (args.get("query") or "").strip()
     if not query:
         return {"error": "query required"}
+    question = (args.get("question") or args.get("_question") or "").strip()
+    if not question:
+        return {"error": "SQL rejected: internal SQL requires the original user question for semantic validation."}
 
     rewritten = _rewrite_transaction_read_sources(query)
     ok, err = _validate_read_sql(rewritten)
+    if not ok:
+        return {"error": f"SQL rejected: {err}"}
+    ok, err = _validate_read_semantics(question, rewritten)
     if not ok:
         return {"error": f"SQL rejected: {err}"}
 
@@ -805,12 +2035,15 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "get_transactions_for_merchant": {
         "fn": _t_get_transactions_for_merchant,
-        "description": "Recent transactions for a specific merchant (deep drill-down).",
+        "description": "Recent transactions for a specific merchant (deep drill-down). Honors range/month, profile, limit, and offset.",
         "parameters": {
             "type": "object",
             "properties": {
                 "merchant": {"type": "string"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "month": {"type": "string", "description": "Optional YYYY-MM month filter."},
                 "limit": {"type": "integer", "default": 25},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["merchant"],
         },
@@ -833,6 +2066,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "properties": {
                 "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
                 "category": {"type": "string"},
+                "merchant": {"type": "string", "description": "Merchant name or fragment; treated as transaction search text"},
                 "account": {"type": "string"},
                 "search": {"type": "string", "description": "Substring match on description or merchant name"},
                 "limit": {"type": "integer", "default": 25},
@@ -853,6 +2087,163 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "get_dashboard_bundle": {
         "fn": _t_get_dashboard_bundle,
         "description": "Complete dashboard snapshot (summary + accounts + monthly analytics + category breakdown + net worth series) in one call. Use when you need broad context.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "get_dashboard_snapshot": {
+        "fn": _t_get_dashboard_snapshot,
+        "description": "Semantic dashboard snapshot with compact sections and provenance. Use for broad dashboard-equivalent questions.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "analyze_subject": {
+        "fn": _t_analyze_subject,
+        "description": "Semantic analysis for one grounded merchant or category: total, count, recent rows, trend/budget context where available, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subject_type": {"type": "string", "enum": ["merchant", "category"]},
+                "subject": {"type": "string"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+            },
+            "required": ["subject_type", "subject"],
+        },
+    },
+    "compare_periods": {
+        "fn": _t_compare_periods,
+        "description": "Semantic period comparison for one grounded merchant or category with deterministic totals, delta, row counts, samples, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subject_type": {"type": "string", "enum": ["merchant", "category"]},
+                "subject": {"type": "string"},
+                "range_a": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "range_b": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+            },
+            "required": ["subject_type", "subject"],
+        },
+    },
+    "get_budget_status": {
+        "fn": _t_get_budget_status,
+        "description": "Semantic category budget status: budget, actual spend, remaining amount, recent rows, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+            },
+            "required": ["category"],
+        },
+    },
+    "find_transactions": {
+        "fn": _t_find_transactions,
+        "description": "Semantic transaction finder with merchant/category/range/account/search filters, normalized rows, count, samples, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string"},
+                "category": {"type": "string"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "account": {"type": "string"},
+                "search": {"type": "string"},
+                "limit": {"type": "integer", "default": 25},
+            },
+        },
+    },
+    "explain_metric": {
+        "fn": _t_explain_metric,
+        "description": "Semantic explanation for dashboard metrics such as spending, net worth, budget, or recurring changes with contributing components and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "limit": {"type": "integer", "default": 10},
+            },
+        },
+    },
+    "get_recurring_changes": {
+        "fn": _t_get_recurring_changes,
+        "description": "Semantic recurring/subscription status summary with items, totals, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "limit": {"type": "integer", "default": 10},
+            },
+        },
+    },
+    "get_cashflow_forecast": {
+        "fn": _t_get_cashflow_forecast,
+        "description": "Deterministic cash-flow forecast through the next paycheck or selected horizon, including starting cash, expected income, upcoming recurring obligations, discretionary spend estimate, confidence, caveats, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "horizon_days": {"type": "integer", "description": "Optional forecast horizon in days, 1-90."},
+                "buffer_amount": {"type": "number", "description": "Optional cash buffer threshold."},
+            },
+        },
+    },
+    "predict_shortfall": {
+        "fn": _t_predict_shortfall,
+        "description": "Deterministic shortfall predictor over the cash-flow forecast. Warns when projected cash crosses zero or a buffer and suppresses weak low-confidence buffer warnings.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "horizon_days": {"type": "integer", "description": "Optional forecast horizon in days, 1-90."},
+                "buffer_amount": {"type": "number", "description": "Optional cash buffer threshold."},
+            },
+        },
+    },
+    "check_affordability": {
+        "fn": _t_check_affordability,
+        "description": "Deterministic affordability check for a proposed purchase. Uses cash-flow forecast, upcoming obligations, budget/category pace, Memory V2 goal/constraint context where allowed, buffer, confidence, caveats, and provenance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "purpose": {"type": "string"},
+                "category": {"type": "string"},
+                "horizon_days": {"type": "integer"},
+                "buffer_amount": {"type": "number"},
+                "question": {"type": "string"},
+            },
+            "required": ["amount"],
+        },
+    },
+    "find_low_confidence_transactions": {
+        "fn": _t_find_low_confidence_transactions,
+        "description": "Read-only Transaction Intelligence tool: find transactions with missing or low-confidence semantic enrichment, including confidence fields and evidence.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "threshold": {"type": "number", "default": 0.7},
+                "limit": {"type": "integer", "default": 25},
+            },
+        },
+    },
+    "explain_transaction_enrichment": {
+        "fn": _t_explain_transaction_enrichment,
+        "description": "Read-only Transaction Intelligence tool: explain the semantic enrichment for one transaction_id, including categories, counterparty, confidence, evidence, and corrections.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "transaction_id": {"type": "string"},
+            },
+            "required": ["transaction_id"],
+        },
+    },
+    "get_enrichment_quality_summary": {
+        "fn": _t_get_enrichment_quality_summary,
+        "description": "Read-only Transaction Intelligence tool: summarize persisted enrichment coverage, low-confidence counts, review counts, semantic distribution, and taxonomy version.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "include_taxonomy": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    "get_data_health_summary": {
+        "fn": _t_get_data_health_summary,
+        "description": "Read-only Mira data-health summary: DB quick_check, transaction/visible counts, sync freshness, enrichment coverage, cache freshness, caveats, and profile scope.",
         "parameters": {"type": "object", "properties": {}},
     },
     "get_net_worth_delta": {
@@ -876,6 +2267,81 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "properties": {
                 "keywords": {"type": "string"},
                 "limit": {"type": "integer", "default": 10},
+            },
+        },
+    },
+    "remember_user_context": {
+        "fn": _t_remember_user_context,
+        "description": "Memory V2: save explicit durable user context such as preferences, goals, constraints, stressors, commitments, identity facts, rejected advice, coaching state, or tone preferences. Never use for transaction facts or live finance totals.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "memory_type": {"type": "string"},
+                "topic": {"type": "string"},
+                "source_summary": {"type": "string"},
+                "source_turn_id": {"type": "string"},
+                "pinned": {"type": "boolean", "default": False},
+                "expires_at": {"type": ["string", "null"]},
+            },
+            "required": ["text"],
+        },
+    },
+    "retrieve_relevant_memories": {
+        "fn": _t_retrieve_relevant_memories,
+        "description": "Memory V2: retrieve profile-scoped memories only when the retrieval gate allows memory for coaching, goals, budgeting guidance, or explicit memory inspection. Exact finance queries must return no memories.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "limit": {"type": "integer", "default": 5},
+                "include_expired": {"type": "boolean", "default": False},
+                "force": {"type": "boolean", "default": False},
+            },
+            "required": ["question"],
+        },
+    },
+    "update_memory": {
+        "fn": _t_update_memory,
+        "description": "Memory V2: update a specific memory by id, or update the best matching memory from replacement text.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "integer"},
+                "text": {"type": "string"},
+                "normalized_text": {"type": "string"},
+                "memory_type": {"type": "string"},
+                "topic": {"type": "string"},
+                "sensitivity": {"type": "string", "enum": ["low", "medium", "high"]},
+                "confidence": {"type": "number"},
+                "pinned": {"type": "boolean"},
+                "expires_at": {"type": ["string", "null"]},
+                "status": {"type": "string"},
+            },
+        },
+    },
+    "forget_memory": {
+        "fn": _t_forget_memory,
+        "description": "Memory V2: delete a memory by id or best match. This only affects Mira memory, not transactions or financial data.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "integer"},
+                "topic": {"type": "string"},
+                "text": {"type": "string"},
+            },
+        },
+    },
+    "list_mira_memories": {
+        "fn": _t_list_mira_memories,
+        "description": "Memory V2: list inspectable Mira memories for the active profile, optionally including inactive or expired rows.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "include_inactive": {"type": "boolean", "default": False},
+                "include_expired": {"type": "boolean", "default": False},
+                "memory_type": {"type": "string"},
+                "limit": {"type": "integer", "default": 100},
             },
         },
     },
@@ -915,6 +2381,195 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "required": ["old_name", "new_name"],
         },
     },
+    "preview_set_budget": {
+        "fn": _t_preview_set_budget,
+        "description": "Preview setting or removing a category budget. Use when the user asks to set/update a monthly budget/cap for a category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "amount": {"type": ["number", "null"], "description": "Budget amount. Null or 0 removes the budget."},
+                "rollover_mode": {"type": "string", "enum": ["none", "surplus", "deficit", "both"]},
+                "rollover_balance": {"type": "number"},
+            },
+            "required": ["category", "amount"],
+        },
+    },
+    "preview_create_goal": {
+        "fn": _t_preview_create_goal,
+        "description": "Preview creating a savings/planning goal.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "goal_type": {"type": "string"},
+                "target_amount": {"type": "number"},
+                "current_amount": {"type": "number"},
+                "target_date": {"type": "string"},
+                "linked_category": {"type": "string"},
+                "linked_account_id": {"type": "string"},
+            },
+            "required": ["name", "target_amount"],
+        },
+    },
+    "preview_update_goal_target": {
+        "fn": _t_preview_update_goal_target,
+        "description": "Preview updating an existing goal's target amount, current progress, or target date.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "integer"},
+                "name": {"type": "string"},
+                "target_amount": {"type": "number"},
+                "current_amount": {"type": "number"},
+                "target_date": {"type": "string"},
+            },
+            "required": ["target_amount"],
+        },
+    },
+    "preview_mark_goal_funded": {
+        "fn": _t_preview_mark_goal_funded,
+        "description": "Preview marking an existing goal as fully funded.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "integer"},
+                "name": {"type": "string"},
+            },
+        },
+    },
+    "preview_set_transaction_note": {
+        "fn": _t_preview_set_transaction_note,
+        "description": "Preview setting the note on a specific transaction by transaction_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "transaction_id": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["transaction_id", "note"],
+        },
+    },
+    "preview_set_transaction_tags": {
+        "fn": _t_preview_set_transaction_tags,
+        "description": "Preview replacing tags on a specific transaction by transaction_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "transaction_id": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["transaction_id", "tags"],
+        },
+    },
+    "preview_mark_reviewed": {
+        "fn": _t_preview_mark_reviewed,
+        "description": "Preview marking one transaction reviewed or unreviewed by transaction_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "transaction_id": {"type": "string"},
+                "reviewed": {"type": "boolean", "default": True},
+            },
+            "required": ["transaction_id"],
+        },
+    },
+    "preview_bulk_mark_reviewed": {
+        "fn": _t_preview_bulk_mark_reviewed,
+        "description": "Preview marking a filtered set of transactions reviewed or unreviewed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "YYYY-MM month filter"},
+                "category": {"type": "string"},
+                "account": {"type": "string"},
+                "search": {"type": "string"},
+                "current_reviewed": {"type": "boolean", "description": "Only match transactions currently in this reviewed state."},
+                "reviewed": {"type": "boolean", "default": True, "description": "Target reviewed state."},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+            },
+        },
+    },
+    "preview_update_manual_account_balance": {
+        "fn": _t_preview_update_manual_account_balance,
+        "description": "Preview updating a manual account balance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string"},
+                "account_name": {"type": "string"},
+                "balance": {"type": "number"},
+                "notes": {"type": "string"},
+            },
+            "required": ["balance"],
+        },
+    },
+    "preview_split_transaction": {
+        "fn": _t_preview_split_transaction,
+        "description": "Preview replacing a transaction's category splits. Split amounts must add up to the transaction amount.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "transaction_id": {"type": "string"},
+                "splits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string"},
+                            "amount": {"type": "number"},
+                            "notes": {"type": "string"},
+                            "tags": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["category", "amount"],
+                    },
+                },
+            },
+            "required": ["transaction_id", "splits"],
+        },
+    },
+    "preview_confirm_recurring_obligation": {
+        "fn": _t_preview_confirm_recurring,
+        "description": "Preview confirming a merchant as a recurring charge/subscription.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string"},
+                "pattern": {"type": "string"},
+                "frequency": {"type": "string"},
+                "category": {"type": "string"},
+            },
+            "required": ["merchant"],
+        },
+    },
+    "preview_dismiss_recurring_obligation": {
+        "fn": _t_preview_dismiss_recurring,
+        "description": "Preview dismissing a recurring-charge detection as not recurring.",
+        "parameters": {
+            "type": "object",
+            "properties": {"merchant": {"type": "string"}, "pattern": {"type": "string"}},
+            "required": ["merchant"],
+        },
+    },
+    "preview_cancel_recurring": {
+        "fn": _t_preview_cancel_recurring,
+        "description": "Preview marking a recurring charge/subscription as cancelled.",
+        "parameters": {
+            "type": "object",
+            "properties": {"merchant": {"type": "string"}},
+            "required": ["merchant"],
+        },
+    },
+    "preview_restore_recurring": {
+        "fn": _t_preview_restore_recurring,
+        "description": "Preview restoring a dismissed or cancelled recurring charge/subscription.",
+        "parameters": {
+            "type": "object",
+            "properties": {"merchant": {"type": "string"}},
+            "required": ["merchant"],
+        },
+    },
     "plot_chart": {
         "fn": _t_plot_chart,
         "description": "Render a chart inline in the chat. Call this AFTER fetching the underlying numbers with another tool. Use 'line' for trends over time (net worth, monthly spending), 'bar' for comparisons (top merchants, category totals), 'donut' for composition (category share of month).",
@@ -925,42 +2580,65 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
                 "title": {"type": "string"},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "X-axis labels (months, merchants, categories, etc.)"},
                 "values": {"type": "array", "items": {"type": "number"}, "description": "Numeric values matching labels by index"},
+                "series": {
+                    "type": "array",
+                    "description": "Optional multi-series data. Each series values array must match labels.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "values": {"type": "array", "items": {"type": "number"}},
+                            "color": {"type": "string"},
+                        },
+                        "required": ["name", "values"],
+                    },
+                },
+                "annotations": {
+                    "type": "array",
+                    "description": "Optional horizontal threshold/target lines.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "number"},
+                            "color": {"type": "string"},
+                        },
+                        "required": ["value"],
+                    },
+                },
                 "series_name": {"type": "string", "description": "Name of the data series (e.g. 'Spending', 'Net worth')"},
                 "unit": {"type": "string", "enum": ["currency", "number", "percent"], "description": "How values should be formatted. Default 'currency'."},
             },
-            "required": ["type", "labels", "values"],
+            "required": ["type", "labels"],
         },
     },
     "run_sql": {
         "fn": _t_run_sql,
-        "description": "Escape hatch: run a read-only SELECT against SQLite. Use only when no other tool fits. Tables: transactions_visible, accounts, categories, category_rules, merchants, net_worth_history, saved_insights.",
+        "description": "Internal/debug only: run a semantically validated read-only SELECT against SQLite.",
         "parameters": {
             "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
+            "properties": {"query": {"type": "string"}, "question": {"type": "string"}},
+            "required": ["query", "question"],
         },
     },
 }
 
 
-def _selected_tool_items(names: list[str] | tuple[str, ...] | set[str] | None = None):
+def _selected_tool_items(names: list[str] | tuple[str, ...] | set[str] | None = None, *, include_internal: bool = False):
     if not names:
-        return TOOL_REGISTRY.items()
+        return [(name, spec) for name, spec in TOOL_REGISTRY.items() if include_internal or name not in INTERNAL_TOOL_NAMES]
     wanted = set(names)
-    return [(name, spec) for name, spec in TOOL_REGISTRY.items() if name in wanted]
-
-
-def tools_for_anthropic(names: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict]:
     return [
-        {"name": name, "description": spec["description"], "input_schema": spec["parameters"]}
-        for name, spec in _selected_tool_items(names)
+        (name, spec)
+        for name, spec in TOOL_REGISTRY.items()
+        if name in wanted and (include_internal or name not in INTERNAL_TOOL_NAMES)
     ]
 
 
-def tools_for_ollama(names: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict]:
+def tools_for_ollama(names: list[str] | tuple[str, ...] | set[str] | None = None, *, include_internal: bool = False) -> list[dict]:
     return [
         {"type": "function", "function": {"name": name, "description": spec["description"], "parameters": spec["parameters"]}}
-        for name, spec in _selected_tool_items(names)
+        for name, spec in _selected_tool_items(names, include_internal=include_internal)
     ]
 
 
@@ -973,19 +2651,27 @@ def execute_tool(name: str, args: dict, profile: str | None, cache: dict | None 
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    def _execute_uncached():
-        try:
-            with get_db() as conn:
-                return spec["fn"](args or {}, profile, conn)
-        except Exception as e:
-            logger.exception("tool %s failed", name)
-            return {"error": f"tool execution failed: {e}"}
-
     try:
-        import copilot_cache
-        result = copilot_cache.get_hot_tool_result(name, args or {}, profile, _execute_uncached)
-    except Exception:
-        result = _execute_uncached()
+        try:
+            import copilot_cache
+        except Exception:
+            copilot_cache = None
+
+        with get_db() as conn:
+            if copilot_cache is not None and name in copilot_cache.HOT_TOOL_NAMES:
+                fingerprint = copilot_cache.db_fingerprint(conn, profile)
+                result = copilot_cache.get_hot_tool_result(
+                    name,
+                    args or {},
+                    profile,
+                    lambda: spec["fn"](args or {}, profile, conn),
+                    fingerprint=fingerprint,
+                )
+            else:
+                result = spec["fn"](args or {}, profile, conn)
+    except Exception as e:
+        logger.exception("tool %s failed", name)
+        result = {"error": f"tool execution failed: {e}"}
 
     if cache is not None:
         cache[cache_key] = result

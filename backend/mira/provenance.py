@@ -6,14 +6,20 @@ import json
 import time
 from typing import Any
 
+from mira import metric_registry
+
 
 LEDGER_ACTIONS = {
     "SpendTotal",
     "TransactionSearch",
     "CompareSpend",
     "BudgetStatus",
+    "CashFlowForecast",
+    "Affordability",
     "MonthlyTrend",
     "NetWorthTrend",
+    "TransactionEnrichment",
+    "OverviewSummary",
 }
 _LEDGER_TTL_SECONDS = 30 * 60
 _LEDGER_BY_ID: dict[str, dict[str, Any]] = {}
@@ -42,11 +48,15 @@ def record_completed_action(
     tool_calls = []
     all_ranges: list[dict[str, Any]] = []
     all_samples: list[str] = []
+    metric_ids: list[str] = []
     total_rows = 0
     for call in trace:
         result = _result_for_call(call, cache or {}, profile)
         tool_record = _tool_record(call, result, action_name)
         tool_calls.append(tool_record)
+        for metric_id in tool_record.get("metric_ids") or []:
+            if metric_id and metric_id not in metric_ids:
+                metric_ids.append(metric_id)
         total_rows += int(tool_record.get("row_count") or 0)
         for item in tool_record.get("sample_transaction_ids") or []:
             if item not in all_samples:
@@ -63,6 +73,10 @@ def record_completed_action(
         "question": str(question or ""),
         "answer": str(answer or ""),
         "action": action_name,
+        "metric_id": metric_ids[0] if metric_ids else None,
+        "metric_ids": metric_ids,
+        "metric_definition": metric_registry.metric_payload(metric_ids[0]) if metric_ids else None,
+        "metric_definition_summary": metric_registry.metric_summary(metric_ids[0]) if metric_ids else "",
         "grounded_entities": copy.deepcopy(action.get("grounded_entities") or []),
         "validated_slots": copy.deepcopy(action.get("validated_slots") or {}),
         "date_ranges": all_ranges,
@@ -109,6 +123,10 @@ def public_entry(entry: dict[str, Any] | None) -> dict[str, Any] | None:
         "version": entry.get("version") or 1,
         "id": entry.get("id"),
         "action": entry.get("action"),
+        "metric_id": entry.get("metric_id"),
+        "metric_ids": copy.deepcopy(entry.get("metric_ids") or []),
+        "metric_definition": copy.deepcopy(entry.get("metric_definition")),
+        "metric_definition_summary": entry.get("metric_definition_summary") or "",
         "grounded_entities": copy.deepcopy(entry.get("grounded_entities") or []),
         "validated_slots": copy.deepcopy(entry.get("validated_slots") or {}),
         "date_ranges": copy.deepcopy(entry.get("date_ranges") or []),
@@ -136,6 +154,10 @@ def explain_last_answer(profile: str | None, context: dict[str, Any] | None = No
     if not entry:
         return None
     action = entry.get("action") or "finance action"
+    metric_label = ""
+    metric = entry.get("metric_definition") if isinstance(entry.get("metric_definition"), dict) else {}
+    if metric:
+        metric_label = f" Metric: {metric.get('label')} ({metric.get('metric_id')}). Definition: {entry.get('metric_definition_summary')}"
     tools = entry.get("tool_calls") or []
     tool_bits = []
     for tool in tools[:4]:
@@ -148,6 +170,8 @@ def explain_last_answer(profile: str | None, context: dict[str, Any] | None = No
     ranges = _range_summary(entry.get("date_ranges") or [])
     basis = entry.get("calculation_basis") or "The answer was computed from Folio tool results."
     parts = [f"I used the provenance ledger for the last finance answer: {action}."]
+    if metric_label:
+        parts.append(metric_label)
     if grounding:
         parts.append(f"Grounding: {grounding}.")
     if ranges:
@@ -185,10 +209,15 @@ def _tool_record(call: dict[str, Any], result: dict[str, Any], action_name: str)
     samples = _sample_transaction_ids(result)
     if semantic.get("sample_transaction_ids"):
         samples = list(semantic.get("sample_transaction_ids") or [])[:5]
+    metric_ids = list(semantic.get("metric_ids") or result.get("metric_ids") or metric_registry.metric_ids_for_tool(name, args))
+    metric_id = semantic.get("metric_id") or result.get("metric_id") or (metric_ids[0] if metric_ids else None)
     return {
         "name": name,
         "args": args,
         "duration_ms": call.get("duration_ms"),
+        "metric_id": metric_id,
+        "metric_ids": metric_ids,
+        "metric_definition_summary": semantic.get("metric_definition_summary") or result.get("metric_definition_summary") or metric_registry.metric_summary(metric_id),
         "date_range": {
             "range": semantic.get("range"),
             "start": semantic.get("start"),
@@ -197,7 +226,9 @@ def _tool_record(call: dict[str, Any], result: dict[str, Any], action_name: str)
         "filters": copy.deepcopy(semantic.get("filters") or {}) if semantic else _filters(args),
         "row_count": int(semantic.get("row_count") or 0) if semantic else _row_count(name, result),
         "sample_transaction_ids": samples,
-        "calculation_basis": semantic.get("calculation_basis") or _tool_calculation_basis(name, action_name),
+        "calculation_basis": semantic.get("calculation_basis") or result.get("calculation_basis") or _tool_calculation_basis(name, action_name),
+        "data_quality": copy.deepcopy(semantic.get("data_quality") or result.get("data_quality") or {}),
+        "caveats": copy.deepcopy(semantic.get("caveats") or result.get("caveats") or []),
     }
 
 
@@ -283,6 +314,12 @@ def _tool_calculation_basis(name: str, action_name: str) -> str:
         return "Semantic budget status from category budget settings plus deterministic category spend."
     if name in {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes"}:
         return "Dashboard-level semantic tool result with compact provenance embedded in the tool payload."
+    if name == "find_low_confidence_transactions":
+        return "Transaction Intelligence enrichment confidence scan over persisted and transient deterministic enrichment rows."
+    if name == "explain_transaction_enrichment":
+        return "Transaction Intelligence explanation from deterministic enrichment, persisted corrections, and per-attribute confidence."
+    if name == "get_enrichment_quality_summary":
+        return "Transaction Intelligence coverage and quality summary over the additive enrichment table."
     if name == "get_monthly_spending_trend":
         return "Monthly spending totals grouped by month, excluding transfer and income categories, with an optional category filter."
     if name == "get_net_worth_trend":
@@ -305,6 +342,10 @@ def _action_calculation_basis(action_name: str, action: dict[str, Any], tool_cal
         return "The answer summarizes the monthly spending series returned by the trend tool."
     if action_name == "NetWorthTrend":
         return "The answer summarizes the net worth series returned by the net worth trend tool."
+    if action_name == "TransactionEnrichment":
+        return "The answer uses read-only Transaction Intelligence tools and does not change transaction facts or user categories."
+    if action_name == "OverviewSummary":
+        return "The answer uses read-only dashboard, metric, recurring, or data-health semantic tools."
     return "The answer was computed from Folio tool results."
 
 

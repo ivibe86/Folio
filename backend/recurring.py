@@ -999,7 +999,10 @@ def _generate_subscription_events(
             })
             continue
 
+        curr_status = item.get("status")
         if prev is None or not prev.get("is_subscription"):
+            if curr_status == "inactive":
+                continue
             # New subscription detected
             events.append({
                 "event_type": "new_detected",
@@ -1044,7 +1047,6 @@ def _generate_subscription_events(
 
             # Check for status change: was active, now inactive
             prev_status = prev.get("subscription_status")
-            curr_status = item.get("status")
             if prev_status == "active" and curr_status == "inactive":
                 events.append({
                     "event_type": "gone_inactive",

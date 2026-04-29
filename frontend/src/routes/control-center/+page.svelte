@@ -106,7 +106,7 @@
         manualSyncEnabled: true,
         demoPersistence: 'persistent',
         localLlmEnabled: false,
-        localLlmProvider: 'anthropic',
+        localLlmProvider: 'ollama',
         memoryTier: '16gb',
         localAiProfile: 'balanced',
         lowPowerMode: false,
@@ -122,7 +122,7 @@
         expertModeAvailable: true,
     };
     let localLlmStatus = {
-        provider: 'anthropic',
+        provider: 'ollama',
         ollamaReachable: false,
         memoryTier: '16gb',
         memoryLabel: '16 GB',
@@ -141,7 +141,7 @@
     let localLlmInstallingModel = '';
     let localLlmError = '';
     let localLlmForm = {
-        llm_provider: 'anthropic',
+        llm_provider: 'ollama',
         preset: 'balanced',
         categorize_model: '',
         copilot_model: '',
@@ -257,7 +257,7 @@
     $: visibleHistory = historyItems.filter((item) => {
         if (!historySearch.trim()) return true;
         const needle = historySearch.trim().toLowerCase();
-        return [item.user_message, item.assistant_response, item.operation_type, item.generated_sql]
+        return [item.user_message, item.assistant_response, item.operation_type, item.generated_sql, item.query_result]
             .filter(Boolean)
             .some((value) => String(value).toLowerCase().includes(needle));
     });
@@ -490,7 +490,7 @@
     function syncLocalLlmForm(status) {
         if (!status) return;
         localLlmForm = {
-            llm_provider: status.provider || 'anthropic',
+            llm_provider: 'ollama',
             preset: status.preset || 'balanced',
             categorize_model: status.selectedCategorizeModel || '',
             copilot_model: status.selectedCopilotModel || '',
@@ -1026,8 +1026,18 @@
                         </div>
                         <div class="cc-local-llm-stat">
                             <span class="cc-insight-label">Credential Storage</span>
-                            <strong>{dataHealth.encryption?.status === 'encrypted' ? 'Encrypted' : 'Plaintext risk'}</strong>
-                            <small>{dataHealth.encryption?.key_present ? 'TOKEN_ENCRYPTION_KEY set' : 'No encryption key'}</small>
+                            <strong>
+                                {dataHealth.encryption?.status === 'encrypted'
+                                    ? 'Encrypted'
+                                    : 'Encryption setup needed'}
+                            </strong>
+                            <small>
+                                {dataHealth.encryption?.status === 'encrypted'
+                                    ? 'TOKEN_ENCRYPTION_KEY active'
+                                    : dataHealth.encryption?.key_present
+                                        ? 'TOKEN_ENCRYPTION_KEY invalid'
+                                        : 'TOKEN_ENCRYPTION_KEY missing'}
+                            </small>
                         </div>
                     </div>
                     {#if dataHealth.warnings?.length}
@@ -1189,7 +1199,7 @@
                     <div class="cc-local-llm-grid">
                         <div class="cc-local-llm-stat">
                             <span class="cc-insight-label">Provider</span>
-                            <strong>{localLlmStatus.provider || 'anthropic'}</strong>
+                            <strong>{localLlmStatus.provider || 'ollama'}</strong>
                             <small>{localLlmStatus.ramGb ? `${localLlmStatus.ramGb} GB detected` : 'RAM auto-detect unavailable'}</small>
                         </div>
                         <div class="cc-local-llm-stat">
@@ -1211,13 +1221,10 @@
 
                     <div class="cc-local-llm-form">
                         <div class="cc-form-grid">
-                            <div class="cc-field">
-                                <span>Provider</span>
-                                <select class="cc-select" bind:value={localLlmForm.llm_provider}>
-                                    <option value="anthropic">Anthropic / cloud</option>
-                                    <option value="ollama">Ollama / local</option>
-                                </select>
-                            </div>
+	                            <div class="cc-field">
+	                                <span>Provider</span>
+	                                <div class="cc-static-field">Ollama / local</div>
+	                            </div>
                             <div class="cc-field">
                                 <span>Preset</span>
                                 <select class="cc-select" bind:value={localLlmForm.preset}>
@@ -2130,10 +2137,10 @@
                 <div class="cc-pane-header">
                     <div class="cc-pane-title">
                         <h3>History</h3>
-                        <p>Recent Copilot reads and writes, with the stored response and generated SQL kept together for auditability.</p>
+                        <p>Recent Mira reads and writes, with the stored response and tool audit details kept together.</p>
                     </div>
                     <div class="cc-toolbar">
-                        <input class="cc-search" bind:value={historySearch} placeholder="Search prompt, response, or SQL…" />
+                        <input class="cc-search" bind:value={historySearch} placeholder="Search prompt, response, or tool details..." />
                         <button class="cc-secondary-btn" type="button" on:click={loadHistory} disabled={historyLoading}>Refresh</button>
                     </div>
                 </div>
@@ -2175,7 +2182,7 @@
             <aside class="cc-pane cc-pane-drawer">
                 <div class="cc-inspector">
                     {#if !selectedHistory}
-                        <div class="cc-empty">Select a history row to inspect its response and generated SQL.</div>
+                        <div class="cc-empty">Select a history row to inspect its response and tool audit details.</div>
                     {:else}
                         <section class="cc-inspector-section">
                             <div>
@@ -2191,8 +2198,8 @@
                                 <textarea class="cc-textarea" rows="5" disabled>{selectedHistory.assistant_response || '—'}</textarea>
                             </div>
                             <div class="cc-field cc-field-full">
-                                <span>Generated SQL</span>
-                                <textarea class="cc-textarea cc-textarea-mono" rows="8" disabled>{selectedHistory.generated_sql || '—'}</textarea>
+                                <span>Tool Audit Details</span>
+                                <textarea class="cc-textarea cc-textarea-mono" rows="8" disabled>{selectedHistory.query_result || selectedHistory.generated_sql || '—'}</textarea>
                             </div>
                             <div class="cc-actions">
                                 <button class="cc-secondary-btn" type="button" on:click={reopenInCopilot}>Open in Copilot</button>
@@ -2259,6 +2266,17 @@
     .cc-provider-local-ai {
         background: color-mix(in srgb, #38bdf8 12%, transparent);
         color: #38bdf8;
+    }
+    .cc-static-field {
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+        padding: 8px 10px;
+        border: 1px solid var(--card-border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text-primary);
+        font-size: 13px;
     }
     .cc-conn-row {
         display: flex;

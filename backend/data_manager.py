@@ -279,7 +279,7 @@ def get_data_health_summary(profile: str | None = None, conn=None) -> dict:
             "message": (
                 "Credential encryption is active."
                 if fernet_ready
-                else "TOKEN_ENCRYPTION_KEY is missing or invalid; bank credentials may be stored in plaintext."
+                else "TOKEN_ENCRYPTION_KEY is missing or invalid; credential encryption is disabled."
             ),
         }
 
@@ -359,7 +359,7 @@ def get_data_health_summary(profile: str | None = None, conn=None) -> dict:
         active_teller_count = c.execute("SELECT COUNT(*) AS count FROM enrolled_tokens WHERE is_active = 1").fetchone()["count"]
 
         encryption = _encryption_status()
-        if encryption["status"] != "encrypted":
+        if encryption["status"] == "plaintext":
             warnings.append({
                 "type": "credential_encryption",
                 "severity": "warning",
@@ -5077,7 +5077,7 @@ def get_copilot_conversations(limit: int = 50, profile: str | None = None, conn=
         params: list = [limit]
         if profile and profile != "household":
             rows = c.execute(
-                """SELECT id, profile_id, user_message, generated_sql, assistant_response,
+                """SELECT id, profile_id, user_message, generated_sql, query_result, assistant_response,
                           operation_type, rows_affected, created_at
                    FROM copilot_conversations
                    WHERE profile_id = ?
@@ -5087,7 +5087,7 @@ def get_copilot_conversations(limit: int = 50, profile: str | None = None, conn=
             ).fetchall()
         else:
             rows = c.execute(
-                """SELECT id, profile_id, user_message, generated_sql, assistant_response,
+                """SELECT id, profile_id, user_message, generated_sql, query_result, assistant_response,
                           operation_type, rows_affected, created_at
                    FROM copilot_conversations
                    ORDER BY created_at DESC, id DESC
@@ -6254,6 +6254,32 @@ def find_merchants_missing_category(
         return _query(c)
 
 
+def _write_scoped_profile(profile: str | None) -> str | None:
+    return profile if profile and profile != "household" else None
+
+
+def _merchant_match_values(raw_text: str) -> tuple[str, str]:
+    pattern = _extract_merchant_pattern(raw_text)
+    if not pattern:
+        pattern = (raw_text or "").upper().strip()
+    key_pattern = canonicalize_merchant_key(raw_text) or pattern
+    return pattern, key_pattern
+
+
+def _merchant_match_clause(scoped: str | None, *, category_filter: str | None = None) -> tuple[str, list]:
+    clause = """
+        (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+    """
+    params: list = []
+    if category_filter is not None:
+        clause += " AND COALESCE(category, '') != ?"
+        params.append(category_filter)
+    if scoped:
+        clause += " AND profile_id = ?"
+        params.append(scoped)
+    return clause, params
+
+
 def bulk_recategorize_preview(
     merchant_query: str,
     new_category: str,
@@ -6262,71 +6288,48 @@ def bulk_recategorize_preview(
 ) -> dict:
     """
     Preview how many transactions would be moved to new_category for the
-    given merchant pattern. Returns count, sample rows, and the deterministic
-    UPDATE SQL (caller stores it as pending SQL for the confirm step).
+    given merchant pattern. Returns count, sample rows, and a structured
+    pending operation payload for the confirm step.
     """
     def _query(c):
-        pattern = _extract_merchant_pattern(merchant_query)
-        if not pattern:
-            pattern = merchant_query.upper().strip()
-        key_pattern = canonicalize_merchant_key(merchant_query) or pattern
-
-        scoped = profile if profile and profile != "household" else None
+        pattern, key_pattern = _merchant_match_values(merchant_query)
+        scoped = _write_scoped_profile(profile)
 
         count_params: list = [pattern, key_pattern, pattern]
-        count_sql = """
+        match_clause, extra_params = _merchant_match_clause(scoped, category_filter=new_category)
+        count_sql = f"""
             SELECT COUNT(*) FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
-              AND category != ?
+            WHERE {match_clause}
         """
-        count_params.append(new_category)
-        if scoped:
-            count_sql += " AND profile_id = ?"
-            count_params.append(scoped)
+        count_params.extend(extra_params)
 
         count = c.execute(count_sql, count_params).fetchone()[0]
 
         sample_params: list = [pattern, key_pattern, pattern, new_category]
-        sample_sql = """
+        sample_clause, sample_extra = _merchant_match_clause(scoped, category_filter=new_category)
+        sample_sql = f"""
             SELECT date, description, amount, category as current_category,
                    categorization_source, merchant_name, merchant_key
             FROM transactions_visible
-            WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
-              AND category != ?
+            WHERE {sample_clause}
         """
-        if scoped:
-            sample_sql += " AND profile_id = ?"
-            sample_params.append(scoped)
+        sample_params = [pattern, key_pattern, pattern] + sample_extra
         sample_sql += " ORDER BY date DESC LIMIT 20"
         samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
 
-        # Build the deterministic SQL (no LLM) that will be stored as pending
-        if scoped:
-            update_sql = (
-                f"UPDATE transactions SET category = '{new_category}', "
-                f"categorization_source = 'user-rule', updated_at = datetime('now') "
-                f"WHERE (description_normalized = '{pattern}' "
-                f"OR UPPER(COALESCE(merchant_key,'')) = '{key_pattern}' "
-                f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
-                f"AND profile_id = '{scoped}' "
-                f"AND COALESCE(is_excluded, 0) = 0"
-            )
-        else:
-            update_sql = (
-                f"UPDATE transactions SET category = '{new_category}', "
-                f"categorization_source = 'user-rule', updated_at = datetime('now') "
-                f"WHERE (description_normalized = '{pattern}' "
-                f"OR UPPER(COALESCE(merchant_key,'')) = '{key_pattern}' "
-                f"OR UPPER(COALESCE(merchant_name,'')) = '{pattern}') "
-                f"AND COALESCE(is_excluded, 0) = 0"
-            )
-
         return {
             "pattern": pattern,
+            "key_pattern": key_pattern,
             "new_category": new_category,
             "count": count,
             "samples": samples,
-            "update_sql": update_sql,
+            "pending_operation": {
+                "operation": "bulk_recategorize",
+                "params": {
+                    "merchant_query": merchant_query,
+                    "new_category": new_category,
+                },
+            },
         }
 
     if conn is not None:
@@ -6342,17 +6345,13 @@ def preview_rule_creation(
     conn=None,
 ) -> dict:
     """
-    Preview the impact of creating a new 'contains' user rule for raw_pattern → category.
+    Preview the impact of creating a new 'contains' user rule for raw_pattern -> category.
     Reuses the same match logic as get_category_rule_impact (description_normalized equality).
-    Returns count, sample rows, whether a rule already exists, and the deterministic INSERT SQL.
+    Returns count, sample rows, whether a rule already exists, and a structured pending operation.
     """
     def _query(c):
-        pattern = _extract_merchant_pattern(raw_pattern)
-        if not pattern:
-            pattern = raw_pattern.upper().strip()
-        key_pattern = canonicalize_merchant_key(raw_pattern) or pattern
-
-        scoped = profile if profile and profile != "household" else None
+        pattern, key_pattern = _merchant_match_values(raw_pattern)
+        scoped = _write_scoped_profile(profile)
 
         # Check for existing rule
         existing_rule = c.execute(
@@ -6388,20 +6387,20 @@ def preview_rule_creation(
         sample_sql += " ORDER BY date DESC LIMIT 20"
         samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
 
-        # Deterministic INSERT SQL
-        insert_sql = (
-            f"INSERT OR REPLACE INTO category_rules "
-            f"(pattern, match_type, category, priority, source) "
-            f"VALUES ('{pattern}', 'contains', '{category}', 1000, 'user')"
-        )
-
         return {
             "pattern": pattern,
+            "key_pattern": key_pattern,
             "category": category,
             "count": count,
             "samples": samples,
             "existing_rule": dict(existing_rule) if existing_rule else None,
-            "insert_sql": insert_sql,
+            "pending_operation": {
+                "operation": "create_rule",
+                "params": {
+                    "pattern": raw_pattern,
+                    "category": category,
+                },
+            },
         }
 
     if conn is not None:
@@ -6422,12 +6421,8 @@ def rename_merchant_variants(
     descriptions and enriched merchant_name values untouched.
     """
     def _query(c):
-        pattern = _extract_merchant_pattern(old_pattern)
-        if not pattern:
-            pattern = old_pattern.upper().strip()
-        key_pattern = canonicalize_merchant_key(old_pattern) or pattern
-
-        scoped = profile if profile and profile != "household" else None
+        pattern, key_pattern = _merchant_match_values(old_pattern)
+        scoped = _write_scoped_profile(profile)
 
         count_params: list = [pattern, key_pattern, pattern]
         count_sql = """
@@ -6452,8 +6447,6 @@ def rename_merchant_variants(
         sample_sql += " ORDER BY date DESC LIMIT 20"
         samples = dicts_from_rows(c.execute(sample_sql, sample_params).fetchall())
 
-        escaped_new = new_name.replace("'", "''")
-        escaped_pattern = key_pattern.replace("'", "''")
         if scoped:
             target_profiles = [scoped]
         else:
@@ -6471,26 +6464,782 @@ def rename_merchant_variants(
                 if (row[0] or "").strip()
             ]
 
-        statements: list[str] = []
-        for target_profile in target_profiles:
-            escaped_profile = target_profile.replace("'", "''")
-            statements.append(
-                "INSERT INTO merchant_aliases "
-                "(merchant_key, profile_id, display_name, source, updated_at) "
-                f"VALUES ('{escaped_pattern}', '{escaped_profile}', '{escaped_new}', 'user', datetime('now')) "
-                "ON CONFLICT(merchant_key, profile_id) DO UPDATE SET "
-                f"display_name = '{escaped_new}', source = 'user', updated_at = datetime('now')"
-            )
-        update_sql = "; ".join(statements)
-
         return {
             "pattern": pattern,
+            "key_pattern": key_pattern,
             "new_name": new_name,
             "count": count,
             "samples": samples,
-            "update_sql": update_sql,
             "profiles": target_profiles,
+            "pending_operation": {
+                "operation": "rename_merchant",
+                "params": {
+                    "old_name": old_pattern,
+                    "new_name": new_name,
+                },
+            },
         }
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def _write_profile_filter(profile: str | None, column: str = "profile_id") -> tuple[str, list]:
+    if profile and profile != "household":
+        return f" AND {column} = ?", [profile]
+    return "", []
+
+
+def _transaction_for_write(conn, tx_id: str, profile: str | None = None) -> dict | None:
+    tx_id = (tx_id or "").strip()
+    if not tx_id:
+        return None
+    profile_sql, profile_params = _write_profile_filter(profile)
+    row = conn.execute(
+        f"""SELECT id, profile_id, date, description, amount, category, notes, tags, reviewed
+              FROM transactions
+             WHERE id = ?{profile_sql}""",
+        [tx_id, *profile_params],
+    ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["reviewed"] = bool(result.get("reviewed", 0))
+    result["tags"] = [tag for tag in (result.get("tags") or "").split(",") if tag]
+    return result
+
+
+def _goal_for_write(conn, params: dict, profile: str | None = None) -> dict | None:
+    profile_id = _profile_id(profile)
+    goal_id = params.get("goal_id") or params.get("id")
+    if goal_id:
+        row = conn.execute(
+            "SELECT * FROM goals WHERE id = ? AND profile_id = ? AND is_active = 1",
+            (goal_id, profile_id),
+        ).fetchone()
+        return dict(row) if row else None
+    name = (params.get("name") or params.get("goal_name") or "").strip()
+    if not name:
+        return None
+    row = conn.execute(
+        """SELECT *
+             FROM goals
+            WHERE profile_id = ?
+              AND is_active = 1
+              AND lower(name) = lower(?)
+            ORDER BY updated_at DESC
+            LIMIT 1""",
+        (profile_id, name),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _manual_account_for_write(conn, params: dict, profile: str | None = None) -> dict | None:
+    profile_id = _profile_id(profile)
+    account_id = (params.get("account_id") or "").strip()
+    if account_id:
+        row = conn.execute(
+            """SELECT *
+                 FROM accounts
+                WHERE id = ?
+                  AND profile_id = ?
+                  AND provider = 'manual'
+                  AND is_active = 1""",
+            (account_id, profile_id),
+        ).fetchone()
+        return dict(row) if row else None
+    account_name = (params.get("account_name") or params.get("name") or "").strip()
+    if not account_name:
+        return None
+    row = conn.execute(
+        """SELECT *
+             FROM accounts
+            WHERE profile_id = ?
+              AND provider = 'manual'
+              AND is_active = 1
+              AND lower(account_name) = lower(?)
+            ORDER BY manual_updated_at DESC, last_synced_at DESC
+            LIMIT 1""",
+        (profile_id, account_name),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _normalize_split_items(splits: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for item in splits or []:
+        category = (item.get("category") or "").strip()
+        if not category:
+            continue
+        try:
+            amount = round(abs(float(item.get("amount") or 0)), 2)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0:
+            continue
+        tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+        normalized.append(
+            {
+                "category": category,
+                "amount": amount,
+                "notes": (item.get("notes") or "").strip(),
+                "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+            }
+        )
+    return normalized
+
+
+def preview_general_write_operation(
+    operation: str,
+    params: dict,
+    profile: str | None = None,
+    conn=None,
+) -> dict:
+    """Preview non-categorization Mira write operations without mutating data."""
+    def _query(c):
+        op = (operation or "").strip()
+        payload = dict(params or {})
+        profile_id = _profile_id(profile)
+
+        if op == "set_budget":
+            category = (payload.get("category") or "").strip()
+            if not category:
+                raise ValueError("category is required")
+            row = c.execute("SELECT name FROM categories WHERE name = ? AND is_active = 1", (category,)).fetchone()
+            if not row:
+                raise ValueError("Category not found.")
+            amount = None if payload.get("amount") in (None, "") else float(payload.get("amount"))
+            existing = c.execute(
+                "SELECT category, amount, rollover_mode, rollover_balance FROM category_budgets WHERE profile_id = ? AND category = ?",
+                (profile_id, category),
+            ).fetchone()
+            return {
+                "count": 1,
+                "samples": [dict(existing)] if existing else [],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Set {category} budget to {'off' if amount is None or amount <= 0 else f'${amount:,.2f}'}",
+                "preview_changes": [{"column": "budget", "raw_value": (dict(existing).get("amount") if existing else None), "new_value": amount}],
+            }
+
+        if op == "create_goal":
+            name = (payload.get("name") or payload.get("goal_name") or "").strip()
+            if not name:
+                raise ValueError("goal name is required")
+            payload["name"] = name
+            payload.setdefault("goal_type", "custom")
+            payload["target_amount"] = float(payload.get("target_amount") or 0)
+            payload["current_amount"] = float(payload.get("current_amount") or 0)
+            return {
+                "count": 1,
+                "samples": [],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Create goal {name} for ${payload['target_amount']:,.2f}",
+                "preview_changes": [{"column": "goal", "raw_value": None, "new_value": name}],
+            }
+
+        if op in {"update_goal_target", "mark_goal_funded"}:
+            goal = _goal_for_write(c, payload, profile)
+            if not goal:
+                raise ValueError("Goal not found.")
+            next_target = goal.get("target_amount")
+            next_current = goal.get("current_amount")
+            if op == "update_goal_target":
+                if payload.get("target_amount") in (None, ""):
+                    raise ValueError("target_amount is required")
+                next_target = float(payload.get("target_amount") or 0)
+                if payload.get("current_amount") not in (None, ""):
+                    next_current = float(payload.get("current_amount") or 0)
+            else:
+                next_current = float(goal.get("target_amount") or 0)
+            return {
+                "count": 1,
+                "samples": [goal],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Update goal {goal['name']}",
+                "preview_changes": [
+                    {"column": "target_amount", "raw_value": goal.get("target_amount"), "new_value": next_target},
+                    {"column": "current_amount", "raw_value": goal.get("current_amount"), "new_value": next_current},
+                ],
+            }
+
+        if op in {"set_transaction_note", "set_transaction_tags", "mark_reviewed", "split_transaction"}:
+            tx = _transaction_for_write(c, payload.get("tx_id") or payload.get("transaction_id"), profile)
+            if not tx:
+                raise ValueError("Transaction not found.")
+            preview_changes = []
+            if op == "set_transaction_note":
+                preview_changes.append({"column": "notes", "raw_value": tx.get("notes") or "", "new_value": (payload.get("note") or payload.get("notes") or "").strip()})
+            elif op == "set_transaction_tags":
+                tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
+                preview_changes.append({"column": "tags", "raw_value": tx.get("tags") or [], "new_value": [str(tag).strip() for tag in tags if str(tag).strip()]})
+            elif op == "mark_reviewed":
+                preview_changes.append({"column": "reviewed", "raw_value": tx.get("reviewed"), "new_value": bool(payload.get("reviewed", True))})
+            else:
+                splits = _normalize_split_items(payload.get("splits") or [])
+                total = round(sum(item["amount"] for item in splits), 2)
+                tx_total = round(abs(float(tx.get("amount") or 0)), 2)
+                if not splits:
+                    raise ValueError("At least one split item is required.")
+                if abs(total - tx_total) > 0.01:
+                    raise ValueError(f"Split total ${total:,.2f} must match transaction amount ${tx_total:,.2f}.")
+                payload["splits"] = splits
+                preview_changes.append({"column": "splits", "raw_value": get_transaction_splits(tx["id"], conn=c), "new_value": splits})
+            return {
+                "count": 1,
+                "samples": [tx],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Update transaction {tx['id']}",
+                "preview_changes": preview_changes,
+            }
+
+        if op == "bulk_mark_reviewed":
+            target = bool(payload.get("reviewed", True))
+            filters = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+            page = get_transactions_paginated(
+                month=filters.get("month"),
+                category=filters.get("category"),
+                account=filters.get("account"),
+                search=filters.get("search"),
+                reviewed=filters.get("reviewed"),
+                profile=profile,
+                limit=5,
+                offset=0,
+                conn=c,
+                start_date=filters.get("start_date"),
+                end_date=filters.get("end_date"),
+            )
+            count = int(page.get("total_count") or 0)
+            return {
+                "count": count,
+                "samples": page.get("data") or [],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Mark {count} transaction(s) as {'reviewed' if target else 'unreviewed'}",
+                "preview_changes": [{"column": "reviewed", "raw_value": filters.get("reviewed"), "new_value": target}],
+            }
+
+        if op == "update_manual_account_balance":
+            account = _manual_account_for_write(c, payload, profile)
+            if not account:
+                raise ValueError("Manual account not found.")
+            if payload.get("balance") in (None, ""):
+                raise ValueError("balance is required")
+            balance = float(payload.get("balance") or 0)
+            payload["account_id"] = account["id"]
+            return {
+                "count": 1,
+                "samples": [account],
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"Update {account.get('account_name') or account['id']} balance to ${balance:,.2f}",
+                "preview_changes": [{"column": "current_balance", "raw_value": account.get("current_balance"), "new_value": balance}],
+            }
+
+        if op in {"confirm_recurring_obligation", "dismiss_recurring_obligation", "cancel_recurring", "restore_recurring"}:
+            merchant = (payload.get("merchant") or payload.get("merchant_name") or "").strip()
+            if not merchant:
+                raise ValueError("merchant is required")
+            merchant_key = _recurring_canonical_key(merchant)
+            row = None
+            if merchant_key:
+                row = c.execute(
+                    """SELECT id, display_name, amount_cents, frequency, state, next_expected_date
+                         FROM recurring_obligations
+                        WHERE profile_id = ? AND merchant_key = ?
+                        LIMIT 1""",
+                    (profile_id, merchant_key),
+                ).fetchone()
+            samples = [dict(row)] if row else [{"merchant": merchant, "profile_id": profile_id}]
+            action_label = {
+                "confirm_recurring_obligation": "Confirm recurring charge",
+                "dismiss_recurring_obligation": "Dismiss recurring charge",
+                "cancel_recurring": "Cancel recurring charge",
+                "restore_recurring": "Restore recurring charge",
+            }[op]
+            return {
+                "count": 1,
+                "samples": samples,
+                "pending_operation": {"operation": op, "params": payload},
+                "summary": f"{action_label}: {merchant}",
+                "preview_changes": [{"column": "recurring_state", "raw_value": (dict(row).get("state") if row else None), "new_value": op}],
+            }
+
+        raise ValueError(f"Unsupported write operation: {operation}")
+
+    if conn is not None:
+        return _query(conn)
+    with get_db() as c:
+        return _query(c)
+
+
+def execute_pending_write_operation(
+    operation: str,
+    params: dict,
+    profile: str | None = None,
+    conn=None,
+    max_rows: int = 5000,
+) -> dict:
+    """Execute a previously previewed closed-set Mira write operation."""
+    def _query(c):
+        op = (operation or "").strip()
+        if op == "bulk_recategorize":
+            merchant_query = (params.get("merchant_query") or params.get("merchant") or "").strip()
+            new_category = (params.get("new_category") or params.get("category") or "").strip()
+            if not merchant_query or not new_category:
+                raise ValueError("merchant_query and new_category are required")
+            preview = bulk_recategorize_preview(merchant_query, new_category, profile, c)
+            count = int(preview.get("count") or 0)
+            if count > max_rows:
+                raise ValueError(f"This operation would affect {count} rows, above the limit of {max_rows}.")
+            pattern = preview["pattern"]
+            key_pattern = preview["key_pattern"]
+            scoped = _write_scoped_profile(profile)
+            c.execute("INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)", (new_category,))
+            match_clause, extra_params = _merchant_match_clause(scoped, category_filter=new_category)
+            id_params = [pattern, key_pattern, pattern] + extra_params
+            cursor = c.execute(
+                f"""
+                UPDATE transactions
+                   SET category = ?,
+                       categorization_source = 'user-rule',
+                       updated_at = datetime('now')
+                 WHERE id IN (
+                    SELECT id FROM transactions_visible
+                     WHERE {match_clause}
+                       AND COALESCE(is_excluded, 0) = 0
+                 )
+                """,
+                [new_category] + id_params,
+            )
+            return {
+                "answer": f"Done! Updated {cursor.rowcount} transaction(s).",
+                "operation": "write_executed",
+                "rows_affected": cursor.rowcount,
+                "data": None,
+                "needs_confirmation": False,
+            }
+
+        if op == "create_rule":
+            raw_pattern = (params.get("pattern") or "").strip()
+            category = (params.get("category") or "").strip()
+            if not raw_pattern or not category:
+                raise ValueError("pattern and category are required")
+            preview = preview_rule_creation(raw_pattern, category, profile, c)
+            c.execute("INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)", (category,))
+            existing = preview.get("existing_rule") or {}
+            if existing.get("id"):
+                cursor = c.execute(
+                    """
+                    UPDATE category_rules
+                       SET match_type = 'contains',
+                           category = ?,
+                           priority = 1000,
+                           source = 'user',
+                           is_active = 1
+                     WHERE id = ?
+                    """,
+                    (category, existing["id"]),
+                )
+            else:
+                cursor = c.execute(
+                    """
+                    INSERT INTO category_rules
+                        (pattern, match_type, category, priority, source, is_active)
+                    VALUES (?, 'contains', ?, 1000, 'user', 1)
+                    """,
+                    (preview["pattern"], category),
+                )
+            return {
+                "answer": f"Done! Created rule {preview['pattern']} -> {category}.",
+                "operation": "write_executed",
+                "rows_affected": max(0, cursor.rowcount),
+                "data": None,
+                "needs_confirmation": False,
+            }
+
+        if op == "rename_merchant":
+            old_name = (params.get("old_name") or "").strip()
+            new_name = (params.get("new_name") or "").strip()
+            if not old_name or not new_name:
+                raise ValueError("old_name and new_name are required")
+            preview = rename_merchant_variants(old_name, new_name, profile, c)
+            count = int(preview.get("count") or 0)
+            if count > max_rows:
+                raise ValueError(f"This operation would affect {count} rows, above the limit of {max_rows}.")
+            affected = 0
+            for target_profile in preview.get("profiles") or []:
+                cursor = c.execute(
+                    """
+                    INSERT INTO merchant_aliases
+                        (merchant_key, profile_id, display_name, source, updated_at)
+                    VALUES (?, ?, ?, 'user', datetime('now'))
+                    ON CONFLICT(merchant_key, profile_id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        source = 'user',
+                        updated_at = excluded.updated_at
+                    """,
+                    (preview["key_pattern"], target_profile, new_name),
+                )
+                affected += max(0, cursor.rowcount)
+            return {
+                "answer": f"Done! Renamed {count} matching transaction(s) to {new_name}.",
+                "operation": "write_executed",
+                "rows_affected": affected or count,
+                "data": None,
+                "needs_confirmation": False,
+            }
+
+        if op == "set_budget":
+            category = (params.get("category") or "").strip()
+            if not category:
+                raise ValueError("category is required")
+            amount = None if params.get("amount") in (None, "") else float(params.get("amount"))
+            result = update_category_budget(
+                category=category,
+                amount=amount,
+                profile=profile,
+                conn=c,
+                rollover_mode=params.get("rollover_mode"),
+                rollover_balance=params.get("rollover_balance"),
+            )
+            return {
+                "answer": f"Done! Updated the {category} budget.",
+                "operation": "write_executed",
+                "rows_affected": 1,
+                "data": result,
+                "needs_confirmation": False,
+            }
+
+        if op == "create_goal":
+            payload = dict(params)
+            if payload.get("goal_name") and not payload.get("name"):
+                payload["name"] = payload["goal_name"]
+            goal = upsert_goal(payload, profile=profile, conn=c)
+            return {
+                "answer": f"Done! Created goal {goal.get('name')}.",
+                "operation": "write_executed",
+                "rows_affected": 1,
+                "data": goal,
+                "needs_confirmation": False,
+            }
+
+        if op in {"update_goal_target", "mark_goal_funded"}:
+            goal = _goal_for_write(c, params, profile)
+            if not goal:
+                raise ValueError("Goal not found.")
+            payload = dict(goal)
+            payload["id"] = goal["id"]
+            if op == "update_goal_target":
+                if params.get("target_amount") in (None, ""):
+                    raise ValueError("target_amount is required")
+                payload["target_amount"] = float(params.get("target_amount") or 0)
+                if params.get("current_amount") not in (None, ""):
+                    payload["current_amount"] = float(params.get("current_amount") or 0)
+                if params.get("target_date") not in (None, ""):
+                    payload["target_date"] = params.get("target_date")
+            else:
+                payload["current_amount"] = float(goal.get("target_amount") or 0)
+            updated = upsert_goal(payload, profile=profile, conn=c)
+            return {
+                "answer": f"Done! Updated goal {updated.get('name')}.",
+                "operation": "write_executed",
+                "rows_affected": 1,
+                "data": updated,
+                "needs_confirmation": False,
+            }
+
+        if op in {"set_transaction_note", "set_transaction_tags", "mark_reviewed"}:
+            tx_id = (params.get("tx_id") or params.get("transaction_id") or "").strip()
+            if not _transaction_for_write(c, tx_id, profile):
+                raise ValueError("Transaction not found.")
+            notes = None
+            tags = None
+            reviewed = None
+            if op == "set_transaction_note":
+                notes = (params.get("note") or params.get("notes") or "").strip()
+            elif op == "set_transaction_tags":
+                tags = params.get("tags") if isinstance(params.get("tags"), list) else []
+            else:
+                reviewed = bool(params.get("reviewed", True))
+            updated = update_transaction_metadata(tx_id, notes=notes, tags=tags, reviewed=reviewed, conn=c)
+            return {
+                "answer": f"Done! Updated transaction {tx_id}.",
+                "operation": "write_executed",
+                "rows_affected": 1,
+                "data": updated,
+                "needs_confirmation": False,
+            }
+
+        if op == "bulk_mark_reviewed":
+            filters = params.get("filters") if isinstance(params.get("filters"), dict) else {}
+            target_reviewed = bool(params.get("reviewed", True))
+            result = bulk_mark_transactions_reviewed(
+                month=filters.get("month"),
+                category=filters.get("category"),
+                account=filters.get("account"),
+                search=filters.get("search"),
+                reviewed=filters.get("reviewed"),
+                profile=profile,
+                target_reviewed=target_reviewed,
+                conn=c,
+                start_date=filters.get("start_date"),
+                end_date=filters.get("end_date"),
+            )
+            return {
+                "answer": f"Done! Marked {result.get('updated_count', 0)} transaction(s) as {'reviewed' if target_reviewed else 'unreviewed'}.",
+                "operation": "write_executed",
+                "rows_affected": int(result.get("updated_count") or 0),
+                "data": result,
+                "needs_confirmation": False,
+            }
+
+        if op == "update_manual_account_balance":
+            account = _manual_account_for_write(c, params, profile)
+            if not account:
+                raise ValueError("Manual account not found.")
+            if params.get("balance") in (None, ""):
+                raise ValueError("balance is required")
+            payload = {
+                "name": params.get("name") or params.get("account_name") or account.get("account_name"),
+                "account_type": params.get("account_type") or account.get("account_type") or "depository",
+                "account_subtype": params.get("account_subtype") or account.get("account_subtype") or "manual",
+                "balance": float(params.get("balance") or 0),
+                "notes": params.get("notes") if params.get("notes") is not None else account.get("manual_notes") or "",
+            }
+            updated = update_manual_account(account["id"], payload, profile=profile, conn=c)
+            return {
+                "answer": f"Done! Updated {updated.get('account_name') if updated else account['id']} balance.",
+                "operation": "write_executed",
+                "rows_affected": 1 if updated else 0,
+                "data": updated,
+                "needs_confirmation": False,
+            }
+
+        if op == "split_transaction":
+            tx_id = (params.get("tx_id") or params.get("transaction_id") or "").strip()
+            tx = _transaction_for_write(c, tx_id, profile)
+            if not tx:
+                raise ValueError("Transaction not found.")
+            splits = _normalize_split_items(params.get("splits") or [])
+            total = round(sum(item["amount"] for item in splits), 2)
+            tx_total = round(abs(float(tx.get("amount") or 0)), 2)
+            if not splits:
+                raise ValueError("At least one split item is required.")
+            if abs(total - tx_total) > 0.01:
+                raise ValueError(f"Split total ${total:,.2f} must match transaction amount ${tx_total:,.2f}.")
+            result = replace_transaction_splits(tx_id, splits, conn=c)
+            return {
+                "answer": f"Done! Split transaction {tx_id} into {len(result.get('items') or [])} item(s).",
+                "operation": "write_executed",
+                "rows_affected": len(result.get("items") or []),
+                "data": result,
+                "needs_confirmation": False,
+            }
+
+        if op in {"confirm_recurring_obligation", "dismiss_recurring_obligation", "cancel_recurring", "restore_recurring"}:
+            merchant = (params.get("merchant") or params.get("merchant_name") or "").strip()
+            if not merchant:
+                raise ValueError("merchant is required")
+            profile_id = _profile_id(profile)
+            merchant_key = _recurring_canonical_key(merchant)
+            affected = 0
+
+            if op == "confirm_recurring_obligation":
+                pattern = (params.get("pattern") or merchant).upper().strip()
+                frequency = (params.get("frequency") or params.get("frequency_hint") or "monthly").strip()
+                category = (params.get("category") or "Subscriptions").strip() or "Subscriptions"
+                existing = c.execute(
+                    """SELECT id FROM subscription_seeds
+                       WHERE pattern = ? AND source = 'user' AND created_by = ?""",
+                    (pattern, profile_id),
+                ).fetchone()
+                if existing:
+                    affected += c.execute(
+                        """UPDATE subscription_seeds
+                              SET name = ?, frequency_hint = ?, category = ?, is_active = 1
+                            WHERE id = ?""",
+                        (merchant, frequency, category, existing[0]),
+                    ).rowcount or 0
+                else:
+                    affected += c.execute(
+                        """INSERT INTO subscription_seeds
+                              (name, pattern, frequency_hint, category, source, created_by)
+                            VALUES (?, ?, ?, ?, 'user', ?)""",
+                        (merchant, pattern, frequency, category, profile_id),
+                    ).rowcount or 0
+                if merchant_key:
+                    affected += c.execute(
+                        """UPDATE recurring_obligations
+                              SET state = 'confirmed',
+                                  source = CASE WHEN source = 'user' THEN source ELSE 'user_confirmed' END,
+                                  confidence_score = MAX(confidence_score, 100),
+                                  confidence_label = 'user',
+                                  last_user_action_at = datetime('now'),
+                                  updated_at = datetime('now')
+                            WHERE profile_id = ? AND merchant_key = ?""",
+                        (profile_id, merchant_key),
+                    ).rowcount or 0
+                _record_recurring_feedback(
+                    c,
+                    merchant=merchant,
+                    profile_id=profile_id,
+                    feedback_type="confirmed",
+                    scope="merchant",
+                    payload={"pattern": pattern, "frequency_hint": frequency, "category": category},
+                )
+                return {
+                    "answer": f"Done! Confirmed {merchant} as recurring.",
+                    "operation": "write_executed",
+                    "rows_affected": affected,
+                    "data": {"merchant": merchant, "status": "confirmed"},
+                    "needs_confirmation": False,
+                }
+
+            if op == "dismiss_recurring_obligation":
+                pattern = (params.get("pattern") or merchant).upper().strip()
+                existing = c.execute(
+                    """SELECT id FROM subscription_seeds
+                       WHERE pattern = ? AND source = 'user' AND created_by = ?""",
+                    (pattern, profile_id),
+                ).fetchone()
+                if existing:
+                    affected += c.execute("UPDATE subscription_seeds SET is_active = 0 WHERE id = ?", (existing[0],)).rowcount or 0
+                else:
+                    affected += c.execute(
+                        """INSERT INTO subscription_seeds
+                              (name, pattern, frequency_hint, category, source, created_by, is_active)
+                            VALUES (?, ?, 'monthly', 'Dismissed', 'user', ?, 0)""",
+                        (merchant, pattern, profile_id),
+                    ).rowcount or 0
+                affected += c.execute(
+                    """INSERT OR IGNORE INTO dismissed_recurring (merchant_name, profile_id)
+                       VALUES (?, ?)""",
+                    (merchant, profile_id),
+                ).rowcount or 0
+                if merchant_key:
+                    affected += c.execute(
+                        """UPDATE recurring_obligations
+                              SET state = 'dismissed',
+                                  last_user_action_at = datetime('now'),
+                                  updated_at = datetime('now')
+                            WHERE profile_id = ? AND merchant_key = ?""",
+                        (profile_id, merchant_key),
+                    ).rowcount or 0
+                _record_recurring_feedback(
+                    c,
+                    merchant=merchant,
+                    profile_id=profile_id,
+                    feedback_type="dismissed",
+                    scope="merchant",
+                    payload={"pattern": pattern},
+                )
+                return {
+                    "answer": f"Done! Dismissed {merchant} as recurring.",
+                    "operation": "write_executed",
+                    "rows_affected": affected,
+                    "data": {"merchant": merchant, "status": "dismissed"},
+                    "needs_confirmation": False,
+                }
+
+            if op == "cancel_recurring":
+                now = datetime.now().isoformat()
+                merchant_ids = _legacy_merchant_ids_for_recurring(c, merchant, profile_id)
+                if merchant_ids:
+                    placeholders = ",".join("?" * len(merchant_ids))
+                    affected += c.execute(
+                        f"""UPDATE merchants
+                              SET cancelled_at = ?,
+                                  cancelled_by_user = 1,
+                                  subscription_status = 'cancelled',
+                                  next_expected_date = NULL,
+                                  updated_at = datetime('now')
+                            WHERE id IN ({placeholders})""",
+                        (now, *merchant_ids),
+                    ).rowcount or 0
+                declared_ids = _user_declared_ids_for_recurring(c, merchant, profile_id)
+                if declared_ids:
+                    placeholders = ",".join("?" * len(declared_ids))
+                    affected += c.execute(
+                        f"""UPDATE user_declared_subscriptions
+                              SET is_active = 0,
+                                  updated_at = datetime('now')
+                            WHERE id IN ({placeholders})""",
+                        declared_ids,
+                    ).rowcount or 0
+                if merchant_key:
+                    affected += c.execute(
+                        """UPDATE recurring_obligations
+                              SET state = 'cancelled',
+                                  last_user_action_at = datetime('now'),
+                                  updated_at = datetime('now')
+                            WHERE profile_id = ? AND merchant_key = ?""",
+                        (profile_id, merchant_key),
+                    ).rowcount or 0
+                _record_recurring_feedback(
+                    c,
+                    merchant=merchant,
+                    profile_id=profile_id,
+                    feedback_type="cancelled",
+                    scope="merchant",
+                    payload={"cancelled_at": now},
+                )
+                return {
+                    "answer": f"Done! Marked {merchant} as cancelled.",
+                    "operation": "write_executed",
+                    "rows_affected": affected,
+                    "data": {"merchant": merchant, "status": "cancelled", "cancelled_at": now},
+                    "needs_confirmation": False,
+                }
+
+            dismissed_ids = _dismissed_ids_for_recurring(c, merchant, profile_id)
+            if dismissed_ids:
+                placeholders = ",".join("?" * len(dismissed_ids))
+                affected += c.execute(f"DELETE FROM dismissed_recurring WHERE id IN ({placeholders})", dismissed_ids).rowcount or 0
+            seed = c.execute(
+                """SELECT id FROM subscription_seeds
+                   WHERE pattern = ? AND source = 'user' AND created_by = ? AND is_active = 0""",
+                (merchant.upper(), profile_id),
+            ).fetchone()
+            if seed:
+                affected += c.execute("UPDATE subscription_seeds SET is_active = 1 WHERE id = ?", (seed[0],)).rowcount or 0
+            merchant_ids = _legacy_merchant_ids_for_recurring(c, merchant, profile_id)
+            if merchant_ids:
+                placeholders = ",".join("?" * len(merchant_ids))
+                affected += c.execute(
+                    f"""UPDATE merchants
+                          SET cancelled_by_user = 0,
+                              cancelled_at = NULL,
+                              subscription_status = CASE
+                                  WHEN subscription_status = 'cancelled' THEN 'inactive'
+                                  ELSE subscription_status
+                              END,
+                              updated_at = datetime('now')
+                        WHERE id IN ({placeholders})""",
+                    merchant_ids,
+                ).rowcount or 0
+            declared_ids = _user_declared_ids_for_recurring(c, merchant, profile_id)
+            if declared_ids:
+                placeholders = ",".join("?" * len(declared_ids))
+                affected += c.execute(
+                    f"""UPDATE user_declared_subscriptions
+                          SET is_active = 1,
+                              updated_at = datetime('now')
+                        WHERE id IN ({placeholders})""",
+                    declared_ids,
+                ).rowcount or 0
+            if _restore_recurring_obligation(c, merchant=merchant, profile_id=profile_id):
+                affected += 1
+            if affected <= 0:
+                raise ValueError("Recurring item not found.")
+            return {
+                "answer": f"Done! Restored {merchant}.",
+                "operation": "write_executed",
+                "rows_affected": affected,
+                "data": {"merchant": merchant, "status": "restored"},
+                "needs_confirmation": False,
+            }
+
+        raise ValueError(f"Unsupported write operation: {operation}")
 
     if conn is not None:
         return _query(conn)

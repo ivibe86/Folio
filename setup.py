@@ -4,7 +4,6 @@ Interactive setup script for Folio.
 
 Primary supported onboarding paths:
 - Docker Desktop + Local AI (host Ollama on macOS/Windows)
-- Docker Desktop + Cloud AI (BYOK)
 - Docker Desktop + No AI
 
 Local development remains available for contributors who want to run the
@@ -381,16 +380,13 @@ def choose_ai_mode(system_profile: dict) -> str:
         "AI Modes",
         [
             f"1. Local AI (recommended for your system: {recommended_preset['label']})",
-            "2. Cloud AI (Bring your own key)",
-            "3. No AI",
+            "2. No AI",
         ],
         ui.BLUE,
     )
     choice = ask("  AI mode", default="1").lower()
     if choice in ("1", "local", "local ai", ""):
         return "local"
-    if choice in ("2", "cloud", "cloud ai"):
-        return "cloud"
     return "none"
 
 
@@ -556,14 +552,16 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
     internal_trove_seed = hashlib.sha256(str(ROOT_DIR).encode("utf-8")).hexdigest()[:24]
     config = {
         "ai_mode": ai_mode,
-        "llm_provider": "anthropic",
-        "anthropic_key": "",
+        "llm_provider": "ollama",
         "trove_key": "",
         "trove_seed": internal_trove_seed,
         "enable_trove": "false",
         "enable_local_enrichment": "false",
         "enable_llm_categorization": "false",
+        "enable_experimental_local_models": "false",
         "ollama_base_url": "",
+        "llamacpp_base_url": "",
+        "llamacpp_model": "local",
         "ollama_model_categorize": "",
         "ollama_model_copilot": "",
         "local_llm_memory_tier": "",
@@ -615,6 +613,11 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
                     if runtime_mode == "docker"
                     else "http://localhost:11434"
                 ),
+                "llamacpp_base_url": (
+                    "http://host.docker.internal:8081"
+                    if runtime_mode == "docker"
+                    else "http://localhost:8081"
+                ),
                 "ollama_model_categorize": preset["categorize_model"],
                 "ollama_model_copilot": preset["copilot_model"],
                 "local_llm_memory_tier": (
@@ -624,23 +627,6 @@ def gather_ai_config(ai_mode: str, runtime_mode: str, host_os: str) -> dict:
                     else ""
                 ),
                 "local_llm_ram_gb": str(system_profile["ram_gb"]) if system_profile.get("ram_gb") else "",
-            }
-        )
-        return config
-
-    if ai_mode == "cloud":
-        print()
-        ui.info("Cloud AI mode uses your API key and keeps Docker packaging unchanged.")
-        anthropic_key = ask("  Anthropic API key", required=True)
-        trove_key = ask("  Trove API key (press Enter to skip)")
-        config.update(
-            {
-                "llm_provider": "anthropic",
-                "anthropic_key": anthropic_key,
-                "trove_key": trove_key,
-                "enable_trove": "true" if trove_key else "false",
-                "enable_local_enrichment": "false",
-                "enable_llm_categorization": "true",
             }
         )
         return config
@@ -712,13 +698,21 @@ def write_env_file(config: dict):
             f"ENABLE_TROVE={config.get('enable_trove', 'false')}",
             f"ENABLE_LOCAL_ENRICHMENT={config.get('enable_local_enrichment', 'false')}",
             f"ENABLE_LLM_CATEGORIZATION={config.get('enable_llm_categorization', 'false')}",
+            f"ENABLE_EXPERIMENTAL_LOCAL_MODELS={config.get('enable_experimental_local_models', 'false')}",
             "COPILOT_MAX_WRITE_ROWS=5000",
             "",
             "# -- LLM Provider --",
-            f"LLM_PROVIDER={config.get('llm_provider', 'anthropic')}",
+            f"LLM_PROVIDER={config.get('llm_provider', 'ollama')}",
             "",
             "# -- Ollama (Local AI mode) --",
             f"OLLAMA_BASE_URL={config.get('ollama_base_url', '')}",
+            f"LLAMACPP_BASE_URL={config.get('llamacpp_base_url', '')}",
+            f"LLAMACPP_MODEL={config.get('llamacpp_model', 'local')}",
+            "LLAMACPP_TIMEOUT=240",
+            "LLAMACPP_TEMPERATURE=1.0",
+            "LLAMACPP_TOP_P=0.95",
+            "LLAMACPP_TOP_K=64",
+            "LLAMACPP_THINK=false",
             f"OLLAMA_MODEL_CATEGORIZE={config.get('ollama_model_categorize', '')}",
             f"OLLAMA_MODEL_COPILOT={config.get('ollama_model_copilot', '')}",
             f"LOCAL_LLM_MEMORY_TIER={config.get('local_llm_memory_tier', '')}",
@@ -727,9 +721,6 @@ def write_env_file(config: dict):
             f"LOCAL_ENRICHMENT_MIN_CONFIDENCE={config.get('local_enrichment_min_confidence', 'medium')}",
             "OLLAMA_TIMEOUT_CATEGORIZE=600",
             "OLLAMA_TIMEOUT_COPILOT=240",
-            "",
-            "# -- Cloud AI (BYOK) --",
-            f"ANTHROPIC_API_KEY={config.get('anthropic_key', '')}",
             "",
             "# -- Trove Merchant Enrichment --",
             f"TROVE_API_KEY={config.get('trove_key', '')}",

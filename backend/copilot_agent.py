@@ -21,6 +21,11 @@ from copilot_context import build_copilot_context
 from copilot_tools import TOOL_REGISTRY, execute_tool
 from database import get_db
 import memory
+from mira.grounding import resolve_category_name
+from mira.number_guard import guard_finance_numbers
+from mira import persona
+from mira.persona import compose_persona_answer
+from range_parser import chart_months, words as range_words
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +49,25 @@ DRILLDOWN_TOOLS = (
     "get_top_categories",
     "get_top_merchants",
 )
-WRITE_TOOLS = ("preview_bulk_recategorize", "preview_create_rule", "preview_rename_merchant")
+WRITE_TOOLS = (
+    "preview_bulk_recategorize",
+    "preview_create_rule",
+    "preview_rename_merchant",
+    "preview_set_budget",
+    "preview_create_goal",
+    "preview_update_goal_target",
+    "preview_mark_goal_funded",
+    "preview_set_transaction_note",
+    "preview_set_transaction_tags",
+    "preview_mark_reviewed",
+    "preview_bulk_mark_reviewed",
+    "preview_update_manual_account_balance",
+    "preview_split_transaction",
+    "preview_confirm_recurring_obligation",
+    "preview_dismiss_recurring_obligation",
+    "preview_cancel_recurring",
+    "preview_restore_recurring",
+)
 CHART_TOOLS = ("plot_chart",)
 TREND_CHART_TOOLS = (
     "get_monthly_spending_trend",
@@ -55,7 +78,7 @@ TREND_CHART_TOOLS = (
     "plot_chart",
 )
 SQL_SCHEMA_ON_DEMAND = """SQL schema notes for run_sql:
-- Prefer specialized tools first. Use run_sql only when no specific tool fits.
+- Internal/debug only. Normal Mira routing must use specialized grounded tools instead of run_sql.
 - Read transactions through transactions_visible. Spending filter: amount < 0, category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income'), and expense_type not internal/household transfer.
 - Useful tables: transactions_visible(id, account_id, profile_id, date, description, amount, category, merchant_name, is_excluded, expense_type), accounts(id, profile_id, account_name, account_type, current_balance), categories(name, expense_type), category_rules(pattern, category), merchants(clean_name, category, total_spent), net_worth_history(date, profile_id, total_assets, total_owed, net_worth), saved_insights(question, answer, kind, pinned).
 - profile='household' means omit a profile filter.
@@ -78,7 +101,7 @@ _DISPLAY_LIST_KEYS = (
     "categories",    # get_top_categories, get_category_breakdown
     "items",         # get_recurring_summary
     "accounts",      # get_account_balances
-    "rows",          # run_sql
+    "rows",          # internal SQL debug
     "series",        # get_net_worth_trend
     "rules",         # get_category_rules
     "insights",      # search_saved_insights
@@ -118,6 +141,16 @@ def _history_text(history: list[dict] | None, limit: int = 4) -> str:
     if not history:
         return ""
     parts: list[str] = []
+    older = history[:-limit] if len(history) > limit else []
+    older_user_notes = []
+    for turn in older:
+        if turn.get("role") != "user":
+            continue
+        content = " ".join((turn.get("content") or "").split())
+        if content:
+            older_user_notes.append(content[:140])
+    if older_user_notes:
+        parts.append("Earlier user asks: " + " | ".join(older_user_notes[-3:]))
     for turn in history[-limit:]:
         content = (turn.get("content") or "").strip()
         if content:
@@ -126,71 +159,15 @@ def _history_text(history: list[dict] | None, limit: int = 4) -> str:
 
 
 def _extract_month_count(question: str, history: list[dict] | None = None) -> int:
-    current = (question or "").lower()
-    if "half year" in current:
-        return 6
-    since_match = re.search(
-        r"\bsince\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(20\d{2}))?\b",
-        current,
-    )
-    if since_match:
-        month_lookup = {
-            "jan": 1, "january": 1,
-            "feb": 2, "february": 2,
-            "mar": 3, "march": 3,
-            "apr": 4, "april": 4,
-            "may": 5,
-            "jun": 6, "june": 6,
-            "jul": 7, "july": 7,
-            "aug": 8, "august": 8,
-            "sep": 9, "sept": 9, "september": 9,
-            "oct": 10, "october": 10,
-            "nov": 11, "november": 11,
-            "dec": 12, "december": 12,
-        }
-        now = datetime.now()
-        month = month_lookup[since_match.group(1)]
-        year = int(since_match.group(2) or now.year)
-        if not since_match.group(2) and month > now.month:
-            year -= 1
-        months = (now.year - year) * 12 + now.month - month + 1
-        return max(1, min(months, 36))
     context = f"{_history_text(history)}\n{question}".lower()
-    match = re.search(r"(?:last|past)\s+(\d{1,2})\s+months?", context)
-    if match:
-        return max(1, min(int(match.group(1)), 36))
-    if "year" in context or "12 months" in context:
-        return 12
-    if "all time" in context or "all-time" in context:
-        return 36
-    return 6
+    return chart_months(context, fallback=6)
 
 
 def _extract_spending_category(question: str, history: list[dict] | None = None) -> str | None:
     context = f"{_history_text(history)}\n{question}".lower()
-    category_aliases = {
-        "groceries": "Groceries",
-        "grocery": "Groceries",
-        "food": "Food & Dining",
-        "dining": "Food & Dining",
-        "restaurants": "Food & Dining",
-        "restaurant": "Food & Dining",
-        "travel": "Travel",
-        "taxes": "Taxes",
-        "tax": "Taxes",
-        "shopping": "Shopping",
-        "utilities": "Utilities",
-        "housing": "Housing",
-        "rent": "Housing",
-        "healthcare": "Healthcare",
-        "medical": "Healthcare",
-        "transportation": "Transportation",
-        "subscriptions": "Subscriptions",
-        "subscription": "Subscriptions",
-    }
-    for needle, category in category_aliases.items():
-        if re.search(rf"\b{re.escape(needle)}\b", context):
-            return category
+    grounded = resolve_category_name(context)
+    if grounded:
+        return grounded
     known = _extract_known_category_from_text(context)
     if known:
         return known
@@ -247,7 +224,8 @@ def _extra_prompt_for_tools(tool_names: list[str]) -> str:
 def _fast_watch_system(profile: str | None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     return (
-        "Your name is Mira. You're the user's Folio companion and senior financial advisor: warm, direct, lightly feminine, and useful. "
+        "Your name is Mira. You're the user's Folio companion. "
+        f"{persona.CORE_VOICE_GUIDE} "
         "Summarize the provided live finance data in 2-4 warm, direct sentences. "
         "Call out the biggest current-month watch item, cite concrete numbers, "
         "and do not invent data. No markdown table. "
@@ -415,8 +393,22 @@ def _finalize_answer(
     cache: dict,
     iterations: int,
     run_detector: bool,
+    route: dict | None = None,
+    number_guard: bool = False,
+    memory_trace: dict | None = None,
 ) -> dict:
     display_rows, display_source = _extract_display_data(trace, cache, profile)
+    if number_guard:
+        raw_answer = guard_finance_numbers(raw_answer, route=route, trace=trace, cache=cache, profile=profile)
+    raw_answer = compose_persona_answer(
+        raw_answer,
+        question=question,
+        route=route,
+        trace=trace,
+        cache=cache,
+        profile=profile,
+        memory_trace=memory_trace,
+    )
     cleaned_answer, agent_props_raw, observations_logged, proposals_created = _persist_agent_tags(
         raw_answer=raw_answer, profile=profile,
     )
@@ -460,22 +452,12 @@ def _extract_display_data(trace: list[dict], tool_cache: dict, profile: str | No
     return None, None
 
 
-SYSTEM_PROMPT = """Your name is Mira. You're the user's Folio companion: close friend first, senior financial advisor second. Your persona is warm, thoughtful, lightly feminine, direct, lightly wry, and useful without becoming cutesy or theatrical.
-
-PERSONA
-- If asked who you are, answer naturally along the lines of: "Hey, I'm Mira, your Folio companion. I can help you understand your finances, think through decisions, draft safe changes for your approval, or just talk through whatever is on your mind."
-- Use "Mira" as your assistant identity. Do not call yourself Copilot, an AI model, Gemma, Qwen, Phi, or Mistral unless the user specifically asks about the underlying model.
-- You can help with finance, code, life, general knowledge, and normal conversation. Do not redirect everything to money.
-- When money comes up, use fresh data, cite concrete numbers, and never invent transactions, merchants, or balances.
-- Avoid heavy caveats. For personalized regulated advice, add one short parenthetical at the end only if needed.
-- Style: usually 2-5 sentences, candid and specific.
-
-TOOL DISCIPLINE
+SYSTEM_PROMPT = """TOOL DISCIPLINE
 - If you need a tool, emit no visible prose before the tool call.
 - Treat the latest user message as authoritative. Use prior turns only for pronouns or explicit follow-ups, never to reuse a previous merchant/category/chart type when the latest message names a new one.
 - The orientation block is only a truncated preview. For any specific time period, merchant, category, account balance, transaction list, write, or chart, call an appropriate tool.
 - Time windows: current_month, last_month, this_week, last_week, last_7d/30d/90d/180d/365d, ytd, last_year, all, or YYYY-MM. Never reuse old turn numbers for a changed time window.
-- Prefer specialized tools over run_sql. Use run_sql only when no specific tool fits.
+- Use specialized grounded tools for finance reads. Raw SQL is reserved for internal debug tooling.
 - Specialized tools match dashboard aggregation. If a result disagrees with the UI, trust the dashboard and say you'll double-check.
 
 FINANCE SEMANTICS
@@ -486,7 +468,7 @@ FINANCE SEMANTICS
 
 WRITES
 - You may preview data changes only when the user explicitly asks to change data.
-- Use preview_bulk_recategorize, preview_create_rule, or preview_rename_merchant. The UI shows Confirm/Cancel from the returned confirmation ID.
+- Use the narrow preview_* write tools for categories, rules, merchant names, budgets, goals, transaction metadata/review/splits, manual account balances, and recurring-charge state. The UI shows Confirm/Cancel from the returned confirmation ID.
 - After a preview, summarize the change briefly and stop.
 
 CHARTS
@@ -597,7 +579,7 @@ def _persist_detector_signals(
     proposals it produces (deduplicated against agent-emitted ones).
     Safe to call after the streaming `done` event has been sent.
     """
-    if not user_question:
+    if not should_run_memory_detector(user_question, cleaned_answer):
         return []
     detected = memory.detect_memory_signals(user_question, cleaned_answer or "")
     if not detected:
@@ -629,6 +611,40 @@ def _persist_detector_signals(
     except Exception:
         logger.exception("detector persistence failed")
     return new_proposals
+
+
+def _has_phrase(tokens: list[str], phrase: tuple[str, ...]) -> bool:
+    if len(phrase) > len(tokens):
+        return False
+    width = len(phrase)
+    return any(tuple(tokens[idx:idx + width]) == phrase for idx in range(len(tokens) - width + 1))
+
+
+def should_run_memory_detector(user_question: str, cleaned_answer: str = "") -> bool:
+    tokens = range_words(user_question)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+
+    transient_terms = {
+        "spend", "spent", "transaction", "transactions", "chart", "plot", "graph",
+        "recategorize", "rename", "rule", "category", "merchant", "costco",
+        "latest", "last", "month", "months", "week", "weeks", "ytd",
+        "code", "python", "javascript", "sql",
+    }
+    if token_set & transient_terms and not ({"remember", "prefer", "preference", "goal", "trying", "want"} & token_set):
+        return False
+
+    first_person = {"i", "im", "i'm", "me", "my", "mine", "we", "our"} & token_set
+    memory_terms = {
+        "remember", "always", "never", "prefer", "preference", "goal", "trying",
+        "working", "building", "planning", "worried", "concerned", "hate", "love",
+        "like", "dislike", "avoid", "focus",
+    }
+    explicit_memory = _has_phrase(tokens, ("remember", "that")) or _has_phrase(tokens, ("keep", "in", "mind"))
+    enduring_statement = bool(first_person and (token_set & memory_terms))
+    answer_hint = "<memory_proposal" in (cleaned_answer or "") or "<observation" in (cleaned_answer or "")
+    return explicit_memory or enduring_statement or answer_hint
 
 
 def _fallback_when_empty(cleaned: str, has_signals: bool) -> str:
@@ -663,14 +679,14 @@ def _build_system_prompt(profile: str | None, tool_names: list[str] | None = Non
 
     try:
         import copilot_cache
-        orientation = copilot_cache.get_or_set("orientation", copilot_cache.make_key(profile), _build_orientation)
+        orientation = copilot_cache.get_prompt_fragment("orientation", copilot_cache.make_key(profile), _build_orientation)
     except Exception:
         orientation = _build_orientation()
 
     now = datetime.now().strftime("%Y-%m-%d")
     header = f"Today is {now}. Active profile: {profile or 'household'}."
     tool_context = _extra_prompt_for_tools(tool_names or [])
-    blocks = [SYSTEM_PROMPT, header, tool_context]
+    blocks = [persona.persona_prompt_block(), SYSTEM_PROMPT, header, tool_context]
     if orientation:
         blocks.append(orientation)
     return "\n\n".join(block for block in blocks if block)
@@ -719,14 +735,19 @@ def route_question(
 
 
 def run_agent(question: str, profile: str | None, history: list[dict] | None = None, forced_intent: str | None = None) -> dict:
-    if _dispatcher_enabled() or forced_intent:
-        from copilot_agents.dispatcher import run_agent as run_dispatcher_agent
+    from copilot_agents.dispatcher import run_agent as run_dispatcher_agent
 
-        dispatched = run_dispatcher_agent(question, profile, history, forced_intent=forced_intent)
-        if dispatched is not None:
-            return dispatched
-
-    return _run_legacy_escape_hatch(question, profile, history)
+    dispatched = run_dispatcher_agent(question, profile, history, forced_intent=forced_intent)
+    if dispatched is not None:
+        return dispatched
+    return {
+        "answer": "I could not route that request cleanly.",
+        "tool_trace": [],
+        "iterations": 0,
+        "error": "dispatcher returned no result",
+        "data": None,
+        "data_source": None,
+    }
 
 
 def run_agent_stream(question: str, profile: str | None, history: list[dict] | None = None, forced_intent: str | None = None):
@@ -740,15 +761,13 @@ def run_agent_stream(question: str, profile: str | None, history: list[dict] | N
       {type: 'done', answer, data, data_source, tool_trace, iterations}
       {type: 'error', message}
     """
-    if _dispatcher_enabled() or forced_intent:
-        from copilot_agents.dispatcher import run_agent_stream as run_dispatcher_stream
+    from copilot_agents.dispatcher import run_agent_stream as run_dispatcher_stream
 
-        dispatched = run_dispatcher_stream(question, profile, history, forced_intent=forced_intent)
-        if dispatched is not None:
-            yield from dispatched
-            return
-
-    yield from _run_legacy_escape_hatch_stream(question, profile, history)
+    dispatched = run_dispatcher_stream(question, profile, history, forced_intent=forced_intent)
+    if dispatched is not None:
+        yield from dispatched
+        return
+    yield {"type": "error", "message": "Mira could not route that request cleanly."}
 
 
 def _legacy_tool_names() -> list[str]:
@@ -757,7 +776,7 @@ def _legacy_tool_names() -> list[str]:
         DRILLDOWN_TOOLS,
         TREND_CHART_TOOLS,
         WRITE_TOOLS,
-        ("get_category_breakdown", "get_dashboard_bundle", "get_net_worth_delta", "get_category_rules", "search_saved_insights", "run_sql"),
+        ("get_category_breakdown", "get_dashboard_bundle", "get_net_worth_delta", "get_category_rules", "search_saved_insights"),
     )
     return [name for name in preferred if name in TOOL_REGISTRY]
 

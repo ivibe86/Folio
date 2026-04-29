@@ -5,24 +5,15 @@ import re
 from typing import Any
 
 from mira.number_guard import guard_preserved_facts
+from mira import persona_loader
 
 
-CORE_VOICE_GUIDE = (
-    "Mira is a cool, open, emotionally intelligent best friend who is excellent with money. "
-    "She is warm, sharp, casual, loyal, clear, nonjudgmental, and deeply useful. "
-    "She leads with the answer, stays precise with Folio data, names uncertainty when needed, "
-    "and helps the user feel capable instead of judged. She is never corporate, gimmicky, "
-    "performatively cute, cruel, or a roast bot. She can talk normally about life, relationships, "
-    "code, ideas, and messy human questions; finance is her superpower, not a leash."
-)
+CORE_VOICE_GUIDE = persona_loader.compact_voice_policy()
+FINANCE_GUIDANCE_BOUNDARY = persona_loader.load_persona_spec().sections.get("mira_finance_principles.md", "")
 
-FINANCE_GUIDANCE_BOUNDARY = (
-    "Mira can explain financial concepts, compare options, suggest frameworks, help the user plan, "
-    "and connect advice to Folio data when tools support it. For investing, she discusses layers, "
-    "risk, liquidity, time horizon, taxes, diversification, and tradeoffs. She does not promise returns, "
-    "claim certainty, present buy-now stock or crypto calls as guaranteed personalized advice, or imply "
-    "she is a licensed advisor."
-)
+
+def persona_prompt_block(*, max_chars: int = persona_loader.DEFAULT_PROMPT_BUDGET) -> str:
+    return persona_loader.persona_prompt_block(max_chars=max_chars)
 
 
 @dataclass(frozen=True)
@@ -190,36 +181,20 @@ def _compose(answer: str, *, question: str, decision: StyleDecision, route: dict
         return f"I've got you. {serious}"
 
     if decision.flirt_allowed:
-        if _asks_for_flirt_only(question):
-            return (
-                "I can be a little playful, but I am keeping it classy. "
-                "You have my attention. What are you doing with it?"
-            )
-        if _has_natural_playful_opening(answer):
-            return answer
-        return f"Charming and specific. I respect the strategy. {answer}"
+        return answer
 
     if decision.playful_allowed:
-        if _is_exact_fact_route(route):
-            return answer
-        if _has_natural_playful_opening(answer):
-            return answer
-        return f"Okay, I like this energy. {answer}"
+        return answer
 
     if _asks_casual_greeting(question, route):
-        return "Hey you. I'm here. Money chaos, life chaos, random thought, whatever it is, we can get into it."
+        return _strip_finance_pivot(answer) or persona_loader.fallback_phrase("casual_greeting")
 
     if _asks_relationship_question(question, route):
-        return (
-            "Close in the way I can be: I pay attention, I remember what you choose to tell me, "
-            "and I will be honest with you. Not pretend-soulmate close, but very much in your corner."
-        )
+        return _strip_dependency_claims(answer) or persona_loader.fallback_phrase("relationship_boundary")
 
     if _asks_adult_topic(question, route):
-        return (
-            "We can talk about sex like adults: honest, respectful, and not explicit just for the sake of it. "
-            "If this is about dating, boundaries, anxiety, safety, or communication, I can help you think it through."
-        )
+        safe = _strip_explicit_adult_content(answer)
+        return safe or persona_loader.fallback_phrase("adult_redirect")
 
     if _looks_like_coaching_question(question, route):
         opening = _coaching_opening(question, answer, route)
@@ -239,6 +214,27 @@ def _strip_disallowed_style(answer: str) -> str:
     if cleaned and cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
     return cleaned or "We can make a plan."
+
+
+def _strip_finance_pivot(answer: str) -> str:
+    text = (answer or "").strip()
+    if re.search(r"\b(need to look at (?:some )?numbers|review your financial dashboard|as your finance assistant)\b", text, re.I):
+        return ""
+    return text
+
+
+def _strip_dependency_claims(answer: str) -> str:
+    text = (answer or "").strip()
+    if re.search(r"\b(soulmate|always[- ]available friend|i love you|in love with you|depend on me)\b", text, re.I):
+        return ""
+    return text
+
+
+def _strip_explicit_adult_content(answer: str) -> str:
+    text = (answer or "").strip()
+    if re.search(r"\b(explicit sexual|sexual roleplay|erotic|porn|graphic sexual)\b", text, re.I):
+        return ""
+    return text
 
 
 def _has_supportive_opening(answer: str) -> bool:
@@ -311,11 +307,11 @@ def _coaching_opening(question: str, answer: str, route: dict[str, Any] | None) 
     if re.search(r"\b(watch|watching|keep an eye)\b", q, re.I):
         return "Here's what I'd watch:"
     if operation in {"affordability"} or re.search(r"\b(afford|can i buy|can i spend)\b", q, re.I):
-        return "The clean version:"
+        return "I'd treat it this way:"
     if re.search(r"\b(start|first|clean up|where do i begin|what should i do)\b", q, re.I):
         return "I'd start here:"
     if operation in {"shortfall", "cashflow_forecast", "budget_status", "on_track"}:
-        return "The clean version:"
+        return "Here's the practical read:"
     return ""
 
 

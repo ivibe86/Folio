@@ -152,31 +152,41 @@ def _looks_like_subject_followup(question: str) -> bool:
     return bool(re.search(r"\b(what\s+about|how\s+about|and\s+for|now\s+for)\b", question or "", re.I))
 
 
+def _spend_plan_has_subject(tool_name: str, args: dict | None) -> bool:
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "get_merchant_spend":
+        return bool(str(args.get("merchant") or "").strip())
+    if tool_name == "get_category_spend":
+        return bool(str(args.get("category") or "").strip())
+    return False
+
+
 def _direct_plan_from_route(route: dict | None, question: str = "", history: list[dict] | None = None, profile: str | None = None) -> dict | None:
     if not route:
         return None
     action_steps = domain_actions.tool_plan_for_route(route, {"SpendTotal", "TransactionSearch"})
     if action_steps:
         step = action_steps[0]
-        if step["name"] in SPEND_TOTAL_TOOLS and _looks_like_subject_followup(question):
+        step_args = step.get("args") or {}
+        if step["name"] in SPEND_TOTAL_TOOLS and not _spend_plan_has_subject(step["name"], step_args) and _looks_like_subject_followup(question):
             inherited = _history_subject(history, profile)
             if inherited:
                 inherited_tool, subject = inherited
                 arg_name = "category" if inherited_tool == "get_category_spend" else "merchant"
                 return {
                     "name": inherited_tool,
-                    "args": {arg_name: subject, "range": (step.get("args") or {}).get("range") or _range_from_question(question)},
+                    "args": {arg_name: subject, "range": step_args.get("range") or _range_from_question(question)},
                     "source": "domain_action_history_followup",
                 }
         return {
             "name": step["name"],
-            "args": step.get("args") or {},
+            "args": step_args,
             "source": "domain_action",
         }
     tool_name = route.get("tool_name")
     if tool_name in SPEND_TOTAL_TOOLS or tool_name in TRANSACTION_TOOLS:
         args = route.get("args") or {}
-        if tool_name in SPEND_TOTAL_TOOLS and _looks_like_subject_followup(question):
+        if tool_name in SPEND_TOTAL_TOOLS and not _spend_plan_has_subject(tool_name, args) and _looks_like_subject_followup(question):
             inherited = _history_subject(history, profile)
             if inherited:
                 inherited_tool, subject = inherited
@@ -517,6 +527,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
             cache=cache,
             iterations=0,
             run_detector=True,
+            route=route,
         )
         result["llm_calls"] = parser_calls
         return provenance.attach_completed_action(
@@ -539,6 +550,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
             cache=cache,
             iterations=0,
             run_detector=True,
+            route=route,
         )
         result["llm_calls"] = llm_calls
         return provenance.attach_completed_action(

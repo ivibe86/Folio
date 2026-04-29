@@ -115,6 +115,18 @@
       "copilot_default": "good",
       "warning": "Primary Folio recommendation for 16 GB laptops."
     },
+    "hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Q5_K_M": {
+      "label": "Gemma 4 E4B Uncensored Q5",
+      "family": "Gemma 4",
+      "task_fit": ["copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 5.8,
+      "badges": ["Experimental", "Copilot", "HF GGUF"],
+      "experimental": true,
+      "categorize_default": "avoid",
+      "copilot_default": "experimental",
+      "warning": "Experimental Hugging Face GGUF pulled through Ollama. Use for Mira Copilot testing only; avoid for categorization and unattended write-heavy workflows."
+    },
     "gemma3:4b": {
       "label": "Gemma 3 4B",
       "family": "Gemma 3",

@@ -21,7 +21,7 @@ from mira.fast_paths import (
     _shortcut_base,
     _with_dialogue_state,
 )
-from mira.grounding import BROAD_CATEGORY_NAMES as _BROAD_CATEGORY_NAMES, ground_category, ground_merchant
+from mira.grounding import BROAD_CATEGORY_NAMES as _BROAD_CATEGORY_NAMES, ground_category, ground_merchant, normalize_text
 from range_parser import contains, parse_range, words
 
 _PLAN_TERMS = {
@@ -83,7 +83,7 @@ def _dialogue_state_from_history(history: list[dict] | None, profile: str | None
     if last.get("role") != "assistant":
         return None, ""
     state = last.get("dialogue_state")
-    if isinstance(state, dict) and state.get("kind") == "merchant_clarification":
+    if isinstance(state, dict) and state.get("kind") in {"merchant_clarification", "entity_type_clarification"}:
         return dict(state), last.get("content") or ""
 
     content = last.get("content") or ""
@@ -100,14 +100,6 @@ def _answer_context_from_history(history: list[dict] | None, profile: str | None
     server_context = conversation_controller.answer_context_from_history(profile, history)
     if server_context:
         return server_context
-    if not history:
-        return None
-    for turn in reversed(history[-8:]):
-        if turn.get("role") != "assistant":
-            continue
-        context = turn.get("answer_context")
-        if isinstance(context, dict) and context.get("kind") == "finance_answer_context":
-            return dict(context)
     return None
 
 def _plain_history_finance_context(history: list[dict] | None, profile: str | None) -> dict | None:
@@ -166,10 +158,28 @@ def _asks_for_transaction_details(tokens: list[str]) -> bool:
         or contains(tokens, ("made", "up"))
     )
 
+def _explicit_subject_type(question: str) -> str:
+    tokens = words(question)
+    token_set = set(tokens)
+    if contains(tokens, ("not", "merchant")) or contains(tokens, ("in", "category")) or "category" in token_set:
+        return "category"
+    if contains(tokens, ("not", "category")) or "merchant" in token_set or bool(token_set & {"at", "from"}):
+        return "merchant"
+    if "on" in token_set:
+        return "category"
+    return ""
+
 def _context_subject(question: str, context: dict, profile: str | None) -> tuple[str, str]:
     merchant = exact_merchant_for_text(question, _merchant_names(profile))
     category = _exact_category_for_text(question, profile)
-    if category and category.lower() in _BROAD_CATEGORY_NAMES:
+    explicit_type = _explicit_subject_type(question)
+    if explicit_type == "category" and category:
+        subject_type = "category"
+        subject = category
+    elif explicit_type == "merchant" and merchant:
+        subject_type = "merchant"
+        subject = merchant
+    elif category and category.lower() in _BROAD_CATEGORY_NAMES:
         subject_type = "category"
         subject = category
     else:
@@ -296,11 +306,28 @@ def _ground_context_subject_shift(
 
     category_result = ground_category(clue, _candidate_payload(clue, profile).get("categories") or [], limit=3)
     merchant_result = ground_merchant(clue, _merchant_names(profile), profile=profile, include_transaction_evidence=True, limit=3)
+    explicit_type = _explicit_subject_type(question)
+    broad_category = _broad_category_from_result(category_result, clue)
 
     subject_type = ""
     subject = ""
-    if category_result.kind == "exact" and category_result.value and category_result.value.lower() in _BROAD_CATEGORY_NAMES:
-        subject_type, subject = "category", category_result.value
+    if _is_material_entity_type_collision(merchant_result, category_result, profile, range_token) and not explicit_type:
+        return _entity_type_collision_route(
+            question,
+            clue,
+            merchant_result.value or "",
+            category_result.value or "",
+            range_token,
+            action,
+            profile,
+            start,
+        )
+    if explicit_type == "category" and (category_result.value or broad_category):
+        subject_type, subject = "category", category_result.value or broad_category
+    elif explicit_type == "merchant" and merchant_result.kind == "exact" and merchant_result.value:
+        subject_type, subject = "merchant", merchant_result.value
+    elif broad_category:
+        subject_type, subject = "category", broad_category
     elif merchant_result.kind == "exact" and merchant_result.value:
         subject_type, subject = "merchant", merchant_result.value
     elif category_result.kind == "exact" and category_result.value:
@@ -356,6 +383,139 @@ def _ground_context_subject_shift(
             return _with_dialogue_state(route, state)
 
     return _context_missing_subject_route(question, context, clue, range_token, start, action=action)
+
+def _broad_category_from_result(category_result: Any, clue: str = "") -> str:
+    value = str(getattr(category_result, "value", "") or "")
+    if value and value.lower() in _BROAD_CATEGORY_NAMES:
+        return value
+    clue_norm = normalize_text(clue)
+    for candidate in getattr(category_result, "candidates", []) or []:
+        name = str(candidate.get("display_name") or candidate.get("value") or "").strip()
+        if name and name.lower() in _BROAD_CATEGORY_NAMES and normalize_text(name) == clue_norm:
+            return name
+    for candidate in getattr(category_result, "candidates", []) or []:
+        name = str(candidate.get("display_name") or candidate.get("value") or "").strip()
+        if name and name.lower() in _BROAD_CATEGORY_NAMES:
+            return name
+    return ""
+
+def _subject_total(subject_type: str, subject: str, range_token: str, profile: str | None) -> tuple[float, int]:
+    try:
+        from copilot_tools import execute_tool
+
+        tool_name = "get_merchant_spend" if subject_type == "merchant" else "get_category_spend"
+        key = "merchant" if subject_type == "merchant" else "category"
+        result = execute_tool(tool_name, {key: subject, "range": range_token}, profile, cache={})
+        if not isinstance(result, dict):
+            return 0.0, 0
+        total = float(result.get("total") or 0)
+        count = int(result.get("txn_count") or result.get("total_count") or result.get("total_matching_transactions") or 0)
+        return total, count
+    except Exception:
+        return 0.0, 0
+
+def _is_material_entity_type_collision(merchant_result: Any, category_result: Any, profile: str | None, range_token: str) -> bool:
+    if not (
+        getattr(merchant_result, "kind", "") == "exact"
+        and getattr(category_result, "kind", "") == "exact"
+        and getattr(merchant_result, "value", None)
+        and getattr(category_result, "value", None)
+    ):
+        return False
+    merchant_name = str(merchant_result.value)
+    category_name = str(category_result.value)
+    if normalize_text(merchant_name) != normalize_text(category_name):
+        return False
+    if category_name.lower() in _BROAD_CATEGORY_NAMES:
+        return False
+    merchant_total, merchant_count = _subject_total("merchant", merchant_name, range_token, profile)
+    category_total, category_count = _subject_total("category", category_name, range_token, profile)
+    return abs(merchant_total - category_total) >= 0.01 or merchant_count != category_count
+
+def _entity_type_state(question: str, subject: str, merchant: str, category: str, range_token: str, action: str) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "entity_type_clarification",
+        "original_question": question,
+        "subject": subject,
+        "merchant": merchant,
+        "category": category,
+        "range_token": range_token,
+        "action": action or "spend",
+        "pending_action": action or "spend",
+        "rejected_interpretations": [],
+    }
+
+def _entity_type_collision_route(
+    question: str,
+    clue: str,
+    merchant: str,
+    category: str,
+    range_token: str,
+    action: str,
+    profile: str | None,
+    start: float,
+) -> dict:
+    merchant_total, merchant_count = _subject_total("merchant", merchant, range_token, profile)
+    category_total, category_count = _subject_total("category", category, range_token, profile)
+    route = _shortcut_base("chat", "entity_type_collision", start)
+    route["needs_clarification"] = True
+    route["clarification_question"] = (
+        f"I found `{clue}` as both a merchant and a category. "
+        f"Merchant `{merchant}` is ${merchant_total:,.2f} across {merchant_count} transaction(s); "
+        f"category `{category}` is ${category_total:,.2f} across {category_count} transaction(s). "
+        "Did you mean the merchant or the category?"
+    )
+    route["args"] = {
+        "matched_text": clue,
+        "merchant": merchant,
+        "category": category,
+        "range": range_token,
+        "merchant_total": merchant_total,
+        "category_total": category_total,
+    }
+    route["uses_history"] = True
+    return _with_dialogue_state(route, _entity_type_state(question, clue, merchant, category, range_token, action))
+
+def _entity_type_dialogue_route(question: str, state: dict, start: float, profile: str | None) -> dict:
+    tokens = words(question)
+    token_set = set(tokens)
+    if token_set <= {"cancel", "stop", "nevermind", "forget"}:
+        route = _shortcut_base("chat", "dialogue_cancelled", start)
+        route["needs_clarification"] = True
+        route["clarification_question"] = "Okay, I won't use that interpretation."
+        route["uses_history"] = True
+        return route
+    chosen = _explicit_subject_type(question)
+    if not chosen and token_set <= {"merchant", "merch"}:
+        chosen = "merchant"
+    if not chosen and token_set <= {"category", "cat"}:
+        chosen = "category"
+    if chosen == "merchant":
+        subject = str(state.get("merchant") or state.get("subject") or "").strip()
+    elif chosen == "category":
+        subject = str(state.get("category") or state.get("subject") or "").strip()
+    else:
+        subject = ""
+    if chosen in {"merchant", "category"} and subject:
+        route = route_for_context_slots(
+            question,
+            chosen,
+            subject,
+            str(state.get("action") or "spend"),
+            str(state.get("range_token") or "current_month"),
+            start,
+            _context_policy_callbacks(profile),
+        )
+        if route:
+            route["uses_history"] = True
+            route["shortcut"] = "entity_type_correction"
+            return route
+    route = _shortcut_base("chat", "clarify_entity_type", start)
+    route["needs_clarification"] = True
+    route["clarification_question"] = "I still need the type: should I use the merchant or the category?"
+    route["uses_history"] = True
+    return _with_dialogue_state(route, state)
 
 def _should_run_context_interpreter(tokens: list[str], parsed_range_explicit: bool) -> bool:
     if not tokens:
@@ -748,6 +908,8 @@ def _dialogue_state_route(question: str, history: list[dict] | None, profile: st
     state, last_assistant = _dialogue_state_from_history(history, profile)
     if not state:
         return None
+    if state.get("kind") == "entity_type_clarification":
+        return _entity_type_dialogue_route(question, state, start, profile)
 
     act = conversation_controller.interpret_dialogue_reply(question, state, last_assistant)
     controller_act = conversation_controller.controller_act_for_dialogue(act, state)

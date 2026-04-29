@@ -465,7 +465,12 @@
             .slice(0, -1)
             .filter(m => m && m.content && (m.role === 'user' || (m.role === 'assistant' && m.operation && m.operation !== 'error')))
             .slice(-12)
-            .map(m => ({ role: m.role, content: m.content }));
+            .map(m => {
+                const turn = { role: m.role, content: m.content };
+                if (m.dialogue_state) turn.dialogue_state = m.dialogue_state;
+                if (m.answer_context) turn.answer_context = m.answer_context;
+                return turn;
+            });
 
         // Add a live assistant placeholder that we'll mutate as events arrive
         messages = [...messages, {
@@ -480,6 +485,7 @@
             original_question: question,
             tool_trace: [],
             active_tool: null,
+            progress: 'Routing the request',
         }];
         const streamIdx = messages.length - 1;
         await tick();
@@ -489,6 +495,21 @@
         cancelStream = api.askCopilotStream(question, activeProfileId, history, (ev) => {
             const msg = { ...messages[streamIdx] };
             switch (ev.type) {
+                case 'routing_started':
+                    msg.progress = ev.label || ev.stage || 'Routing the request';
+                    break;
+                case 'route':
+                    if (ev.dialogue_state) msg.dialogue_state = ev.dialogue_state;
+                    break;
+                case 'controller':
+                    msg.controller_act = ev.controller_act || null;
+                    break;
+                case 'action':
+                    msg.domain_action = ev.domain_action || null;
+                    break;
+                case 'progress':
+                    msg.progress = ev.label || ev.stage || 'Working';
+                    break;
                 case 'reset_text':
                     currentContent = '';
                     msg.content = '';
@@ -499,6 +520,7 @@
                     break;
                 case 'tool_call':
                     msg.active_tool = ev.name;
+                    msg.progress = null;
                     msg.tool_trace = [...(msg.tool_trace || []), { name: ev.name, args: ev.args, duration_ms: null }];
                     break;
                 case 'chart':
@@ -506,6 +528,7 @@
                     break;
                 case 'tool_result': {
                     msg.active_tool = null;
+                    msg.progress = null;
                     const trace = [...(msg.tool_trace || [])];
                     for (let i = trace.length - 1; i >= 0; i--) {
                         if (trace[i].name === ev.name && trace[i].duration_ms == null) {
@@ -524,12 +547,15 @@
                         ? ev.tool_trace
                         : (msg.tool_trace || []);
                     msg.active_tool = null;
+                    msg.progress = null;
                     msg.memory_proposals = ev.memory_proposals || [];
+                    msg.dialogue_state = ev.dialogue_state || ev.route?.dialogue_state || null;
+                    msg.answer_context = ev.answer_context || null;
                     if (ev.chart) msg.chart = ev.chart;
                     if (ev.pending_write) {
                         msg.operation = 'write_preview';
                         msg.confirmation_id = ev.pending_write.confirmation_id;
-                        msg.sql = ev.pending_write.sql;
+                        msg.sql = null;
                         msg.preview_changes = ev.pending_write.preview_changes || [];
                         msg.needs_confirmation = true;
                         msg.rows_affected = ev.pending_write.rows_affected || 0;
@@ -559,6 +585,7 @@
                     msg.content = ev.message || 'Something went wrong.';
                     msg.operation = 'error';
                     msg.active_tool = null;
+                    msg.progress = null;
                     loading = false;
                     cancelStream = null;
                     break;
@@ -653,7 +680,10 @@
             invalidateCache();
             await refreshSidebar();
         } catch (error) {
-            pushAssistantMessage("Failed to execute the operation. Please try again.", 'error');
+            const message = error?.code === 'confirmation_expired'
+                ? 'Preview expired. Ask Mira to prepare it again.'
+                : (error?.message || 'Failed to execute the operation. Please try again.');
+            pushAssistantMessage(message, 'error');
         } finally {
             loading = false;
             await tick();
@@ -1346,6 +1376,11 @@
                                                 <span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
                                                 Calling {msg.active_tool.replaceAll('_', ' ')}…
                                             </div>
+                                        {:else if msg.progress}
+                                            <div class="copilot-op-badge copilot-op-read" style="margin-bottom: 6px; opacity: 0.9;">
+                                                <span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
+                                                {msg.progress}…
+                                            </div>
                                         {/if}
 
                                         {#if msg.content?.trim() || msg.operation === 'streaming'}
@@ -1631,7 +1666,7 @@
                     <div class="copilot-panel-header">
                         <div>
                             <h3>Recent Mira Activity</h3>
-                            <p>Reuse a recent prompt or inspect the generated SQL.</p>
+                            <p>Reuse a recent prompt or inspect Mira's tool path.</p>
                         </div>
                         {#if recentHistory.length > 0}
                             <button type="button" class="copilot-inline-btn" on:click={clearHistory} disabled={sidebarLoading}>Clear</button>

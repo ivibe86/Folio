@@ -22,7 +22,6 @@ TELLER_TOKEN_PREFIX = os.getenv("TELLER_TOKEN_PREFIX", "_TOKEN")
 
 def _load_tokens() -> list[str]:
     skip_vars = {
-        "ANTHROPIC_API_KEY",
         "TELLER_TOKEN_PREFIX",
         "TOKEN_ENCRYPTION_KEY",
     }
@@ -60,7 +59,6 @@ TOKENS = _load_tokens()
 
 def _load_profiles() -> dict[str, list[str]]:
     skip_vars = {
-        "ANTHROPIC_API_KEY",
         "TELLER_TOKEN_PREFIX",
         "TOKEN_ENCRYPTION_KEY",
     }

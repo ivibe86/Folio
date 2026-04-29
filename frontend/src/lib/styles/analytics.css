@@ -881,6 +881,18 @@
     opacity: 0.4;
 }
 
+.mom-glass-body {
+    max-height: 28rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.mom-glass-body::-webkit-scrollbar {
+    display: none;
+}
+
 .mom-glass-row {
     display: grid;
     grid-template-columns: 1.8fr 1fr 1fr 1fr;

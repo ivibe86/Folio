@@ -39,6 +39,8 @@ from mira.fast_paths import (
     _write_rule_shortcut,
 )
 from mira.router_prompt import build_router_prompt
+from mira import cashflow_forecast
+from mira import memory_v2
 from range_parser import chart_months, contains, has_explicit_time_scope, parse_range, words
 
 VALID_DISPATCH_INTENTS = {
@@ -49,6 +51,7 @@ VALID_DISPATCH_INTENTS = {
     "write",
     "plan",
     "chat",
+    "memory",
     "drilldown",  # compatibility for forced intent/debug scripts
     "error",
 }
@@ -63,6 +66,18 @@ _SEMANTIC_TOOLS = {
     "find_transactions",
     "explain_metric",
     "get_recurring_changes",
+    "get_data_health_summary",
+    "get_cashflow_forecast",
+    "predict_shortfall",
+    "check_affordability",
+    "remember_user_context",
+    "retrieve_relevant_memories",
+    "update_memory",
+    "forget_memory",
+    "list_mira_memories",
+    "find_low_confidence_transactions",
+    "explain_transaction_enrichment",
+    "get_enrichment_quality_summary",
 }
 _WRITE_TOOLS = {
     "preview_bulk_recategorize",
@@ -90,6 +105,14 @@ _PROVIDER_ACTIONS = {
     "switch", "change", "use", "using", "set", "configure", "select", "provider", "model", "llm", "cloud"
 }
 _ACK_TOKENS = {"thanks", "thank", "thx", "cool", "ok", "okay", "gotcha", "nice", "great"}
+_SENSITIVE_SUPPORT_RE = re.compile(
+    r"\b("
+    r"scared|terrified|worried|anxious|panic|panicking|drowning|ashamed|"
+    r"can't\s+pay|cannot\s+pay|cant\s+pay|won't\s+be\s+able\s+to\s+pay|"
+    r"overdraft|overdrawn|evict|eviction|can't\s+afford|cannot\s+afford"
+    r")\b",
+    re.I,
+)
 
 
 def dispatcher_enabled() -> bool:
@@ -134,9 +157,30 @@ def default_tools_for_intent(intent: str) -> list[str]:
             "get_recurring_summary",
             "get_net_worth_trend",
             "get_net_worth_delta",
+            "get_cashflow_forecast",
+            "predict_shortfall",
+            "check_affordability",
         ]
     if intent == "overview":
-        return ["get_dashboard_snapshot", "explain_metric", "get_recurring_changes"]
+        return [
+            "get_dashboard_snapshot",
+            "explain_metric",
+            "get_recurring_changes",
+            "get_data_health_summary",
+            "get_cashflow_forecast",
+            "predict_shortfall",
+            "find_low_confidence_transactions",
+            "explain_transaction_enrichment",
+            "get_enrichment_quality_summary",
+        ]
+    if intent == "memory":
+        return [
+            "remember_user_context",
+            "retrieve_relevant_memories",
+            "update_memory",
+            "forget_memory",
+            "list_mira_memories",
+        ]
     return []
 
 
@@ -168,6 +212,9 @@ def answer_context_for_route(
     if route.get("intent") == "plan":
         subject_type = str(args.get("subject_type") or "")
         subject = str(args.get("subject") or "")
+        if tool_name == "check_affordability" and args.get("category"):
+            subject_type = "category"
+            subject = str(args.get("category") or "")
     elif tool_name == "get_merchant_spend":
         subject_type = "merchant"
         subject = str(args.get("merchant") or "")
@@ -279,6 +326,13 @@ def _looks_like_grounding_question(question: str) -> bool:
     return asks_how and bool(token_set & info_terms) and bool(token_set & get_terms)
 
 
+def _looks_like_sensitive_support_turn(question: str) -> bool:
+    tokens = set(words(question))
+    sensitive_topic = bool(tokens & {"rent", "debt", "overdraft", "overdrawn", "eviction", "evict", "medical", "taxes", "income"})
+    explicit_total = ("how" in tokens and "much" in tokens) or bool(tokens & {"spent", "spend", "spending", "transactions", "chart", "plot"})
+    return sensitive_topic and bool(_SENSITIVE_SUPPORT_RE.search(question or "")) and not explicit_total
+
+
 def _with_controller_act(route: dict, act) -> dict:
     if act:
         route["controller_act"] = act.as_dict() if hasattr(act, "as_dict") else act
@@ -331,11 +385,89 @@ def _is_categorization_debug(question: str) -> bool:
     )
 
 
+def _transaction_enrichment_shortcut(question: str, start: float) -> dict | None:
+    q = (question or "").lower()
+    mentions_enrichment = "enrichment" in q or "enriched" in q
+    mentions_transaction = "transaction" in q or "transactions" in q
+    if mentions_transaction and "low confidence" in q:
+        route = _shortcut_base("overview", "low_confidence_transactions", start)
+        route["tool_name"] = "find_low_confidence_transactions"
+        route["args"] = {"threshold": 0.7, "limit": 25}
+        return route
+    if mentions_enrichment and any(term in q for term in ("coverage", "quality", "summary", "health")):
+        route = _shortcut_base("overview", "enrichment_quality_summary", start)
+        route["tool_name"] = "get_enrichment_quality_summary"
+        route["args"] = {}
+        return route
+    if mentions_transaction and (mentions_enrichment or re.search(r"\bcategor(?:y|ized|ised|ization|isation)\b", q)):
+        if re.search(r"\b(why|explain|how)\b", q):
+            match = re.search(r"\btransaction(?:\s+id)?\s*[:#-]?\s*([A-Za-z0-9_.:-]{3,})", question or "", re.I)
+            route = _shortcut_base("overview", "transaction_enrichment_explanation", start)
+            route["tool_name"] = "explain_transaction_enrichment"
+            route["args"] = {"transaction_id": match.group(1)} if match else {}
+            return route
+    return None
+
+
+def _data_health_shortcut(question: str, start: float) -> dict | None:
+    q = (question or "").lower()
+    if not re.search(r"\b(data|db|database|sync|health|integrity|stale|freshness|caveat|limitation|coverage)\b", q):
+        return None
+    if re.search(r"\b(health|integrity|stale|fresh|freshness|sync|trust|caveats?|limitations?|coverage)\b", q):
+        route = _shortcut_base("overview", "data_health", start)
+        route["tool_name"] = "get_data_health_summary"
+        route["args"] = {}
+        return route
+    return None
+
+
+def _phase5_cashflow_shortcut(question: str, profile: str | None, start: float) -> dict | None:
+    q = (question or "").lower()
+    if re.search(r"\b(afford|buy|spend another|can i spend)\b", q):
+        try:
+            from copilot_agents.drilldown import _load_categories
+
+            categories = _load_categories(profile)
+        except Exception:
+            categories = []
+        args = cashflow_forecast.extract_affordability_args(question, categories) or {}
+        if not args.get("amount"):
+            return None
+        route = _shortcut_base("plan", "affordability", start)
+        route["tool_name"] = "check_affordability"
+        route["args"] = args
+        return route
+    if re.search(r"\b(run short|shortfall|overdraw|overdraft|before my next paycheck|before next paycheck)\b", q):
+        route = _shortcut_base("plan", "shortfall", start)
+        route["tool_name"] = "predict_shortfall"
+        route["args"] = {}
+        return route
+    if re.search(r"\b(cash[- ]?flow|forecast|project(?:ed)? balance|next paycheck)\b", q):
+        route = _shortcut_base("plan", "cashflow_forecast", start)
+        route["tool_name"] = "get_cashflow_forecast"
+        route["args"] = {}
+        return route
+    return None
+
+
+def _memory_shortcut(question: str, start: float) -> dict | None:
+    command = memory_v2.parse_memory_command(question)
+    if not command:
+        return None
+    operation = str(command.get("operation") or "")
+    route = _shortcut_base("memory", operation, start)
+    route["tool_name"] = operation
+    route["args"] = command.get("args") if isinstance(command.get("args"), dict) else {}
+    route["confidence"] = 1.0
+    route["uses_history"] = operation == "forget_memory" and "text" not in route["args"]
+    return route
+
+
 def _clean_args(tool_name: str | None, args: Any, question: str = "") -> dict:
     if not isinstance(args, dict):
         return {}
     cleaned = {k: v for k, v in args.items() if v not in (None, "", [])}
-    if tool_name in {"get_transactions", "find_transactions"}:
+    if tool_name in {"get_transactions", "find_transactions", "get_transactions_for_merchant"}:
         if "limit" in cleaned:
             try:
                 cleaned["limit"] = max(1, min(int(cleaned["limit"]), 50))
@@ -351,10 +483,17 @@ def _clean_args(tool_name: str | None, args: Any, question: str = "") -> dict:
         "get_merchant_spend",
         "get_transactions",
         "find_transactions",
+        "get_transactions_for_merchant",
         "analyze_subject",
         "compare_periods",
         "get_budget_status",
         "explain_metric",
+        "find_low_confidence_transactions",
+        "explain_transaction_enrichment",
+        "get_enrichment_quality_summary",
+        "get_cashflow_forecast",
+        "predict_shortfall",
+        "check_affordability",
     }:
         override = _range_override(question)
         if override:
@@ -387,6 +526,18 @@ def _normalize_tool(intent: str, operation: str, tool_name: str | None) -> str |
         "find_transactions": "find_transactions",
         "metric_explanation": "explain_metric",
         "recurring_changes": "get_recurring_changes",
+        "data_health": "get_data_health_summary",
+        "cashflow_forecast": "get_cashflow_forecast",
+        "shortfall": "predict_shortfall",
+        "affordability": "check_affordability",
+        "low_confidence_transactions": "find_low_confidence_transactions",
+        "transaction_enrichment_explanation": "explain_transaction_enrichment",
+        "enrichment_quality_summary": "get_enrichment_quality_summary",
+        "remember_user_context": "remember_user_context",
+        "retrieve_relevant_memories": "retrieve_relevant_memories",
+        "update_memory": "update_memory",
+        "forget_memory": "forget_memory",
+        "list_mira_memories": "list_mira_memories",
     }
     if operation in semantic_operation_map:
         return semantic_operation_map[operation]
@@ -438,6 +589,8 @@ def _tool_allowed(intent: str, tool_name: str | None) -> bool:
         return tool_name in _WRITE_TOOLS
     if intent in {"overview", "plan"}:
         return tool_name in _SEMANTIC_TOOLS
+    if intent == "memory":
+        return tool_name in {"remember_user_context", "retrieve_relevant_memories", "update_memory", "forget_memory", "list_mira_memories"}
     return False
 
 
@@ -558,6 +711,25 @@ def route_question(
 
     if _looks_like_provider_config_request(question):
         return finish(_shortcut_base("chat", "local_only_provider", start))
+
+    memory_route = _memory_shortcut(question, start)
+    if memory_route is not None:
+        return finish(memory_route)
+
+    enrichment_route = _transaction_enrichment_shortcut(question, start)
+    if enrichment_route is not None:
+        return finish(enrichment_route)
+
+    data_health_route = _data_health_shortcut(question, start)
+    if data_health_route is not None:
+        return finish(data_health_route)
+
+    cashflow_route = _phase5_cashflow_shortcut(question, profile, start)
+    if cashflow_route is not None:
+        return finish(cashflow_route)
+
+    if _looks_like_sensitive_support_turn(question):
+        return finish(_shortcut_base("chat", "chat", start))
 
     if _is_categorization_debug(question):
         return finish(_shortcut_base("chat", "categorization_debug", start))

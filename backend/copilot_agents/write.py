@@ -196,6 +196,7 @@ def _direct_result(question: str, profile: str | None, history: list[dict] | Non
         cache=cache,
         iterations=0,
         run_detector=True,
+        route=route,
     )
     pending = _pending_write(result)
     if pending:

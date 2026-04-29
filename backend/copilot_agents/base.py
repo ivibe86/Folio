@@ -6,6 +6,8 @@ from typing import Any
 
 import llm_client
 from copilot_tools import execute_tool
+from mira.number_guard import guard_finance_numbers
+from mira.persona import compose_persona_answer
 from mira import provenance
 
 logger = logging.getLogger(__name__)
@@ -25,10 +27,24 @@ def emit_done_with_memory(
     data_source: str | None = None,
     llm_calls: int = 0,
     route: dict | None = None,
+    memory_trace: dict | None = None,
+    compact_memory_trace: dict | None = None,
+    number_guard: bool = False,
 ):
     import copilot_agent as core
 
     display_rows, display_source = core._extract_display_data(trace, cache, profile)
+    if number_guard:
+        final_answer = guard_finance_numbers(final_answer, route=route, trace=trace, cache=cache, profile=profile)
+    final_answer = compose_persona_answer(
+        final_answer,
+        question=question,
+        route=route,
+        trace=trace,
+        cache=cache,
+        profile=profile,
+        memory_trace=memory_trace,
+    )
     cleaned_answer, agent_props_raw, observations_logged, proposals_created = core._persist_agent_tags(
         raw_answer=final_answer,
         profile=profile,
@@ -45,6 +61,14 @@ def emit_done_with_memory(
         "memory_proposals": proposals_created,
         "memory_observations": observations_logged,
     }
+    if memory_trace:
+        done_event["memory_trace"] = memory_trace
+        done_event["answer_context"] = {
+            "version": 2,
+            "kind": "memory_context",
+            "memory_trace": memory_trace,
+            "compact_memory_trace": compact_memory_trace,
+        }
     if pending_write:
         done_event["pending_write"] = pending_write
         if pending_write.get("samples"):
@@ -139,6 +163,7 @@ def tool_loop_result(
         cache=cache,
         iterations=iteration,
         run_detector=run_detector,
+        number_guard=True,
     )
     if pending_chart:
         result["chart"] = pending_chart
@@ -249,4 +274,5 @@ def tool_loop_stream(
         pending_write=pending_write,
         pending_chart=pending_chart,
         llm_calls=llm_calls,
+        number_guard=True,
     )

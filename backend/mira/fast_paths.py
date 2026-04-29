@@ -22,6 +22,7 @@ from range_parser import chart_months, contains, parse_range, words
 _PLAN_TERMS = {
     "compare", "compared", "versus", "vs", "average", "avg", "usual", "normal",
     "track", "pace", "projected", "projection", "forecast", "higher", "lower",
+    "afford", "should", "advice",
 }
 _CHART_TOKENS = {"chart", "plot", "graph", "visualize", "trend", "line", "bar"}
 
@@ -94,6 +95,16 @@ def _resolve_plan_subject(question: str, candidates: dict[str, list[str]]) -> tu
         and category_result.value.lower() in _BROAD_CATEGORY_NAMES
     ):
         return "category", category_result.value
+    if (
+        category_result.kind == "exact"
+        and category_result.value
+        and token_set & {"afford", "budget", "advice", "should"}
+    ):
+        return "category", category_result.value
+    if token_set & {"afford", "budget", "advice", "should"}:
+        category = _best_name_match(token_set, candidates.get("categories") or [])
+        if category:
+            return "category", category
     if merchant_result.kind == "exact" and merchant_result.value:
         return "merchant", merchant_result.value
     if category_result.kind == "exact" and category_result.value:
@@ -336,12 +347,19 @@ def _transaction_shortcut(question: str, profile: str | None, start: float) -> d
     if not merchant:
         category = _exact_category_for_text(question, profile)
         if category:
-            route = _shortcut_base("transactions", "list_transactions", start, args={"category": category, "limit": 25})
+            args = {"category": category, "limit": 25}
+            parsed_range = parse_range(question)
+            if parsed_range.explicit:
+                args["range"] = parsed_range.token
+            route = _shortcut_base("transactions", "list_transactions", start, args=args)
             route["tool_name"] = "get_transactions"
             route["shortcut"] = "category_transactions"
             return route
         return None
     args = {"merchant": merchant, "limit": 25}
+    parsed_range = parse_range(question)
+    if parsed_range.explicit:
+        args["range"] = parsed_range.token
     route = _shortcut_base("transactions", "list_transactions", start, args=args)
     route["tool_name"] = "get_transactions_for_merchant"
     route["shortcut"] = "merchant_transactions"
@@ -703,6 +721,8 @@ def _plan_kind(question: str) -> str | None:
     tokens = words(question)
     token_set = set(tokens)
     if "track" in token_set or "pace" in token_set or "projected" in token_set or "projection" in token_set:
+        return "on_track"
+    if "afford" in token_set or "should" in token_set or "advice" in token_set:
         return "on_track"
     if "average" in token_set or "avg" in token_set or "usual" in token_set or "normal" in token_set:
         return "current_vs_average"

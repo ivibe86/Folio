@@ -3,42 +3,51 @@ from __future__ import annotations
 import logging
 
 import llm_client
+from mira import memory_v2
+from mira import persona
 
 from .base import emit_done_with_memory
 
 logger = logging.getLogger(__name__)
 
 
-def system_prompt(profile: str | None) -> str:
-    import copilot_agent as core
-    from datetime import datetime
+def _memory_context(profile: str | None, question: str, route: dict | None) -> tuple[str, dict | None, dict | None]:
     from database import get_db
-    import memory
 
     try:
         with get_db() as conn:
-            memory_body = memory.render_markdown(profile, conn)
+            result = memory_v2.retrieve_relevant_memories(
+                conn=conn,
+                profile=profile,
+                question=question,
+                route=route,
+                limit=5,
+            )
     except Exception:
-        logger.debug("memory render failed for chat specialist", exc_info=True)
-        memory_body = ""
+        logger.debug("memory v2 retrieval failed for chat specialist", exc_info=True)
+        return "", None, None
+    trace = result.get("memory_trace") if isinstance(result, dict) else None
+    packet = result.get("compact_memory") if isinstance(result, dict) else None
+    return (
+        memory_v2.context_block_from_packet(packet if isinstance(packet, dict) else None),
+        trace if isinstance(trace, dict) else None,
+        packet if isinstance(packet, dict) else None,
+    )
+
+
+def system_prompt(profile: str | None, question: str = "", route: dict | None = None) -> tuple[str, dict | None]:
+    from datetime import datetime
+
+    memory_v2_block, memory_trace, compact_memory_trace = _memory_context(profile, question, route)
 
     today = datetime.now().strftime("%Y-%m-%d")
     blocks = [
-        (
-            "Your name is Mira. You're the user's Folio companion: close friend first, senior financial advisor second. "
-            "Your persona is warm, thoughtful, lightly feminine, direct, useful, and concise without becoming cutesy."
-        ),
+        persona.persona_prompt_block(),
         (
             "If asked who you are, answer naturally along the lines of: "
             "\"Hey, I'm Mira, your Folio companion. I can help you understand your finances, "
             "think through decisions, draft safe changes for your approval, or just talk through whatever is on your mind.\" "
             "Do not call yourself Copilot, Gemma, Qwen, Phi, or Mistral unless the user specifically asks about the underlying model."
-        ),
-        (
-            "You can chat normally about anything, including code, science, life, and general knowledge. "
-            "Do not force every reply back to money. Match the user's ask: brief casual messages get brief natural replies; "
-            "open-ended or detailed requests can get a thoughtful structured answer; code requests can include code. "
-            "Avoid padded essays, but do not be artificially terse when the user clearly asks for depth."
         ),
         (
             "You are running inside Folio, a personal finance app. Be honest about your capabilities: "
@@ -52,10 +61,7 @@ def system_prompt(profile: str | None) -> str:
             "If asked about schema, you may mention transactions_visible, accounts, categories, merchants, net_worth_history, category_rules, and saved_insights."
         ),
         f"Today is {today}. Active profile: {profile or 'household'}.",
-        (
-            "Persistent memory about the user (read-only; use as background, do not restate verbatim):\n"
-            f"{memory_body.rstrip()}"
-        ) if memory_body.strip() else "",
+        memory_v2_block,
         (
             "At the very end only, after visible prose, you may emit hidden memory tags:\n"
             '<observation theme="short_kebab_case">one-line note</observation>\n'
@@ -64,16 +70,21 @@ def system_prompt(profile: str | None) -> str:
             "Do not emit memory tags for one-off off-topic questions, ordinary coding requests, or general knowledge questions."
         ),
     ]
-    return "\n\n".join(block for block in blocks if block)
+    system = "\n\n".join(block for block in blocks if block)
+    if compact_memory_trace and memory_trace is not None:
+        memory_trace = {**memory_trace, "_compact_memory_trace": compact_memory_trace}
+    return system, memory_trace
 
 
-def run(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
+def run(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None) -> dict:
     import copilot_agent as core
 
+    system, memory_trace = system_prompt(profile, question, route)
+    compact_memory_trace = memory_trace.pop("_compact_memory_trace", None) if isinstance(memory_trace, dict) else None
     response = llm_client.chat_with_tools(
         messages=core._normalize_history(history) + [{"role": "user", "content": question}],
         tools=[],
-        system=system_prompt(profile),
+        system=system,
         max_tokens=1400,
         purpose="copilot",
     )
@@ -85,21 +96,33 @@ def run(question: str, profile: str | None, history: list[dict] | None = None) -
         cache={},
         iterations=0,
         run_detector=True,
+        route=route,
+        memory_trace=memory_trace,
     )
     result["llm_calls"] = 1
+    if memory_trace:
+        result["memory_trace"] = memory_trace
+        result["answer_context"] = {
+            "version": 2,
+            "kind": "memory_context",
+            "memory_trace": memory_trace,
+            "compact_memory_trace": compact_memory_trace,
+        }
     return result
 
 
-def stream(question: str, profile: str | None, history: list[dict] | None = None):
+def stream(question: str, profile: str | None, history: list[dict] | None = None, route: dict | None = None):
     import copilot_agent as core
 
+    system, memory_trace = system_prompt(profile, question, route)
+    compact_memory_trace = memory_trace.pop("_compact_memory_trace", None) if isinstance(memory_trace, dict) else None
     yield {"type": "reset_text"}
     final_parts: list[str] = []
     try:
         for event_type, payload in llm_client.chat_with_tools_stream(
             messages=core._normalize_history(history) + [{"role": "user", "content": question}],
             tools=[],
-            system=system_prompt(profile),
+            system=system,
             max_tokens=1400,
             purpose="copilot",
         ):
@@ -118,4 +141,7 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         cache={},
         iterations=0,
         llm_calls=1,
+        route=route,
+        memory_trace=memory_trace,
+        compact_memory_trace=compact_memory_trace,
     )

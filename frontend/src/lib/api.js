@@ -114,9 +114,9 @@ function appendProfileParam(endpoint, method) {
     // Never append to exempt endpoints
     if (isProfileExempt(endpoint)) return endpoint;
 
-    // Don't append to mutation endpoints EXCEPT copilot (which benefits from context)
+    // Don't append to mutation endpoints EXCEPT copilot/proactive insights (which need profile scope)
     // Note: subscription endpoints that need profile pass it manually in their method definitions
-    if (isMutation(method) && !endpoint.startsWith('/copilot')) return endpoint;
+    if (isMutation(method) && !endpoint.startsWith('/copilot') && !endpoint.startsWith('/proactive-insights')) return endpoint;
 
     try {
         const profile = get(profileParam);
@@ -163,7 +163,14 @@ function createRequest(fetchFn = fetch) {
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: res.statusText }));
-            throw new Error(err.detail || 'API error');
+            const detail = err.detail;
+            const message = typeof detail === 'object' && detail
+                ? (detail.message || 'API error')
+                : (detail || 'API error');
+            const error = new Error(message);
+            if (typeof detail === 'object' && detail?.code) error.code = detail.code;
+            error.status = res.status;
+            throw error;
         }
 
         const data = await res.json();
@@ -370,6 +377,9 @@ export function createApi(fetchFn = fetch) {
          * Streaming variant — returns a cancel() function and invokes `onEvent`
          * for each SSE event from the agent. Caller should handle:
          *   { type: 'reset_text' }
+         *   { type: 'controller', controller_act }
+         *   { type: 'action', domain_action }
+         *   { type: 'progress', stage, label }
          *   { type: 'token', text }
          *   { type: 'tool_call', name, args }
          *   { type: 'tool_result', name, duration_ms }
@@ -428,9 +438,8 @@ export function createApi(fetchFn = fetch) {
         },
 
         /**
-         * [FIX F1] Send confirmation_id (from server) instead of raw SQL.
-         * The server stores the validated SQL and returns a nonce;
-         * we send only that nonce back to confirm execution.
+         * Send confirmation_id only. The backend stores a structured operation
+         * behind the nonce and executes it after confirmation.
          */
         confirmCopilotWrite: (question, confirmationId, profile) => {
             const params = new URLSearchParams();
@@ -626,6 +635,15 @@ export function createApi(fetchFn = fetch) {
             if (month) params.set('month', month);
             return request(`/dashboard-bundle?${params.toString()}`);
         },
+
+        getProactiveInsights: (includeDismissed = false) =>
+            request(`/proactive-insights${includeDismissed ? '?include_dismissed=true' : ''}`),
+
+        dismissProactiveInsight: (id) =>
+            request(`/proactive-insights/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }),
+
+        restoreProactiveInsight: (id) =>
+            request(`/proactive-insights/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
 
         getSankeyData: (month) =>
             request(`/analytics/sankey${month ? '?month=' + month : ''}`),

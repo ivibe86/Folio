@@ -115,6 +115,18 @@
       "copilot_default": "good",
       "warning": "Primary Folio categorization recommendation; validated as a strong balance of speed and quality on 16 GB and 32 GB Macs."
     },
+    "hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Q5_K_M": {
+      "label": "Gemma 4 E4B Uncensored Q5",
+      "family": "Gemma 4",
+      "task_fit": ["copilot"],
+      "ram_tier": "16gb",
+      "approx_size_gb": 5.8,
+      "badges": ["Experimental", "Copilot", "HF GGUF"],
+      "experimental": true,
+      "categorize_default": "avoid",
+      "copilot_default": "experimental",
+      "warning": "Experimental Hugging Face GGUF pulled through Ollama. Use for Mira Copilot testing only; avoid for categorization and unattended write-heavy workflows."
+    },
     "gemma3:4b": {
       "label": "Gemma 3 4B",
       "family": "Gemma 3",
@@ -160,6 +172,28 @@
       "copilot_default": "good",
       "warning": "Reasoning-heavy model; not recommended for bulk categorization on laptops."
     },
+    "gemma3:12b": {
+      "label": "Gemma 3 12B",
+      "family": "Gemma 3",
+      "task_fit": ["categorize", "copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 8.1,
+      "badges": ["Balanced", "Copilot", "Gemma"],
+      "categorize_default": "recommended",
+      "copilot_default": "good",
+      "warning": "Strong 32 GB quality-first categorization option when you want better accuracy and can accept slower throughput than Gemma 4 E4B."
+    },
+    "qwen2.5:14b": {
+      "label": "Qwen 2.5 14B",
+      "family": "Qwen 2.5",
+      "task_fit": ["copilot"],
+      "ram_tier": "32gb",
+      "approx_size_gb": 9.0,
+      "badges": ["Recommended", "Copilot", "Multilingual"],
+      "categorize_default": "avoid",
+      "copilot_default": "recommended",
+      "warning": "Strong 32 GB Copilot option with good quality-to-size tradeoff."
+    },
     "gemma4:26b": {
       "label": "Gemma 4 26B",
       "family": "Gemma 4",
@@ -182,28 +216,6 @@
       "categorize_default": "avoid",
       "copilot_default": "good",
       "warning": "Fits on some 32 GB machines, but it is intentionally expert-only and not chosen automatically."
-    },
-    "gemma3:12b": {
-      "label": "Gemma 3 12B",
-      "family": "Gemma 3",
-      "task_fit": ["categorize", "copilot"],
-      "ram_tier": "32gb",
-      "approx_size_gb": 8.1,
-      "badges": ["Balanced", "Copilot", "Gemma"],
-      "categorize_default": "recommended",
-      "copilot_default": "good",
-      "warning": "Strong 32 GB quality-first categorization option when you want better accuracy and can accept slower throughput than Gemma 4 E4B."
-    },
-    "qwen2.5:14b": {
-      "label": "Qwen 2.5 14B",
-      "family": "Qwen 2.5",
-      "task_fit": ["copilot"],
-      "ram_tier": "32gb",
-      "approx_size_gb": 9.0,
-      "badges": ["Recommended", "Copilot", "Multilingual"],
-      "categorize_default": "avoid",
-      "copilot_default": "recommended",
-      "warning": "Strong 32 GB Copilot option with good quality-to-size tradeoff."
     },
     "qwen3:14b": {
       "label": "Qwen 3 14B",

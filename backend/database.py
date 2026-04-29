@@ -35,7 +35,21 @@ _wal_lock = threading.Lock()
 _wal_initialized = False
 _SQLITE_CONNECT_RETRIES = int(os.getenv("SQLITE_CONNECT_RETRIES", "3"))
 _SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
-_DEFAULT_JOURNAL_MODE = "DELETE" if str(DB_PATH).startswith("/data/") else "WAL"
+
+
+def _default_journal_mode() -> str:
+    """Avoid WAL for the bind-mounted app DB, from both host and container paths."""
+    if str(DB_PATH).startswith("/data/"):
+        return "DELETE"
+    try:
+        if DB_PATH.resolve() == (Path(__file__).resolve().parent.parent / "data" / "Folio.db"):
+            return "DELETE"
+    except OSError:
+        pass
+    return "WAL"
+
+
+_DEFAULT_JOURNAL_MODE = _default_journal_mode()
 _SQLITE_JOURNAL_MODE = os.getenv("SQLITE_JOURNAL_MODE", _DEFAULT_JOURNAL_MODE).upper()
 if _SQLITE_JOURNAL_MODE not in {"DELETE", "WAL", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
     logger.warning("Invalid SQLITE_JOURNAL_MODE=%s; falling back to %s", _SQLITE_JOURNAL_MODE, _DEFAULT_JOURNAL_MODE)
@@ -218,12 +232,15 @@ def init_db():
         _migrate_accounts_provider(conn)
         _migrate_accounts_last_four(conn)
         _migrate_memory_entries_theme(conn)
+        _migrate_mira_memory_v2_tables(conn)
         _migrate_public_planning_tables(conn)
         _migrate_user_declared_subscription_category(conn)
         _migrate_user_declared_subscription_expected_day(conn)
         _migrate_user_declared_subscription_amount_review(conn)
         _migrate_investments_lite(conn)
         _migrate_recurring_obligations(conn)
+        _migrate_mira_hardening_tables(conn)
+        _migrate_transaction_intelligence_tables(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
         _seed_teller_category_map(conn)          
@@ -648,6 +665,65 @@ def _migrate_memory_entries_theme(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE memory_entries ADD COLUMN theme TEXT DEFAULT NULL")
 
 
+def _migrate_mira_memory_v2_tables(conn: sqlite3.Connection):
+    """Create the additive Mira Memory V2 tables for existing databases."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS mira_memories (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id              TEXT REFERENCES profiles(id),
+            scope                   TEXT NOT NULL DEFAULT 'profile' CHECK(scope IN ('profile', 'household')),
+            memory_type             TEXT NOT NULL CHECK(memory_type IN (
+                'preference', 'goal', 'constraint', 'stressor', 'commitment',
+                'rejected_advice', 'coaching_state', 'identity_fact', 'tone_preference'
+            )),
+            topic                   TEXT NOT NULL DEFAULT '',
+            normalized_text         TEXT NOT NULL,
+            original_text           TEXT NOT NULL DEFAULT '',
+            source_summary          TEXT DEFAULT '',
+            sensitivity             TEXT NOT NULL DEFAULT 'low' CHECK(sensitivity IN ('low', 'medium', 'high')),
+            confidence              REAL NOT NULL DEFAULT 1.0,
+            source_conversation_id  INTEGER REFERENCES copilot_conversations(id),
+            source_turn_id          TEXT DEFAULT NULL,
+            created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at            TEXT DEFAULT NULL,
+            expires_at              TEXT DEFAULT NULL,
+            pinned                  INTEGER NOT NULL DEFAULT 0,
+            superseded_by           INTEGER REFERENCES mira_memories(id),
+            status                  TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded', 'deleted', 'rejected')),
+            consent                 TEXT NOT NULL DEFAULT 'explicit',
+            consent_at              TEXT DEFAULT (datetime('now')),
+            metadata_json           TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mira_memories_active
+            ON mira_memories(profile_id, scope, status, memory_type, topic, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mira_memories_expiry
+            ON mira_memories(expires_at) WHERE expires_at IS NOT NULL AND status = 'active';
+        CREATE INDEX IF NOT EXISTS idx_mira_memories_topic
+            ON mira_memories(profile_id, topic, status);
+
+        CREATE TABLE IF NOT EXISTS mira_memory_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id       INTEGER REFERENCES mira_memories(id),
+            profile_id      TEXT REFERENCES profiles(id),
+            event_type      TEXT NOT NULL,
+            before_json     TEXT NOT NULL DEFAULT '{}',
+            after_json      TEXT NOT NULL DEFAULT '{}',
+            reason          TEXT DEFAULT '',
+            source_turn_id  TEXT DEFAULT NULL,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mira_memory_events_memory
+            ON mira_memory_events(memory_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mira_memory_events_profile
+            ON mira_memory_events(profile_id, created_at DESC);
+        """
+    )
+
+
 def _migrate_public_planning_tables(conn: sqlite3.Connection):
     """Add public-release planning, ledger metadata, split, and manual account support."""
     tx_cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
@@ -778,6 +854,135 @@ def _migrate_investments_lite(conn: sqlite3.Connection):
             ON investment_holdings(account_id);
         CREATE INDEX IF NOT EXISTS idx_holdings_symbol
             ON investment_holdings(symbol);
+        """
+    )
+
+
+def _migrate_mira_hardening_tables(conn: sqlite3.Connection):
+    """Tables used by Mira write confirmations and proactive insights."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pending_operations (
+            nonce        TEXT PRIMARY KEY,
+            profile_id   TEXT DEFAULT NULL,
+            operation    TEXT NOT NULL,
+            params_json  TEXT NOT NULL DEFAULT '{}',
+            preview_json TEXT NOT NULL DEFAULT '{}',
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at   TEXT NOT NULL,
+            consumed_at  TEXT DEFAULT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pending_operations_profile
+            ON pending_operations(profile_id, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_pending_operations_expiry
+            ON pending_operations(expires_at, consumed_at);
+
+        CREATE TABLE IF NOT EXISTS proactive_insights (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id    TEXT DEFAULT NULL,
+            kind          TEXT NOT NULL,
+            insight_type  TEXT DEFAULT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            severity      TEXT NOT NULL DEFAULT 'info',
+            priority      INTEGER NOT NULL DEFAULT 100,
+            confidence    TEXT DEFAULT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            assumptions_json TEXT NOT NULL DEFAULT '[]',
+            recommended_action TEXT DEFAULT '',
+            fingerprint   TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'active',
+            generated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            dismissed_at  TEXT DEFAULT NULL,
+            dismissed_reason TEXT DEFAULT '',
+            dismissed_type TEXT DEFAULT '',
+            restored_at   TEXT DEFAULT NULL,
+            valid_until   TEXT DEFAULT NULL,
+            suppressed_at TEXT DEFAULT NULL,
+            UNIQUE(profile_id, fingerprint)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_proactive_insights_profile_status
+            ON proactive_insights(profile_id, status, generated_at);
+        CREATE INDEX IF NOT EXISTS idx_proactive_insights_kind
+            ON proactive_insights(kind);
+        """
+    )
+    _migrate_proactive_insight_phase5_columns(conn)
+
+
+def _migrate_proactive_insight_phase5_columns(conn: sqlite3.Connection):
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(proactive_insights)").fetchall()]
+    additions = {
+        "insight_type": "TEXT DEFAULT NULL",
+        "priority": "INTEGER NOT NULL DEFAULT 100",
+        "confidence": "TEXT DEFAULT NULL",
+        "assumptions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "recommended_action": "TEXT DEFAULT ''",
+        "dismissed_reason": "TEXT DEFAULT ''",
+        "dismissed_type": "TEXT DEFAULT ''",
+        "restored_at": "TEXT DEFAULT NULL",
+        "valid_until": "TEXT DEFAULT NULL",
+        "suppressed_at": "TEXT DEFAULT NULL",
+    }
+    for name, ddl in additions.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE proactive_insights ADD COLUMN {name} {ddl}")
+
+
+def _migrate_transaction_intelligence_tables(conn: sqlite3.Connection):
+    """Add Transaction Intelligence 2.0 enrichment and correction tables."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS transaction_enrichment (
+            transaction_id              TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            profile_id                  TEXT NOT NULL,
+            canonical_counterparty      TEXT DEFAULT '',
+            display_counterparty        TEXT DEFAULT '',
+            top_level_category          TEXT DEFAULT '',
+            leaf_category               TEXT DEFAULT '',
+            purpose_category            TEXT DEFAULT '',
+            essentiality                TEXT DEFAULT 'unknown',
+            recurrence                  TEXT DEFAULT 'unknown',
+            semantic_type               TEXT DEFAULT 'spending',
+            confidence_json             TEXT NOT NULL DEFAULT '{}',
+            evidence_summary            TEXT DEFAULT '',
+            evidence_json               TEXT NOT NULL DEFAULT '{}',
+            source                      TEXT NOT NULL DEFAULT 'rules',
+            method                      TEXT NOT NULL DEFAULT 'deterministic',
+            model_version               TEXT NOT NULL DEFAULT 'transaction_enrichment_rules_v1',
+            taxonomy_version            TEXT NOT NULL DEFAULT 'folio_taxonomy_v1',
+            user_reviewed               INTEGER NOT NULL DEFAULT 0,
+            created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (transaction_id, profile_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_profile
+            ON transaction_enrichment(profile_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_category
+            ON transaction_enrichment(profile_id, top_level_category, leaf_category);
+        CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_counterparty
+            ON transaction_enrichment(profile_id, canonical_counterparty);
+        CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_review
+            ON transaction_enrichment(profile_id, user_reviewed);
+
+        CREATE TABLE IF NOT EXISTS transaction_enrichment_corrections (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id      TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            profile_id          TEXT NOT NULL,
+            corrected_field     TEXT NOT NULL,
+            old_value           TEXT DEFAULT '',
+            new_value           TEXT NOT NULL,
+            source              TEXT NOT NULL DEFAULT 'user/manual',
+            created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tx_enrichment_corrections_tx
+            ON transaction_enrichment_corrections(profile_id, transaction_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_tx_enrichment_corrections_field
+            ON transaction_enrichment_corrections(profile_id, corrected_field, created_at);
         """
     )
 
@@ -1062,6 +1267,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     is_excluded             INTEGER DEFAULT 0,
     expense_type            TEXT DEFAULT NULL,
     description_normalized  TEXT DEFAULT NULL,
+    notes                   TEXT DEFAULT '',
+    tags                    TEXT DEFAULT '',
+    reviewed                INTEGER NOT NULL DEFAULT 0,
     created_at              TEXT DEFAULT (datetime('now')),
     updated_at              TEXT
 );
@@ -1075,6 +1283,54 @@ CREATE VIEW IF NOT EXISTS transactions_visible AS
 SELECT *
 FROM transactions
 WHERE COALESCE(is_excluded, 0) = 0;
+CREATE TABLE IF NOT EXISTS transaction_enrichment (
+    transaction_id              TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    profile_id                  TEXT NOT NULL,
+    canonical_counterparty      TEXT DEFAULT '',
+    display_counterparty        TEXT DEFAULT '',
+    top_level_category          TEXT DEFAULT '',
+    leaf_category               TEXT DEFAULT '',
+    purpose_category            TEXT DEFAULT '',
+    essentiality                TEXT DEFAULT 'unknown',
+    recurrence                  TEXT DEFAULT 'unknown',
+    semantic_type               TEXT DEFAULT 'spending',
+    confidence_json             TEXT NOT NULL DEFAULT '{}',
+    evidence_summary            TEXT DEFAULT '',
+    evidence_json               TEXT NOT NULL DEFAULT '{}',
+    source                      TEXT NOT NULL DEFAULT 'rules',
+    method                      TEXT NOT NULL DEFAULT 'deterministic',
+    model_version               TEXT NOT NULL DEFAULT 'transaction_enrichment_rules_v1',
+    taxonomy_version            TEXT NOT NULL DEFAULT 'folio_taxonomy_v1',
+    user_reviewed               INTEGER NOT NULL DEFAULT 0,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (transaction_id, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_profile
+    ON transaction_enrichment(profile_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_category
+    ON transaction_enrichment(profile_id, top_level_category, leaf_category);
+CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_counterparty
+    ON transaction_enrichment(profile_id, canonical_counterparty);
+CREATE INDEX IF NOT EXISTS idx_transaction_enrichment_review
+    ON transaction_enrichment(profile_id, user_reviewed);
+
+CREATE TABLE IF NOT EXISTS transaction_enrichment_corrections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id      TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    profile_id          TEXT NOT NULL,
+    corrected_field     TEXT NOT NULL,
+    old_value           TEXT DEFAULT '',
+    new_value           TEXT NOT NULL,
+    source              TEXT NOT NULL DEFAULT 'user/manual',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tx_enrichment_corrections_tx
+    ON transaction_enrichment_corrections(profile_id, transaction_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tx_enrichment_corrections_field
+    ON transaction_enrichment_corrections(profile_id, corrected_field, created_at);
 CREATE TABLE IF NOT EXISTS category_rules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern     TEXT NOT NULL,
@@ -1092,10 +1348,61 @@ CREATE TABLE IF NOT EXISTS category_rules (
 CREATE INDEX IF NOT EXISTS idx_rules_source_priority ON category_rules(source, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_rules_active ON category_rules(is_active);
 
+CREATE TABLE IF NOT EXISTS merchant_aliases (
+    merchant_key TEXT NOT NULL,
+    profile_id   TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'user',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (merchant_key, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchant_aliases_profile
+    ON merchant_aliases(profile_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_aliases_key
+    ON merchant_aliases(merchant_key);
+
+CREATE TABLE IF NOT EXISTS transaction_splits (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id  TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    category        TEXT NOT NULL REFERENCES categories(name),
+    amount          REAL NOT NULL,
+    notes           TEXT DEFAULT '',
+    tags            TEXT DEFAULT '',
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_splits_tx
+    ON transaction_splits(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_transaction_splits_category
+    ON transaction_splits(category);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id      TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    goal_type       TEXT NOT NULL DEFAULT 'custom',
+    target_amount   REAL NOT NULL DEFAULT 0.0,
+    current_amount  REAL NOT NULL DEFAULT 0.0,
+    target_date     TEXT DEFAULT NULL,
+    linked_category TEXT DEFAULT NULL,
+    linked_account_id TEXT DEFAULT NULL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_goals_profile_active
+    ON goals(profile_id, is_active);
+
 CREATE TABLE IF NOT EXISTS category_budgets (
     profile_id      TEXT NOT NULL,
     category        TEXT NOT NULL REFERENCES categories(name),
     amount          REAL NOT NULL,
+    rollover_mode   TEXT NOT NULL DEFAULT 'none',
+    rollover_balance REAL NOT NULL DEFAULT 0.0,
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (profile_id, category)
@@ -1187,6 +1494,58 @@ CREATE TABLE IF NOT EXISTS memory_proposals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending ON memory_proposals(profile_id, status, created_at DESC) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS mira_memories (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id              TEXT REFERENCES profiles(id),
+    scope                   TEXT NOT NULL DEFAULT 'profile' CHECK(scope IN ('profile', 'household')),
+    memory_type             TEXT NOT NULL CHECK(memory_type IN (
+        'preference', 'goal', 'constraint', 'stressor', 'commitment',
+        'rejected_advice', 'coaching_state', 'identity_fact', 'tone_preference'
+    )),
+    topic                   TEXT NOT NULL DEFAULT '',
+    normalized_text         TEXT NOT NULL,
+    original_text           TEXT NOT NULL DEFAULT '',
+    source_summary          TEXT DEFAULT '',
+    sensitivity             TEXT NOT NULL DEFAULT 'low' CHECK(sensitivity IN ('low', 'medium', 'high')),
+    confidence              REAL NOT NULL DEFAULT 1.0,
+    source_conversation_id  INTEGER REFERENCES copilot_conversations(id),
+    source_turn_id          TEXT DEFAULT NULL,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at            TEXT DEFAULT NULL,
+    expires_at              TEXT DEFAULT NULL,
+    pinned                  INTEGER NOT NULL DEFAULT 0,
+    superseded_by           INTEGER REFERENCES mira_memories(id),
+    status                  TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded', 'deleted', 'rejected')),
+    consent                 TEXT NOT NULL DEFAULT 'explicit',
+    consent_at              TEXT DEFAULT (datetime('now')),
+    metadata_json           TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_mira_memories_active
+    ON mira_memories(profile_id, scope, status, memory_type, topic, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mira_memories_expiry
+    ON mira_memories(expires_at) WHERE expires_at IS NOT NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_mira_memories_topic
+    ON mira_memories(profile_id, topic, status);
+
+CREATE TABLE IF NOT EXISTS mira_memory_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id       INTEGER REFERENCES mira_memories(id),
+    profile_id      TEXT REFERENCES profiles(id),
+    event_type      TEXT NOT NULL,
+    before_json     TEXT NOT NULL DEFAULT '{}',
+    after_json      TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT DEFAULT '',
+    source_turn_id  TEXT DEFAULT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mira_memory_events_memory
+    ON mira_memory_events(memory_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mira_memory_events_profile
+    ON mira_memory_events(profile_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS subscription_seeds (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1372,6 +1731,52 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value       TEXT,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS pending_operations (
+    nonce        TEXT PRIMARY KEY,
+    profile_id   TEXT DEFAULT NULL,
+    operation    TEXT NOT NULL,
+    params_json  TEXT NOT NULL DEFAULT '{}',
+    preview_json TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at   TEXT NOT NULL,
+    consumed_at  TEXT DEFAULT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_operations_profile
+    ON pending_operations(profile_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_pending_operations_expiry
+    ON pending_operations(expires_at, consumed_at);
+
+CREATE TABLE IF NOT EXISTS proactive_insights (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id    TEXT DEFAULT NULL,
+    kind          TEXT NOT NULL,
+    insight_type  TEXT DEFAULT NULL,
+    title         TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    severity      TEXT NOT NULL DEFAULT 'info',
+    priority      INTEGER NOT NULL DEFAULT 100,
+    confidence    TEXT DEFAULT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    assumptions_json TEXT NOT NULL DEFAULT '[]',
+    recommended_action TEXT DEFAULT '',
+    fingerprint   TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    generated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    dismissed_at  TEXT DEFAULT NULL,
+    dismissed_reason TEXT DEFAULT '',
+    dismissed_type TEXT DEFAULT '',
+    restored_at   TEXT DEFAULT NULL,
+    valid_until   TEXT DEFAULT NULL,
+    suppressed_at TEXT DEFAULT NULL,
+    UNIQUE(profile_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proactive_insights_profile_status
+    ON proactive_insights(profile_id, status, generated_at);
+CREATE INDEX IF NOT EXISTS idx_proactive_insights_kind
+    ON proactive_insights(kind);
 """
 
 # ══════════════════════════════════════════════════════════════════════════════

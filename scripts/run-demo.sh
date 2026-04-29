@@ -24,6 +24,19 @@ export LLM_PROVIDER="${LLM_PROVIDER:-none}"
 export ENABLE_LOCAL_ENRICHMENT="${ENABLE_LOCAL_ENRICHMENT:-false}"
 export ENABLE_LLM_CATEGORIZATION="${ENABLE_LLM_CATEGORIZATION:-false}"
 
+if [[ -z "${TOKEN_ENCRYPTION_KEY:-}" ]]; then
+  export TOKEN_ENCRYPTION_KEY="$("${PYTHON_BIN}" - <<'PY'
+try:
+    from cryptography.fernet import Fernet
+    print(Fernet.generate_key().decode())
+except Exception:
+    import base64
+    import secrets
+    print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
+PY
+)"
+fi
+
 if ! "${PYTHON_BIN}" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
   echo "Missing backend Python dependencies for demo mode."
   echo "Install them with:"

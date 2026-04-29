@@ -17,7 +17,6 @@ from data_manager import (
     get_monthly_analytics_data,
     get_recurring_from_db,
 )
-import memory
 
 logger = logging.getLogger(__name__)
 
@@ -162,30 +161,6 @@ def _policy_summary(conn) -> str:
     return f"Policy: {', '.join(parts)}" if parts else ""
 
 
-def _persistent_memory(profile: str | None, conn) -> str:
-    """
-    Inject the persistent personal memory file into the system prompt.
-    This is the user's about_user.md — identity, stated preferences, goals,
-    recurring concerns, and open questions accumulated across conversations.
-
-    The agent must treat these as ground truth about who the user is, what
-    they've committed to, and how they want to be talked to. Inferred entries
-    are tagged so the agent knows they're observations, not declarations.
-    """
-    try:
-        body = memory.render_markdown(profile, conn)
-    except Exception:
-        logger.debug("memory render failed", exc_info=True)
-        return ""
-    if not body.strip():
-        return ""
-    return (
-        "Persistent memory about the user (read-only here — DO NOT restate verbatim, "
-        "use as background to shape your reply):\n"
-        f"{body.rstrip()}"
-    )
-
-
 def _short_line(text: str, limit: int = 180) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
@@ -231,7 +206,6 @@ def _saved_insights(profile: str | None, conn, limit: int = 3) -> str:
 
 def build_copilot_context(profile: str | None, conn) -> str:
     sections = [
-        _persistent_memory(profile, conn),
         _monthly_snapshot(profile, conn),
         _top_categories_current_month(profile, conn),
         _top_merchants_current_month(profile, conn),

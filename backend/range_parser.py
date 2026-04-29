@@ -177,11 +177,11 @@ def parse_range(question: str, *, default: str = "current_month", now: datetime 
     if {"ytd"} & token_set or contains(tokens, ("year", "to", "date")) or contains(tokens, ("this", "year")):
         return RangeParse("ytd", True)
 
-    if contains(tokens, ("past", "year")) or contains(tokens, ("previous", "year")) or contains(tokens, ("prior", "year")):
+    if contains(tokens, ("past", "year")):
         return RangeParse("last_12_months", True, chart_months=12)
     if contains(tokens, ("over", "the", "past", "year")) or contains(tokens, ("last", "12", "months")):
         return RangeParse("last_12_months", True, chart_months=12)
-    if contains(tokens, ("last", "year")):
+    if contains(tokens, ("last", "year")) or contains(tokens, ("previous", "year")) or contains(tokens, ("prior", "year")):
         return RangeParse("last_year", True)
 
     if contains(tokens, ("this", "month")) or contains(tokens, ("current", "month")):

@@ -14,9 +14,13 @@ DOMAIN_ACTION_NAMES = {
     "NetWorthTrend",
     "CompareSpend",
     "BudgetStatus",
+    "CashFlowForecast",
+    "Affordability",
     "WritePreview",
     "ExplainLastAnswer",
+    "TransactionEnrichment",
     "OverviewSummary",
+    "Memory",
     "GeneralChat",
 }
 DOMAIN_ACTION_STATUSES = {"ready", "clarify", "unsupported"}
@@ -48,9 +52,17 @@ ACTION_TOOL_ALLOWLIST = {
     "NetWorthTrend": {"get_net_worth_trend", "plot_chart"},
     "CompareSpend": {"get_category_spend", "get_merchant_spend", "compare_periods", "analyze_subject"},
     "BudgetStatus": {"get_category_spend", "get_merchant_spend", "get_budget_status"},
+    "CashFlowForecast": {"get_cashflow_forecast", "predict_shortfall"},
+    "Affordability": {"check_affordability"},
     "WritePreview": WRITE_PREVIEW_TOOLS,
     "ExplainLastAnswer": set(),
-    "OverviewSummary": {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes", "get_recurring_summary", "get_top_merchants", "get_top_categories"},
+    "TransactionEnrichment": {
+        "find_low_confidence_transactions",
+        "explain_transaction_enrichment",
+        "get_enrichment_quality_summary",
+    },
+    "OverviewSummary": {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes", "get_data_health_summary", "get_recurring_summary", "get_top_merchants", "get_top_categories"},
+    "Memory": {"remember_user_context", "retrieve_relevant_memories", "update_memory", "forget_memory", "list_mira_memories"},
     "GeneralChat": set(),
 }
 
@@ -106,8 +118,16 @@ def domain_action_for_route(route: dict[str, Any] | None, profile: str | None = 
         return _semantic_budget_action(route, controller_act, profile)
     if tool_name == "find_transactions":
         return _transaction_search_action(route, controller_act, profile)
-    if tool_name in {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes"}:
+    if tool_name in {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes", "get_data_health_summary"}:
         return _overview_action(route, controller_act)
+    if tool_name in {"get_cashflow_forecast", "predict_shortfall"}:
+        return _cashflow_action(route, controller_act)
+    if tool_name == "check_affordability":
+        return _affordability_action(route, controller_act)
+    if tool_name in {"find_low_confidence_transactions", "explain_transaction_enrichment", "get_enrichment_quality_summary"}:
+        return _transaction_enrichment_action(route, controller_act)
+    if tool_name in {"remember_user_context", "retrieve_relevant_memories", "update_memory", "forget_memory", "list_mira_memories"} or intent == "memory":
+        return _memory_action(route, controller_act)
 
     if operation == "explain_grounding" or controller_act.get("act") == "explain_provenance":
         return _simple_action("ExplainLastAnswer", route, controller_act)
@@ -182,7 +202,7 @@ def _clarification_action_name(route: dict[str, Any]) -> str:
         return "TransactionSearch"
     if pending_action == "plan":
         return "CompareSpend"
-    if pending_action == "spending":
+    if pending_action in {"spending", "spend", "spend_total"}:
         return "SpendTotal"
     operation = str(route.get("operation") or route.get("shortcut") or "").lower()
     if "transaction" in operation:
@@ -201,7 +221,7 @@ def _clarification_action_name(route: dict[str, Any]) -> str:
 def _overview_action(route: dict[str, Any], controller_act: dict[str, Any]) -> DomainAction:
     tool_name = str(route.get("tool_name") or "")
     args = _copy_args(route)
-    if tool_name in {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes"}:
+    if tool_name in {"get_dashboard_snapshot", "explain_metric", "get_recurring_changes", "get_data_health_summary"}:
         tool_plan = [{"name": tool_name, "args": args}]
     else:
         tool_plan = [{"name": "get_dashboard_snapshot", "args": {}}]
@@ -212,6 +232,83 @@ def _overview_action(route: dict[str, Any], controller_act: dict[str, Any]) -> D
         validated_slots={},
         controller_act=controller_act,
         reason=str(route.get("shortcut") or "overview summary"),
+    )
+
+
+def _cashflow_action(route: dict[str, Any], controller_act: dict[str, Any]) -> DomainAction:
+    tool_name = str(route.get("tool_name") or "")
+    args = _copy_args(route)
+    if tool_name not in ACTION_TOOL_ALLOWLIST["CashFlowForecast"]:
+        return _unsupported("CashFlowForecast", route, controller_act, "cash-flow action needs a forecast tool")
+    return DomainAction(
+        name="CashFlowForecast",
+        slots=_base_slots(route),
+        tool_plan=[{"name": tool_name, "args": args}],
+        validated_slots=args,
+        controller_act=controller_act,
+        reason=str(route.get("shortcut") or "cash-flow forecast"),
+    )
+
+
+def _affordability_action(route: dict[str, Any], controller_act: dict[str, Any]) -> DomainAction:
+    args = _copy_args(route)
+    if not args.get("amount"):
+        return DomainAction(
+            name="Affordability",
+            status="clarify",
+            slots=_base_slots(route),
+            controller_act=controller_act,
+            reason="missing proposed amount",
+            clarification_question="How much are you thinking of spending?",
+        )
+    return DomainAction(
+        name="Affordability",
+        slots=_base_slots(route),
+        tool_plan=[{"name": "check_affordability", "args": args}],
+        validated_slots=args,
+        controller_act=controller_act,
+        reason=str(route.get("shortcut") or "affordability"),
+    )
+
+
+def _transaction_enrichment_action(route: dict[str, Any], controller_act: dict[str, Any]) -> DomainAction:
+    tool_name = str(route.get("tool_name") or "")
+    args = _copy_args(route)
+    allowed = ACTION_TOOL_ALLOWLIST["TransactionEnrichment"]
+    if tool_name not in allowed:
+        return _unsupported("TransactionEnrichment", route, controller_act, "transaction enrichment action needs an enrichment tool")
+    if tool_name == "explain_transaction_enrichment" and not str(args.get("transaction_id") or args.get("tx_id") or "").strip():
+        return DomainAction(
+            name="TransactionEnrichment",
+            status="clarify",
+            slots=_base_slots(route),
+            controller_act=controller_act,
+            reason="missing transaction id",
+            clarification_question="Which transaction ID should I explain?",
+        )
+    return DomainAction(
+        name="TransactionEnrichment",
+        slots=_base_slots(route),
+        tool_plan=[{"name": tool_name, "args": args}],
+        validated_slots=args,
+        controller_act=controller_act,
+        reason=str(route.get("shortcut") or "transaction enrichment"),
+    )
+
+
+def _memory_action(route: dict[str, Any], controller_act: dict[str, Any]) -> DomainAction:
+    tool_name = str(route.get("tool_name") or "")
+    args = _copy_args(route)
+    allowed = ACTION_TOOL_ALLOWLIST["Memory"]
+    if tool_name not in allowed:
+        return _unsupported("Memory", route, controller_act, "memory action needs a memory tool")
+    return DomainAction(
+        name="Memory",
+        slots=_base_slots(route),
+        tool_plan=[{"name": tool_name, "args": args}],
+        validated_slots=args,
+        controller_act=controller_act,
+        reason=str(route.get("shortcut") or "memory v2"),
     )
 
 

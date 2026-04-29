@@ -1,17 +1,12 @@
 """
 llm_client.py
-LLM abstraction layer. Routes to Ollama or Anthropic based on LLM_PROVIDER env var.
-
-Supported providers (set LLM_PROVIDER in .env):
-  anthropic  — calls api.anthropic.com (default)
-  ollama     — calls a local Ollama instance
+Local LLM client for Ollama-backed categorization, Mira, and receipt parsing.
 """
 
 import base64
 import json as _json
 import os
 import httpx
-import certifi
 from dotenv import load_dotenv
 from log_config import get_logger
 import local_llm
@@ -20,23 +15,31 @@ load_dotenv()
 
 logger = get_logger(__name__)
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
-
-# Anthropic settings
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-_ANTHROPIC_MODEL = "claude-3-haiku-20240307"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower() or "ollama"
 
 # Ollama settings
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL_CATEGORIZE = os.getenv("OLLAMA_MODEL_CATEGORIZE", "gemma4:e4b")
+OLLAMA_MODEL_CONTROLLER = os.getenv("OLLAMA_MODEL_CONTROLLER", OLLAMA_MODEL_CATEGORIZE)
 OLLAMA_MODEL_COPILOT = os.getenv("OLLAMA_MODEL_COPILOT", "gemma4:26b")
 OLLAMA_MODEL_RECEIPT = os.getenv("OLLAMA_MODEL_RECEIPT", "gemma4:e4b")
+LLAMACPP_BASE_URL = os.getenv("LLAMACPP_BASE_URL", "http://host.docker.internal:8081")
+LLAMACPP_MODEL = os.getenv("LLAMACPP_MODEL", "local")
+LLAMACPP_TIMEOUT = float(os.getenv("LLAMACPP_TIMEOUT", os.getenv("OLLAMA_TIMEOUT_COPILOT", "240")))
+LLAMACPP_TEMPERATURE = float(os.getenv("LLAMACPP_TEMPERATURE", "1.0"))
+LLAMACPP_TOP_P = float(os.getenv("LLAMACPP_TOP_P", "0.95"))
+LLAMACPP_TOP_K = int(os.getenv("LLAMACPP_TOP_K", "64"))
+LLAMACPP_THINK = os.getenv("LLAMACPP_THINK", "false").strip().lower() in {"1", "true", "yes", "on"}
 # Timeouts are generous by default — local inference on a laptop is slow,
 # especially categorization batches of 50 transactions.
 # Increase further via env if your hardware is particularly slow.
 _OLLAMA_TIMEOUT_CATEGORIZE = float(os.getenv("OLLAMA_TIMEOUT_CATEGORIZE", "600"))  # 10 min
+_OLLAMA_TIMEOUT_CONTROLLER = float(os.getenv("OLLAMA_TIMEOUT_CONTROLLER", "90"))    # 1.5 min
 _OLLAMA_TIMEOUT_COPILOT = float(os.getenv("OLLAMA_TIMEOUT_COPILOT", "240"))        # 4 min
+_OLLAMA_CONTROLLER_KEEP_ALIVE = os.getenv(
+    "OLLAMA_CONTROLLER_KEEP_ALIVE",
+    os.getenv("OLLAMA_PREWARM_KEEP_ALIVE", "15m"),
+).strip() or "15m"
 _OLLAMA_COPILOT_KEEP_ALIVE = os.getenv(
     "OLLAMA_COPILOT_KEEP_ALIVE",
     os.getenv("OLLAMA_PREWARM_KEEP_ALIVE", "15m"),
@@ -44,18 +47,18 @@ _OLLAMA_COPILOT_KEEP_ALIVE = os.getenv(
 
 
 def is_available() -> bool:
-    """Return True if the configured LLM provider has the required credentials/config."""
+    """Return True when a local LLM base URL is configured."""
     provider = get_provider()
-    if provider == "ollama":
-        return bool(get_ollama_config()["base_url"])
-    return bool(ANTHROPIC_API_KEY)
+    if provider == "llamacpp":
+        return bool(get_llamacpp_config()["base_url"])
+    return bool(get_ollama_config()["base_url"])
 
 
 def get_provider() -> str:
     try:
         return local_llm.get_provider()
     except Exception:
-        return LLM_PROVIDER
+        return "llamacpp" if LLM_PROVIDER == "llamacpp" else "ollama"
 
 
 def get_ollama_config() -> dict:
@@ -65,8 +68,47 @@ def get_ollama_config() -> dict:
         return {
             "base_url": OLLAMA_BASE_URL,
             "categorize_model": OLLAMA_MODEL_CATEGORIZE,
+            "controller_model": OLLAMA_MODEL_CONTROLLER,
             "copilot_model": OLLAMA_MODEL_COPILOT,
         }
+
+
+def get_llamacpp_config() -> dict:
+    try:
+        return local_llm.get_llamacpp_config()
+    except Exception:
+        return {
+            "base_url": LLAMACPP_BASE_URL,
+            "model": LLAMACPP_MODEL,
+        }
+
+
+def _model_for_purpose(ollama_config: dict, purpose: str) -> str:
+    if purpose == "categorize":
+        return ollama_config.get("categorize_model") or OLLAMA_MODEL_CATEGORIZE
+    if purpose == "controller":
+        return (
+            ollama_config.get("controller_model")
+            or ollama_config.get("categorize_model")
+            or OLLAMA_MODEL_CONTROLLER
+        )
+    return ollama_config.get("copilot_model") or OLLAMA_MODEL_COPILOT
+
+
+def _timeout_for_purpose(purpose: str) -> float:
+    if purpose == "categorize":
+        return _OLLAMA_TIMEOUT_CATEGORIZE
+    if purpose == "controller":
+        return _OLLAMA_TIMEOUT_CONTROLLER
+    return _OLLAMA_TIMEOUT_COPILOT
+
+
+def _keep_alive_for_purpose(purpose: str) -> str | None:
+    if purpose == "controller":
+        return _OLLAMA_CONTROLLER_KEEP_ALIVE
+    if purpose == "copilot":
+        return _OLLAMA_COPILOT_KEEP_ALIVE
+    return None
 
 
 def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> str:
@@ -76,8 +118,7 @@ def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> s
     Args:
         prompt:     The user message content.
         max_tokens: Maximum tokens to generate.
-        purpose:    "categorize" or "copilot" — selects the Ollama model when
-                    LLM_PROVIDER=ollama. Has no effect for Anthropic.
+        purpose:    "categorize", "controller", or "copilot" selects the local Ollama model.
 
     Returns:
         Stripped response text from the model.
@@ -85,9 +126,9 @@ def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> s
     Raises:
         Exception on API or network errors.
     """
-    if get_provider() == "ollama":
-        return _complete_ollama(prompt, max_tokens, purpose)
-    return _complete_anthropic(prompt, max_tokens)
+    if get_provider() == "llamacpp" and purpose in {"controller", "copilot"}:
+        return _complete_llamacpp(prompt, max_tokens)
+    return _complete_ollama(prompt, max_tokens, purpose)
 
 
 def complete_vision(
@@ -101,31 +142,7 @@ def complete_vision(
     Send one image plus text to the configured local vision model.
     Returns (response_text, model_name). Receipt parsing is intentionally local-only.
     """
-    if get_provider() != "ollama":
-        raise Exception("Receipt image parsing requires local Ollama.")
     return _complete_ollama_vision(prompt, image_bytes, max_tokens, purpose, mime_type)
-
-
-def _complete_anthropic(prompt: str, max_tokens: int) -> str:
-    resp = httpx.post(
-        _ANTHROPIC_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        json={
-            "model": _ANTHROPIC_MODEL,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=60.0,
-        verify=certifi.where(),
-    )
-    result = resp.json()
-    if "content" not in result:
-        raise Exception(f"Anthropic API error: {result}")
-    return result["content"][0]["text"].strip()
 
 
 def chat_with_tools(
@@ -136,7 +153,7 @@ def chat_with_tools(
     purpose: str = "copilot",
 ) -> dict:
     """
-    Provider-agnostic tool-capable chat.
+    Tool-capable chat through local Ollama.
 
     Args:
         messages: list of {"role": "user"|"assistant"|"tool", "content": str,
@@ -149,91 +166,9 @@ def chat_with_tools(
         If tool_calls is non-empty, the caller should execute each and append a
         tool-role message before calling again.
     """
-    if get_provider() == "ollama":
-        return _chat_with_tools_ollama(messages, tools, system, max_tokens, purpose)
-    return _chat_with_tools_anthropic(messages, tools, system, max_tokens)
-
-
-def _chat_with_tools_anthropic(
-    messages: list[dict],
-    tools: list[dict],
-    system: str | None,
-    max_tokens: int,
-) -> dict:
-    import copilot_tools
-    if tools and isinstance(tools[0], str):
-        anth_tools = copilot_tools.tools_for_anthropic(tools)
-    else:
-        anth_tools = tools or []
-    anth_messages = []
-    for msg in messages:
-        role = msg.get("role")
-        if role == "tool":
-            anth_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": msg["tool_call_id"],
-                    "content": msg.get("content") or "",
-                }],
-            })
-        elif role == "assistant" and msg.get("tool_calls"):
-            blocks = []
-            if msg.get("content"):
-                blocks.append({"type": "text", "text": msg["content"]})
-            for call in msg["tool_calls"]:
-                blocks.append({
-                    "type": "tool_use",
-                    "id": call["id"],
-                    "name": call["name"],
-                    "input": call.get("args") or {},
-                })
-            anth_messages.append({"role": "assistant", "content": blocks})
-        else:
-            anth_messages.append({"role": role, "content": msg.get("content") or ""})
-
-    payload = {
-        "model": _ANTHROPIC_MODEL,
-        "max_tokens": max_tokens,
-        "messages": anth_messages,
-    }
-    if system:
-        payload["system"] = system
-    if anth_tools:
-        payload["tools"] = anth_tools
-
-    resp = httpx.post(
-        _ANTHROPIC_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        json=payload,
-        timeout=120.0,
-        verify=certifi.where(),
-    )
-    result = resp.json()
-    if "content" not in result:
-        raise Exception(f"Anthropic tool API error: {result}")
-
-    text_parts = []
-    tool_calls = []
-    for block in result["content"]:
-        if block.get("type") == "text":
-            text_parts.append(block.get("text", ""))
-        elif block.get("type") == "tool_use":
-            tool_calls.append({
-                "id": block["id"],
-                "name": block["name"],
-                "args": block.get("input") or {},
-            })
-
-    return {
-        "content": "".join(text_parts).strip(),
-        "tool_calls": tool_calls,
-        "stop_reason": result.get("stop_reason", ""),
-    }
+    if get_provider() == "llamacpp" and purpose == "copilot":
+        return _chat_with_tools_llamacpp(messages, tools, system, max_tokens)
+    return _chat_with_tools_ollama(messages, tools, system, max_tokens, purpose)
 
 
 def _chat_with_tools_ollama(
@@ -249,8 +184,8 @@ def _chat_with_tools_ollama(
     else:
         ollama_tools = tools or []
     ollama_config = get_ollama_config()
-    model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
-    timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
+    model = _model_for_purpose(ollama_config, purpose)
+    timeout = _timeout_for_purpose(purpose)
 
     ollama_msgs = []
     if system:
@@ -289,8 +224,9 @@ def _chat_with_tools_ollama(
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
-    if purpose == "copilot":
-        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
+    keep_alive = _keep_alive_for_purpose(purpose)
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
     if ollama_tools:
         payload["tools"] = ollama_tools
 
@@ -332,112 +268,12 @@ def chat_with_tools_stream(
 ):
     """
     Generator yielding ("text", delta_text) | ("tool_call", dict) | ("stop", reason)
-    for a single streaming LLM turn. Provider-agnostic.
+    for a single streaming local Ollama turn.
     """
-    if get_provider() == "ollama":
-        yield from _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
-    else:
-        yield from _chat_with_tools_stream_anthropic(messages, tools, system, max_tokens)
-
-
-def _chat_with_tools_stream_anthropic(messages, tools, system, max_tokens):
-    import copilot_tools
-    if tools and isinstance(tools[0], str):
-        anth_tools = copilot_tools.tools_for_anthropic(tools)
-    else:
-        anth_tools = tools or []
-    anth_messages = []
-    for msg in messages:
-        role = msg.get("role")
-        if role == "tool":
-            anth_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": msg["tool_call_id"],
-                    "content": msg.get("content") or "",
-                }],
-            })
-        elif role == "assistant" and msg.get("tool_calls"):
-            blocks = []
-            if msg.get("content"):
-                blocks.append({"type": "text", "text": msg["content"]})
-            for call in msg["tool_calls"]:
-                blocks.append({
-                    "type": "tool_use",
-                    "id": call["id"],
-                    "name": call["name"],
-                    "input": call.get("args") or {},
-                })
-            anth_messages.append({"role": "assistant", "content": blocks})
-        else:
-            anth_messages.append({"role": role, "content": msg.get("content") or ""})
-
-    payload = {
-        "model": _ANTHROPIC_MODEL,
-        "max_tokens": max_tokens,
-        "messages": anth_messages,
-        "stream": True,
-    }
-    if system:
-        payload["system"] = system
-    if anth_tools:
-        payload["tools"] = anth_tools
-
-    active_tool = None
-    with httpx.stream(
-        "POST", _ANTHROPIC_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        json=payload, timeout=180.0, verify=certifi.where(),
-    ) as resp:
-        for raw_line in resp.iter_lines():
-            if not raw_line or not raw_line.startswith("data:"):
-                continue
-            data_str = raw_line[5:].strip()
-            if not data_str or data_str == "[DONE]":
-                continue
-            try:
-                event = _json.loads(data_str)
-            except Exception:
-                continue
-            etype = event.get("type")
-            if etype == "content_block_start":
-                block = event.get("content_block") or {}
-                if block.get("type") == "tool_use":
-                    active_tool = {
-                        "id": block.get("id"),
-                        "name": block.get("name"),
-                        "args_json": "",
-                    }
-            elif etype == "content_block_delta":
-                delta = event.get("delta") or {}
-                dtype = delta.get("type")
-                if dtype == "text_delta":
-                    text = delta.get("text") or ""
-                    if text:
-                        yield ("text", text)
-                elif dtype == "input_json_delta" and active_tool is not None:
-                    active_tool["args_json"] += delta.get("partial_json") or ""
-            elif etype == "content_block_stop":
-                if active_tool is not None:
-                    try:
-                        args = _json.loads(active_tool["args_json"]) if active_tool["args_json"] else {}
-                    except Exception:
-                        args = {}
-                    yield ("tool_call", {
-                        "id": active_tool["id"],
-                        "name": active_tool["name"],
-                        "args": args,
-                    })
-                    active_tool = None
-            elif etype == "message_delta":
-                reason = (event.get("delta") or {}).get("stop_reason")
-                if reason:
-                    yield ("stop", reason)
+    if get_provider() == "llamacpp" and purpose == "copilot":
+        yield from _chat_with_tools_stream_llamacpp(messages, tools, system, max_tokens)
+        return
+    yield from _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
 
 
 def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose):
@@ -447,8 +283,8 @@ def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
     else:
         ollama_tools = tools or []
     ollama_config = get_ollama_config()
-    model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
-    timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
+    model = _model_for_purpose(ollama_config, purpose)
+    timeout = _timeout_for_purpose(purpose)
 
     ollama_msgs = []
     if system:
@@ -484,8 +320,9 @@ def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
         "think": False,
         "options": {"num_predict": max_tokens, "temperature": 0},
     }
-    if purpose == "copilot":
-        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
+    keep_alive = _keep_alive_for_purpose(purpose)
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
     if ollama_tools:
         payload["tools"] = ollama_tools
 
@@ -522,10 +359,193 @@ def _chat_with_tools_stream_ollama(messages, tools, system, max_tokens, purpose)
                 yield ("stop", event.get("done_reason") or "stop")
 
 
+def _messages_for_openai(messages: list[dict], system: str | None) -> list[dict]:
+    openai_msgs = []
+    if system:
+        openai_msgs.append({"role": "system", "content": system})
+    for msg in messages:
+        role = msg.get("role")
+        if role == "tool":
+            openai_msgs.append({
+                "role": "tool",
+                "content": msg.get("content") or "",
+                "tool_call_id": msg.get("tool_call_id"),
+            })
+        elif role == "assistant" and msg.get("tool_calls"):
+            openai_msgs.append({
+                "role": "assistant",
+                "content": msg.get("content") or "",
+                "tool_calls": [
+                    {
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {
+                            "name": c["name"],
+                            "arguments": _json.dumps(c.get("args") or {}),
+                        },
+                    }
+                    for c in msg["tool_calls"]
+                ],
+            })
+        else:
+            openai_msgs.append({"role": role, "content": msg.get("content") or ""})
+    return openai_msgs
+
+
+def _llamacpp_payload(
+    messages: list[dict],
+    max_tokens: int,
+    stream: bool,
+    tools: list[dict] | None = None,
+) -> dict:
+    config = get_llamacpp_config()
+    payload = {
+        "messages": messages,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "temperature": LLAMACPP_TEMPERATURE,
+        "top_p": LLAMACPP_TOP_P,
+        "top_k": LLAMACPP_TOP_K,
+        "think": LLAMACPP_THINK,
+    }
+    model = (config.get("model") or "").strip()
+    if model and model != "local":
+        payload["model"] = model
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    return payload
+
+
+def _parse_openai_tool_calls(raw_calls: list[dict] | None) -> list[dict]:
+    parsed = []
+    for idx, call in enumerate(raw_calls or []):
+        fn = call.get("function") or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = _json.loads(args)
+            except Exception:
+                args = {}
+        parsed.append({
+            "id": call.get("id") or f"call_{idx}",
+            "name": fn.get("name") or "",
+            "args": args,
+        })
+    return parsed
+
+
+def _chat_with_tools_llamacpp(
+    messages: list[dict],
+    tools: list[dict],
+    system: str | None,
+    max_tokens: int,
+) -> dict:
+    import copilot_tools
+    openai_tools = copilot_tools.tools_for_ollama(tools) if tools and isinstance(tools[0], str) else tools or []
+    config = get_llamacpp_config()
+    payload = _llamacpp_payload(
+        _messages_for_openai(messages, system),
+        max_tokens=max_tokens,
+        stream=False,
+        tools=openai_tools,
+    )
+    url = f"{config['base_url'].rstrip('/')}/v1/chat/completions"
+    resp = httpx.post(url, json=payload, timeout=LLAMACPP_TIMEOUT)
+    result = resp.json()
+    choices = result.get("choices") or []
+    if not choices:
+        raise Exception(f"llama.cpp API error: {result}")
+    message = choices[0].get("message") or {}
+    return {
+        "content": (message.get("content") or "").strip(),
+        "tool_calls": _parse_openai_tool_calls(message.get("tool_calls")),
+        "stop_reason": choices[0].get("finish_reason") or "stop",
+    }
+
+
+def _chat_with_tools_stream_llamacpp(messages, tools, system, max_tokens):
+    import copilot_tools
+    openai_tools = copilot_tools.tools_for_ollama(tools) if tools and isinstance(tools[0], str) else tools or []
+    config = get_llamacpp_config()
+    payload = _llamacpp_payload(
+        _messages_for_openai(messages, system),
+        max_tokens=max_tokens,
+        stream=True,
+        tools=openai_tools,
+    )
+    url = f"{config['base_url'].rstrip('/')}/v1/chat/completions"
+    buffered_tool_calls: dict[int, dict] = {}
+    with httpx.stream("POST", url, json=payload, timeout=LLAMACPP_TIMEOUT) as resp:
+        for raw_line in resp.iter_lines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = _json.loads(data)
+            except Exception:
+                continue
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if content:
+                yield ("text", content)
+            for call in delta.get("tool_calls") or []:
+                idx = int(call.get("index") or 0)
+                current = buffered_tool_calls.setdefault(idx, {
+                    "id": call.get("id") or f"call_{idx}",
+                    "name": "",
+                    "arguments": "",
+                })
+                if call.get("id"):
+                    current["id"] = call["id"]
+                fn = call.get("function") or {}
+                if fn.get("name"):
+                    current["name"] += fn["name"]
+                if fn.get("arguments"):
+                    current["arguments"] += fn["arguments"]
+            if choices[0].get("finish_reason"):
+                break
+
+    for idx, call in sorted(buffered_tool_calls.items()):
+        try:
+            args = _json.loads(call.get("arguments") or "{}")
+        except Exception:
+            args = {}
+        yield ("tool_call", {
+            "id": call.get("id") or f"call_{idx}",
+            "name": call.get("name") or "",
+            "args": args,
+        })
+    yield ("stop", "stop")
+
+
+def _complete_llamacpp(prompt: str, max_tokens: int) -> str:
+    config = get_llamacpp_config()
+    payload = _llamacpp_payload(
+        [{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        stream=False,
+    )
+    url = f"{config['base_url'].rstrip('/')}/v1/chat/completions"
+    resp = httpx.post(url, json=payload, timeout=LLAMACPP_TIMEOUT)
+    result = resp.json()
+    choices = result.get("choices") or []
+    if not choices:
+        raise Exception(f"llama.cpp API error: {result}")
+    message = choices[0].get("message") or {}
+    return (message.get("content") or "").strip()
+
+
 def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
     ollama_config = get_ollama_config()
-    model = ollama_config["categorize_model"] if purpose == "categorize" else ollama_config["copilot_model"]
-    timeout = _OLLAMA_TIMEOUT_CATEGORIZE if purpose == "categorize" else _OLLAMA_TIMEOUT_COPILOT
+    model = _model_for_purpose(ollama_config, purpose)
+    timeout = _timeout_for_purpose(purpose)
     url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
     payload = {
         "model": model,
@@ -533,11 +553,12 @@ def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
         "stream": False,
         "options": {"num_predict": max_tokens},
     }
-    if purpose == "copilot":
-        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
+    keep_alive = _keep_alive_for_purpose(purpose)
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
 
-    if purpose in {"categorize", "copilot"}:
-        # Merchant enrichment, categorization, and SQL generation are
+    if purpose in {"categorize", "controller", "copilot"}:
+        # Merchant enrichment, categorization, routing, and extraction are
         # deterministic extraction/translation tasks, so disable thinking
         # and randomness for faster, steadier output.
         payload["think"] = False
@@ -562,9 +583,9 @@ def _complete_ollama_vision(
     mime_type: str | None = None,
 ) -> tuple[str, str]:
     ollama_config = get_ollama_config()
-    preferred_model = ollama_config["copilot_model"] if purpose == "copilot" else ollama_config["categorize_model"]
+    preferred_model = _model_for_purpose(ollama_config, purpose)
     model = _select_ollama_vision_model(preferred_model, ollama_config)
-    timeout = _OLLAMA_TIMEOUT_COPILOT if purpose == "copilot" else _OLLAMA_TIMEOUT_CATEGORIZE
+    timeout = _timeout_for_purpose(purpose)
     url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     payload = {
@@ -581,8 +602,9 @@ def _complete_ollama_vision(
             "temperature": 0,
         },
     }
-    if purpose == "copilot":
-        payload["keep_alive"] = _OLLAMA_COPILOT_KEEP_ALIVE
+    keep_alive = _keep_alive_for_purpose(purpose)
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
 
     resp = httpx.post(url, json=payload, timeout=timeout)
     result = resp.json()

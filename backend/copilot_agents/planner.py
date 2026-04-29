@@ -9,6 +9,7 @@ import llm_client
 from copilot_tools import execute_tool
 from mira import answer_composer
 from mira import domain_actions
+from mira import memory_v2
 from mira import provenance
 
 from .base import emit_done_with_memory
@@ -23,6 +24,9 @@ ALLOWED_PLAN_TOOLS = {
     "get_recurring_summary",
     "get_net_worth_trend",
     "get_net_worth_delta",
+    "get_cashflow_forecast",
+    "predict_shortfall",
+    "check_affordability",
 }
 MAX_PLAN_STEPS = 3
 
@@ -83,7 +87,7 @@ def _subject_args(subject_type: str, subject: str, range_token: str) -> dict:
 
 
 def _deterministic_steps(route: dict | None) -> list[dict]:
-    action_steps = domain_actions.tool_plan_for_route(route, {"CompareSpend", "BudgetStatus"})
+    action_steps = domain_actions.tool_plan_for_route(route, {"CompareSpend", "BudgetStatus", "CashFlowForecast", "Affordability"})
     if action_steps:
         return action_steps
     args = (route or {}).get("args") or {}
@@ -273,6 +277,59 @@ def _answer(question: str, trace: list[dict], cache: dict, profile: str | None, 
     return " ".join(lines)
 
 
+def _retrieve_memory_context(question: str, profile: str | None, route: dict | None) -> tuple[dict | None, dict | None]:
+    from database import get_db
+
+    try:
+        with get_db() as conn:
+            result = memory_v2.retrieve_relevant_memories(
+                conn=conn,
+                profile=profile,
+                question=question,
+                route=route,
+                limit=4,
+            )
+    except Exception:
+        return None, None
+    trace = result.get("memory_trace") if isinstance(result, dict) else None
+    packet = result.get("compact_memory") if isinstance(result, dict) else None
+    return packet if isinstance(packet, dict) else None, trace if isinstance(trace, dict) else None
+
+
+def _with_memory_context(answer: str, packet: dict | None) -> str:
+    if not isinstance(packet, dict) or not packet.get("used"):
+        return answer
+    useful = [item for item in packet.get("items") or [] if isinstance(item, dict)]
+    if not useful:
+        return answer
+    first = useful[0]
+    memory_type = str(first.get("type") or "")
+    summary = str(first.get("summary") or "").strip().rstrip(".")
+    if first.get("sensitivity") == "sensitive":
+        return f"{answer} I'll keep the tone gentle here and avoid making light of this."
+    if memory_type in {"goal", "commitment", "constraint"} and summary:
+        phrase = _memory_summary_clause(summary)
+        return f"{answer} Since you {phrase}, I would keep that in the decision."
+    if memory_type == "tone_preference":
+        return f"{answer} I'll keep your saved tone preference in mind."
+    return f"{answer} I'll use your saved coaching context as soft guidance."
+
+
+def _memory_summary_clause(summary: str) -> str:
+    phrase = (summary or "").strip().rstrip(".")
+    replacements = (
+        ("Wants to ", "want to "),
+        ("Prefers ", "prefer "),
+        ("Is trying to ", "are trying to "),
+        ("Is ", "are "),
+        ("Does not want ", "do not want "),
+    )
+    for prefix, replacement in replacements:
+        if phrase.startswith(prefix):
+            return replacement + phrase[len(prefix):]
+    return phrase[0].lower() + phrase[1:] if phrase else phrase
+
+
 def _execute(question: str, profile: str | None, history: list[dict] | None, route: dict | None) -> dict:
     import copilot_agent as core
 
@@ -287,6 +344,8 @@ def _execute(question: str, profile: str | None, history: list[dict] | None, rou
         if isinstance(result, dict) and result.get("error"):
             break
     answer = answer_composer.compose_finance_answer(route, trace, cache, profile) or _answer(question, trace, cache, profile, route=route)
+    memory_packet, memory_trace = _retrieve_memory_context(question, profile, route)
+    answer = _with_memory_context(answer, memory_packet)
     finalized = core._finalize_answer(
         question=question,
         profile=profile,
@@ -295,8 +354,18 @@ def _execute(question: str, profile: str | None, history: list[dict] | None, rou
         cache=cache,
         iterations=0,
         run_detector=True,
+        route=route,
+        memory_trace=memory_trace,
     )
     finalized["llm_calls"] = llm_calls
+    if memory_trace:
+        finalized["memory_trace"] = memory_trace
+        finalized["answer_context"] = {
+            "version": 2,
+            "kind": "memory_context",
+            "memory_trace": memory_trace,
+            "compact_memory_trace": memory_packet,
+        }
     return provenance.attach_completed_action(
         finalized,
         profile=profile,
@@ -325,14 +394,17 @@ def stream(question: str, profile: str | None, history: list[dict] | None = None
         yield {"type": "tool_result", "name": step["name"], "duration_ms": duration_ms}
         if isinstance(result, dict) and result.get("error"):
             break
+    stream_answer = answer_composer.compose_finance_answer(route, trace, cache, profile) or _answer(question, trace, cache, profile, route=route)
+    memory_packet, memory_trace = _retrieve_memory_context(question, profile, route)
     yield from emit_done_with_memory(
         question=question,
         profile=profile,
-        final_answer=answer_composer.compose_finance_answer(route, trace, cache, profile)
-        or _answer(question, trace, cache, profile, route=route),
+        final_answer=_with_memory_context(stream_answer, memory_packet),
         trace=trace,
         cache=cache,
         iterations=0,
         llm_calls=llm_calls,
         route=route,
+        memory_trace=memory_trace,
+        compact_memory_trace=memory_packet,
     )

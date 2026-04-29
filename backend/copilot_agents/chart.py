@@ -109,6 +109,7 @@ def run(question: str, profile: str | None, history: list[dict] | None = None, r
             cache=cache,
             iterations=0,
             run_detector=True,
+            route=route,
         )
         if chart.get("_chart"):
             result["chart"] = chart

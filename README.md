@@ -15,13 +15,11 @@ The app is still Docker-packaged, but Local AI now runs through a native host Ol
 
 ## AI Modes
 
-Folio supports three installation modes:
+Folio supports two installation modes:
 
 1. `Local AI (Recommended)`
    Folio uses Ollama running natively on your Mac or Windows machine.
-2. `Cloud AI (BYOK)`
-   Folio uses your external API key for AI features.
-3. `No AI`
+2. `No AI`
    Folio runs with deterministic logic and manual categorization only.
 
 ## Supported Onboarding
@@ -35,7 +33,7 @@ The main setup path is:
 The setup script now guides you through:
 
 - choosing Docker or local development runtime
-- choosing `Local AI`, `Cloud AI`, or `No AI`
+- choosing `Local AI` or `No AI`
 - Teller certificate setup plus account-linking choice
 - Ollama model selection for Local AI
 - hardware-aware model recommendation based on your system
@@ -54,7 +52,6 @@ Required:
 Optional:
 
 - [Ollama](https://ollama.com/download) for `Local AI`
-- [Anthropic API key](https://console.anthropic.com/) for `Cloud AI`
 - [Trove API key](https://trove.headline.com/) if you want optional cloud merchant enrichment
 
 Notes:
@@ -81,14 +78,7 @@ The setup script will then walk you through one of these paths:
 - writes `.env`
 - starts Docker
 
-### Mode B: Cloud AI
-
-- asks for your Anthropic API key
-- optionally enables Trove
-- writes `.env`
-- starts Docker
-
-### Mode C: No AI
+### Mode B: No AI
 
 - disables AI features
 - writes `.env`
@@ -227,12 +217,14 @@ Important variables:
 - `LLM_PROVIDER`
 - `ENABLE_LOCAL_ENRICHMENT`
 - `ENABLE_LLM_CATEGORIZATION`
+- `ENABLE_EXPERIMENTAL_LOCAL_MODELS`
 - `ENABLE_TROVE`
 - `OLLAMA_BASE_URL`
 - `OLLAMA_MODEL_CATEGORIZE`
 - `OLLAMA_MODEL_COPILOT`
-- `ANTHROPIC_API_KEY`
 - `TROVE_API_KEY`
+
+Set `ENABLE_EXPERIMENTAL_LOCAL_MODELS=true` to expose opt-in Copilot-only test models in the Local AI picker. These can include Hugging Face GGUF models pulled through Ollama, and should be treated as experimental rather than categorization defaults.
 
 ## Project Structure
 
@@ -264,7 +256,7 @@ Folio/
 
 - Transaction data stays on your machine by default
 - `Local AI` keeps enrichment and categorization on-device
-- `Cloud AI` and optional Trove only send data when explicitly enabled
+- Optional Trove merchant enrichment sends merchant-enrichment data only when explicitly enabled
 - Teller Connect-linked tokens are encrypted before storage
 - Folio does not store your bank username or password from the Teller Connect flow
 - Backend endpoints are protected by an API key

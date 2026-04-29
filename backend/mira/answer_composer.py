@@ -11,8 +11,12 @@ NUMERIC_ACTIONS = {
     "TransactionSearch",
     "CompareSpend",
     "BudgetStatus",
+    "CashFlowForecast",
+    "Affordability",
     "MonthlyTrend",
     "NetWorthTrend",
+    "TransactionEnrichment",
+    "OverviewSummary",
 }
 
 
@@ -41,10 +45,18 @@ def compose_finance_answer(
         return _compose_transaction_search(calls[0][0], calls[0][1])
     if name in {"CompareSpend", "BudgetStatus"}:
         return _compose_comparison(action, calls, budget_status=name == "BudgetStatus")
+    if name == "CashFlowForecast":
+        return _compose_cashflow(calls[0][0], calls[0][1])
+    if name == "Affordability":
+        return _compose_affordability(calls[0][0], calls[0][1])
     if name == "MonthlyTrend":
         return _compose_monthly_trend(action, calls)
     if name == "NetWorthTrend":
         return _compose_net_worth_trend(calls)
+    if name == "TransactionEnrichment":
+        return _compose_transaction_enrichment(calls[0][0], calls[0][1])
+    if name == "OverviewSummary":
+        return _compose_overview_summary(calls[0][0], calls[0][1])
     return None
 
 
@@ -309,6 +321,107 @@ def _compose_net_worth_trend(calls: list[tuple[dict[str, Any], dict[str, Any]]])
     return (
         f"Your latest net worth point is {_money(latest_value)} on {latest_label}. "
         f"Across {len(series)} point(s), that is {_money(abs(delta))} {_direction(delta)} {first_label}."
+    )
+
+
+def _compose_transaction_enrichment(call: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if result.get("error"):
+        return f"I couldn't get a clean enrichment answer: {result['error']}"
+    name = call.get("name")
+    if name == "get_enrichment_quality_summary":
+        return (
+            f"Transaction enrichment coverage is {result.get('coverage_ratio', 0):.1%}: "
+            f"{result.get('persisted_enrichment_count', 0)} of {result.get('transaction_count', 0)} transaction(s) have persisted enrichment. "
+            f"{result.get('low_confidence_count', 0)} persisted row(s) are below the low-confidence threshold."
+        )
+    if name == "find_low_confidence_transactions":
+        count = int(result.get("count") or 0)
+        rows = result.get("transactions") if isinstance(result.get("transactions"), list) else []
+        if not rows:
+            return "I did not find low-confidence transaction enrichment rows for that threshold."
+        first = rows[0]
+        return (
+            f"I found {count} low-confidence or missing enrichment candidate(s). "
+            f"The first is transaction {first.get('transaction_id')} with minimum confidence {first.get('minimum_confidence')}."
+        )
+    if name == "explain_transaction_enrichment":
+        enrichment = result.get("enrichment") if isinstance(result.get("enrichment"), dict) else {}
+        tx_id = result.get("transaction_id") or enrichment.get("transaction_id") or "that transaction"
+        return (
+            f"Transaction {tx_id} is interpreted as {enrichment.get('semantic_type') or 'unknown'}: "
+            f"{enrichment.get('top_level_category') or 'Other'} / {enrichment.get('leaf_category') or 'Uncategorized'}, "
+            f"counterparty {enrichment.get('display_counterparty') or 'unknown'}, "
+            f"{enrichment.get('recurrence') or 'unknown'} recurrence. "
+            f"Evidence: {result.get('evidence_summary') or enrichment.get('evidence_summary') or 'no evidence summary available'}"
+        )
+    return None
+
+
+def _compose_overview_summary(call: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if result.get("error"):
+        return f"I couldn't get a clean overview answer: {result['error']}"
+    name = call.get("name")
+    if name == "get_data_health_summary":
+        caveats = result.get("known_caveats") if isinstance(result.get("known_caveats"), list) else result.get("caveats") or []
+        visible = int(result.get("visible_transaction_count") or result.get("row_count") or 0)
+        integrity = (result.get("db_integrity") or {}).get("status") if isinstance(result.get("db_integrity"), dict) else None
+        coverage = (result.get("enrichment_coverage") or {}).get("coverage_ratio") if isinstance(result.get("enrichment_coverage"), dict) else None
+        coverage_part = f" Enrichment coverage is {float(coverage or 0):.1%}." if coverage is not None else ""
+        caveat_part = f" Caveats: {'; '.join(str(item) for item in caveats[:3])}." if caveats else " I do not see data-health caveats for this scope."
+        return f"Data health for {result.get('profile_scope') or 'household'}: DB quick_check is {integrity or 'unknown'} and {visible} visible transaction(s) are in scope.{coverage_part}{caveat_part}"
+    if name == "get_dashboard_snapshot":
+        sections = result.get("sections") if isinstance(result.get("sections"), dict) else {}
+        names = ", ".join(list(sections.keys())[:6]) or "no dashboard sections"
+        return f"I pulled the dashboard snapshot from Folio's dashboard bundle. Sections available: {names}."
+    if name == "get_recurring_changes":
+        return result.get("summary") or f"Found {int(result.get('row_count') or 0)} recurring item(s) with current status data."
+    if name == "explain_metric":
+        metric = result.get("metric") or "metric"
+        return result.get("summary") or f"I pulled the {metric} explanation from Folio's dashboard metric sources."
+    return None
+
+
+def _compose_cashflow(call: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if result.get("error"):
+        return f"I couldn't get a clean cash-flow forecast: {result['error']}"
+    name = call.get("name")
+    if name == "predict_shortfall":
+        if result.get("suppressed"):
+            return result.get("suppressed_reason") or "Forecast confidence is low, so I am not surfacing a shortfall warning."
+        warning = result.get("warning") if isinstance(result.get("warning"), dict) else None
+        if warning:
+            return (
+                f"{warning.get('what')} Likely timing: {warning.get('when')}. "
+                f"Why: {warning.get('why')} Confidence is {warning.get('confidence')}. "
+                f"{warning.get('recommended_action')}"
+            )
+        forecast = result.get("forecast") if isinstance(result.get("forecast"), dict) else {}
+        low = forecast.get("projected_low_point") if isinstance(forecast.get("projected_low_point"), dict) else {}
+        return f"I do not see a shortfall in the forecast window. Projected low point is {_money(low.get('amount'))} around {low.get('date') or 'the selected horizon'}."
+    low = result.get("projected_low_point") if isinstance(result.get("projected_low_point"), dict) else {}
+    horizon = result.get("forecast_horizon") if isinstance(result.get("forecast_horizon"), dict) else {}
+    income = result.get("expected_income") if isinstance(result.get("expected_income"), dict) else {}
+    return (
+        f"From {horizon.get('start')} to {horizon.get('end')}, projected ending cash is {_money(result.get('projected_ending_balance'))}. "
+        f"The projected low point is {_money(low.get('amount'))} around {low.get('date')}. "
+        f"Expected income is {_money(income.get('total'))}, upcoming obligations are {_money(result.get('upcoming_obligation_total'))}, "
+        f"and confidence is {result.get('confidence') or 'unknown'}."
+    )
+
+
+def _compose_affordability(call: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if result.get("error"):
+        return f"I couldn't get a clean affordability check: {result['error']}"
+    amount = _money(result.get("amount"))
+    purpose = result.get("purpose") or result.get("category") or "that"
+    verdict = "Yes" if result.get("affordable") else "Not cleanly"
+    caveats = result.get("caveats") if isinstance(result.get("caveats"), list) else []
+    caveat_part = f" Caveat: {caveats[0]}" if caveats else ""
+    return (
+        f"{verdict}: {amount} for {purpose} leaves the projected low point near "
+        f"{_money(result.get('projected_low_after_purchase'))} and ending cash near "
+        f"{_money(result.get('projected_ending_after_purchase'))}. "
+        f"{result.get('recommendation') or ''}{caveat_part}"
     )
 
 
