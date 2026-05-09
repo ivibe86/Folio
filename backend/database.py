@@ -35,6 +35,7 @@ _wal_lock = threading.Lock()
 _wal_initialized = False
 _SQLITE_CONNECT_RETRIES = int(os.getenv("SQLITE_CONNECT_RETRIES", "3"))
 _SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
+DESCRIPTION_NORMALIZED_VERSION = "2"
 
 
 def _default_journal_mode() -> str:
@@ -243,6 +244,7 @@ def init_db():
         _migrate_transaction_intelligence_tables(conn)
         _seed_default_categories(conn)
         _seed_system_rules(conn)
+        _deactivate_brittle_cashflow_system_rules(conn)
         _seed_teller_category_map(conn)          
 
 
@@ -260,7 +262,7 @@ def _migrate_expense_type(conn: sqlite3.Connection):
     # Backfill known defaults (only update rows still at 'variable' that should be fixed/non_expense)
     # Only backfill if expense_type_source is 'system' (don't override user choices)
     KNOWN_FIXED = ("Utilities", "Housing", "Subscriptions", "Taxes", "Insurance")
-    KNOWN_NON_EXPENSE = ("Savings Transfer", "Credit Card Payment", "Income", "Personal Transfer")
+    KNOWN_NON_EXPENSE = ("Savings Transfer", "Credit Card Payment", "Income", "Credits & Refunds", "Personal Transfer")
 
     for name in KNOWN_FIXED:
         conn.execute(
@@ -349,16 +351,118 @@ def _migrate_transaction_expense_type(conn: sqlite3.Connection):
         logger.info("Added expense_type column to transactions table.")
 
 
+def _migrate_description_normalized_category_rules(conn: sqlite3.Connection) -> None:
+    """Retarget active fallback category rules before rebuilding fingerprints."""
+    rules = conn.execute(
+        """SELECT id, pattern, category, priority, source, profile_id
+           FROM category_rules
+           WHERE is_active = 1 AND match_type = 'contains'
+           ORDER BY id ASC"""
+    ).fetchall()
+    migrated = 0
+    created = 0
+    skipped = 0
+
+    for rule in rules:
+        rule_id, pattern, category, priority, source, profile_id = rule
+        normalized_pattern = (pattern or "").upper().strip()
+        if not normalized_pattern:
+            continue
+
+        params = [normalized_pattern, normalized_pattern, normalized_pattern]
+        where = [
+            "(description_normalized = ? OR UPPER(COALESCE(merchant_key, '')) = ? OR UPPER(COALESCE(merchant_name, '')) = ?)"
+        ]
+        if profile_id:
+            where.append("profile_id = ?")
+            params.append(profile_id)
+
+        matched_rows = conn.execute(
+            f"""SELECT description, merchant_key, merchant_name
+                FROM transactions
+                WHERE {' AND '.join(where)}""",
+            params,
+        ).fetchall()
+        if not matched_rows:
+            continue
+
+        candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for description, merchant_key, merchant_name in matched_rows:
+            key = (merchant_key or "").upper().strip()
+            name = (merchant_name or "").upper().strip()
+            current = _extract_merchant_pattern(description)
+            if current == normalized_pattern or key == normalized_pattern or name == normalized_pattern:
+                continue
+
+            candidate = key or name or current
+            if not candidate or candidate in seen_candidates:
+                continue
+            seen_candidates.add(candidate)
+            candidates.append(candidate)
+
+        if not candidates:
+            continue
+        if len(candidates) > 25:
+            skipped += 1
+            logger.warning(
+                "Skipped category rule fingerprint migration for %s; %d replacement candidates.",
+                normalized_pattern,
+                len(candidates),
+            )
+            continue
+
+        replacement = candidates[0]
+        conn.execute(
+            """UPDATE category_rules
+               SET pattern = ?
+               WHERE id = ?""",
+            (replacement, rule_id),
+        )
+        migrated += 1
+
+        for extra in candidates[1:]:
+            exists = conn.execute(
+                """SELECT id
+                   FROM category_rules
+                   WHERE pattern = ?
+                     AND category = ?
+                     AND source = ?
+                     AND match_type = 'contains'
+                     AND is_active = 1
+                     AND COALESCE(profile_id, '') = COALESCE(?, '')
+                   LIMIT 1""",
+                (extra, category, source, profile_id),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """INSERT INTO category_rules
+                   (pattern, match_type, category, priority, source, profile_id)
+                   VALUES (?, 'contains', ?, ?, ?, ?)""",
+                (extra, category, priority, source, profile_id),
+            )
+            created += 1
+
+    if migrated or created or skipped:
+        logger.info(
+            "Migrated category rule fingerprints for description_normalized v%s: %d updated, %d created, %d skipped.",
+            DESCRIPTION_NORMALIZED_VERSION,
+            migrated,
+            created,
+            skipped,
+        )
+
+
 def _migrate_description_normalized(conn: sqlite3.Connection):
     """
     Add description_normalized column and index to transactions, then backfill
     existing rows. Idempotent — safe to call on every startup.
 
-    description_normalized stores the output of _extract_merchant_pattern(description),
-    i.e. the canonical merchant token with store numbers, dates, and location noise
-    stripped. Matching user-defined rules against this canonical form instead of the
-    raw description fixes the mid-string noise bug (e.g. '#187' between merchant
-    name tokens preventing substring containment).
+    description_normalized stores a conservative transaction fingerprint from
+    _extract_merchant_pattern(description). It removes mechanical bank noise
+    without trying to infer merchant identity; enriched merchant_key/merchant_name
+    remain the primary matching identity elsewhere.
     """
     cols = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
     if "description_normalized" not in cols:
@@ -370,27 +474,53 @@ def _migrate_description_normalized(conn: sqlite3.Connection):
         "ON transactions(description_normalized)"
     )
 
-    # Backfill existing rows in batches of 500 to avoid a single huge transaction.
+    version_row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = 'description_normalized_version'"
+    ).fetchone()
+    current_version = (version_row[0] if version_row else "") or ""
+    needs_rebuild = current_version != DESCRIPTION_NORMALIZED_VERSION
+    if needs_rebuild:
+        _migrate_description_normalized_category_rules(conn)
+        conn.commit()
+
+    # Backfill/rebuild existing rows in batches of 500 to avoid a single huge transaction.
     # _extract_merchant_pattern is Python-only, so we fetch-loop-update.
     _BATCH = 500
     total = 0
     while True:
-        rows = conn.execute(
-            "SELECT id, description FROM transactions WHERE description_normalized IS NULL LIMIT ?",
-            (_BATCH,),
-        ).fetchall()
+        if needs_rebuild:
+            rows = conn.execute(
+                "SELECT id, description, description_normalized FROM transactions ORDER BY id LIMIT ? OFFSET ?",
+                (_BATCH, total),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, description, description_normalized FROM transactions WHERE description_normalized IS NULL LIMIT ?",
+                (_BATCH,),
+            ).fetchall()
         if not rows:
             break
         for row in rows:
             normalized = _extract_merchant_pattern(row[1])  # row[0]=id, row[1]=description
-            conn.execute(
-                "UPDATE transactions SET description_normalized = ? WHERE id = ?",
-                (normalized, row[0]),
-            )
-        conn.commit()
+            if row[2] != normalized:
+                conn.execute(
+                    "UPDATE transactions SET description_normalized = ? WHERE id = ?",
+                    (normalized, row[0]),
+                )
         total += len(rows)
-        if len(rows) < _BATCH:
-            break
+        conn.commit()
+
+    if needs_rebuild:
+        conn.execute(
+            """INSERT INTO app_settings (key, value, updated_at)
+               VALUES ('description_normalized_version', ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = datetime('now')""",
+            (DESCRIPTION_NORMALIZED_VERSION,),
+        )
+        conn.commit()
+        logger.info("Rebuilt description_normalized fingerprints to version %s.", DESCRIPTION_NORMALIZED_VERSION)
     if total:
         logger.info("Backfilled description_normalized for %d transactions.", total)
 
@@ -1791,15 +1921,34 @@ DEFAULT_CATEGORIES = [
     ("Food & Dining",       "variable"),
     ("Groceries",           "variable"),
     ("Transportation",      "variable"),
+    ("Gas & Fuel",          "variable"),
+    ("Parking & Tolls",     "variable"),
+    ("Auto Maintenance",    "variable"),
+    ("Vehicle Registration","variable"),
     ("Entertainment",       "variable"),
     ("Shopping",            "variable"),
+    ("Household Supplies",  "variable"),
+    ("Personal Care",       "variable"),
     ("Healthcare",          "variable"),
     ("Utilities",           "fixed"),
+    ("Internet & Phone",    "fixed"),
     ("Housing",             "fixed"),
+    ("Rent & Mortgage",     "fixed"),
+    ("Home Maintenance",    "variable"),
+    ("Education",           "variable"),
+    ("Childcare",           "fixed"),
+    ("Pets",                "variable"),
+    ("Gifts & Donations",   "variable"),
+    ("Auto Payment",        "fixed"),
+    ("Debt & Loan Payment", "fixed"),
     ("Savings Transfer",    "non_expense"),
     ("Credit Card Payment", "non_expense"),
     ("Income",              "non_expense"),
+    ("Credits & Refunds",   "non_expense"),
     ("Personal Transfer",   "non_expense"),
+    ("Cash Withdrawal",     "non_expense"),
+    ("Cash Deposit",        "non_expense"),
+    ("Investment Transfer", "non_expense"),
     ("Subscriptions",       "fixed"),
     ("Fees & Charges",      "variable"),
     ("Travel",              "variable"),
@@ -1816,18 +1965,18 @@ def _seed_default_categories(conn: sqlite3.Connection):
             "INSERT OR IGNORE INTO categories (name, is_system, expense_type, expense_type_source) VALUES (?, 1, ?, 'system')",
             (cat_name, exp_type),
         )
+    conn.execute(
+        """UPDATE categories
+              SET is_system = 1,
+                  expense_type = 'non_expense',
+                  expense_type_source = 'system',
+                  is_active = 1
+            WHERE name = 'Credits & Refunds'"""
+    )
 
 # System rules derived from categorizer.py's regex patterns
 # These replace the hardcoded patterns — now queryable and editable
 SYSTEM_RULES = [
-    # Credit Card Payment patterns (high confidence)
-    {"pattern": r"credit\s*c(?:a)?rd", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-    {"pattern": r"credit\s*crd", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-    {"pattern": r"\bautopay\b", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-    {"pattern": r"applecard", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-    {"pattern": r"gsbank.*payment", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-    {"pattern": r"card\s*payment", "match_type": "regex", "category": "Credit Card Payment", "priority": 900, "source": "system"},
-
     # Savings Transfer patterns (high confidence)
     {"pattern": r"transfer\s+to\s+sav", "match_type": "regex", "category": "Savings Transfer", "priority": 900, "source": "system"},
     {"pattern": r"transfer\s+from\s+chk", "match_type": "regex", "category": "Savings Transfer", "priority": 900, "source": "system"},
@@ -1874,6 +2023,27 @@ def _seed_system_rules(conn: sqlite3.Connection):
             (rule["pattern"], rule["match_type"], rule["category"], rule["priority"], rule["source"]),
         )
 
+
+def _deactivate_brittle_cashflow_system_rules(conn: sqlite3.Connection):
+    """Keep historical broad card-payment regexes from acting as direct rules."""
+    brittle_patterns = (
+        r"credit\s*c(?:a)?rd",
+        r"credit\s*crd",
+        r"\bepay\b",
+        r"\bautopay\b",
+        r"applecard",
+        r"gsbank.*payment",
+        r"card\s*payment",
+    )
+    conn.executemany(
+        """UPDATE category_rules
+              SET is_active = 0
+            WHERE source = 'system'
+              AND category = 'Credit Card Payment'
+              AND pattern = ?""",
+        [(pattern,) for pattern in brittle_patterns],
+    )
+
 # Teller category → Folio category mapping defaults.
 # Source: Teller API docs (28 documented values as of 2025).
 # NULL folio_category means "no useful signal — skip, let other rules or LLM handle it."
@@ -1886,20 +2056,20 @@ TELLER_CATEGORY_DEFAULTS = [
     ("charity",       None,              "rule-medium"),
     ("clothing",      "Shopping",        "rule-medium"),
     ("dining",        "Food & Dining",   "rule-medium"),
-    ("education",     None,              "rule-medium"),
+    ("education",     "Education",       "rule-medium"),
     ("electronics",   "Shopping",        "rule-medium"),
     ("entertainment", "Entertainment",   "rule-medium"),
-    ("fuel",          "Transportation",  "rule-medium"),
+    ("fuel",          "Gas & Fuel",      "rule-medium"),
     ("general",       None,              "rule-medium"),
     ("groceries",     "Groceries",       "rule-medium"),
     ("health",        "Healthcare",      "rule-medium"),
     ("home",          "Housing",         "rule-medium"),
     ("income",        "Income",          "rule-medium"),
     ("insurance",     "Insurance",       "rule-medium"),
-    ("investment",    None,              "rule-medium"),
-    ("loan",          None,              "rule-medium"),
+    ("investment",    "Investment Transfer", "rule-medium"),
+    ("loan",          "Debt & Loan Payment", "rule-medium"),
     ("office",        "Shopping",        "rule-medium"),
-    ("phone",         "Utilities",       "rule-medium"),
+    ("phone",         "Internet & Phone","rule-medium"),
     ("service",       None,              "rule-medium"),
     ("shopping",      "Shopping",        "rule-medium"),
     ("software",      "Subscriptions",   "rule-medium"),
@@ -1913,54 +2083,89 @@ TELLER_CATEGORY_DEFAULTS = [
 def _seed_teller_category_map(conn: sqlite3.Connection):
     """
     Seed the teller_category_map table with system defaults.
-    Uses INSERT OR IGNORE so user overrides (source='user') are never clobbered.
-    Re-run safe — only inserts rows that don't already exist.
+    Re-run safe — refreshes system rows while leaving user overrides alone.
     """
     for teller_cat, folio_cat, confidence in TELLER_CATEGORY_DEFAULTS:
         conn.execute(
-            """INSERT OR IGNORE INTO teller_category_map
+            """INSERT INTO teller_category_map
                (teller_category, folio_category, confidence, source)
-               VALUES (?, ?, ?, 'system')""",
+               VALUES (?, ?, ?, 'system')
+               ON CONFLICT(teller_category) DO UPDATE SET
+                   folio_category = excluded.folio_category,
+                   confidence = excluded.confidence
+               WHERE teller_category_map.source = 'system'""",
             (teller_cat, folio_cat, confidence),
         )
 
 
 def _extract_merchant_pattern(description: str) -> str:
     """
-    Extract a reusable merchant pattern from a transaction description.
-    Strips store numbers, locations, dates, phone numbers, and transaction-specific noise.
+    Extract a conservative, reusable transaction fingerprint without semantic
+    merchant or location stripping.
+
+    This intentionally avoids hardcoded city lists, global state-code
+    removal, and broad delimiter splitting. Merchant identity should come from
+    enrichment/merchant_key; this fallback only removes mechanical transaction
+    noise that is structurally obvious across users.
     """
     import re
 
     if not description:
         return ""
 
+    def _domain_to_token(match: re.Match) -> str:
+        host = match.group(1) or ""
+        labels = [part for part in re.split(r"[.\-]+", host.upper()) if part]
+        if not labels:
+            return " "
+        return f" {labels[-1]} "
+
     text = description.upper().strip()
+    text = text.replace("·", " ")
 
-    # Remove common noise tokens BEFORE splitting
-    text = re.sub(r"#\s*\d+", "", text)                    # #0742, # 123
-    text = re.sub(r"\b\d{5,}\b", "", text)                 # Long numbers (zip, ID)
-    text = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", "", text)  # Dates
-    text = re.sub(r"\b\d{3}[-.]\d{3}[-.]\d{4}\b", "", text)  # Phone numbers (800-275-2273)
-    text = re.sub(r"\b(?:CA|NY|TX|FL|WA|OR|AZ|NV|IL|GA|MA|PA|OH|NJ|NC|VA|CO|MD|CT|MN|WI|IN|TN|MO|SC|AL|LA|KY|OK|IA|MS|AR|KS|UT|NE|NM|WV|ID|HI|ME|NH|RI|MT|DE|SD|ND|AK|VT|WY|DC)\b", "", text)  # State codes
-    text = re.sub(r"\b(?:CUPERTINO|SEATTLE|NEW YORK|SAN JOSE|AUSTIN|PORTLAND)\b", "", text)  # Common HQ cities
-    text = re.sub(r"\bID:\*{3}\b", "", text)               # Sanitized IDs
-    text = re.sub(r"\bCOM/BILL\b", "", text)               # APPLE.COM/BILL → APPLE.
-    text = re.sub(r"\s+", " ", text).strip()
+    # Remove mechanically obvious identifiers and bank/network boilerplate.
+    text = re.sub(r"\bID:\s*\*+|\bID:\s*[A-Z0-9._:-]+", " ", text)
+    text = re.sub(r"\bCO\s*ID:\s*[A-Z0-9._:-]+", " ", text)
+    text = re.sub(r"\bINDN:\s*[^,;]+", " ", text)
+    text = re.sub(r"\bCONF(?:IRMATION)?#?\s*[A-Z0-9._:-]+", " ", text)
 
-    # Take the first meaningful chunk (usually the merchant name)
-    # Split on common delimiters
-    parts = re.split(r"[\-\*]", text)
-    if parts:
-        text = parts[0].strip()
+    # Store/terminal/reference numbers that have clear syntax.
+    text = re.sub(r"#\s*\d+\b", " ", text)
+    text = re.sub(r"\b((?:STORE|STR|LOCATION|LOC|TERM|TERMINAL|REF|TRACE|AUTH)\s*)#?\s*\d+\b", r"\1", text)
 
-    # Remove trailing dots and whitespace
-    text = text.rstrip(". ")
+    # Dates, phone numbers, and long opaque numeric IDs.
+    text = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", " ", text)
+    text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
+    text = re.sub(r"\b\d{3}[-.]\d{3}[-.]\d{4}\b", " ", text)
+    text = re.sub(r"\b\d{3}[-.]\d{7}\b", " ", text)
+    text = re.sub(r"\b\d{5,}\b", " ", text)
+    text = re.sub(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,}\b", " ", text)
 
-    # Final cleanup
-    text = re.sub(r"\s+", " ", text).strip()
+    # Common URL/billing suffixes are mechanical descriptors, not merchant names.
+    text = re.sub(r"\b(?:HTTPS?|WWW)\b", " ", text)
+    text = re.sub(
+        r"\b([A-Z0-9.-]+)\.(?:COM|NET|ORG|IO|CO|AI|TV|FM|APP|ME|US|UK|LY)(?:/[A-Z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)?\b",
+        _domain_to_token,
+        text,
+    )
+    text = re.sub(r"\bCOM\s+BILL\b", " ", text)
 
-    # Don't create patterns from very short or very generic descriptions
+    # Treat punctuation as separators but keep all meaningful tokens; do not
+    # assume the first chunk before '*' or '-' is the merchant.
+    text = re.sub(r"[*|•]", " ", text)
+    text = re.sub(r"[-_/]+", " ", text)
+    text = re.sub(r"[^A-Z0-9& ]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    if text:
+        seen_tokens: set[str] = set()
+        deduped_tokens: list[str] = []
+        for token in text.split():
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            deduped_tokens.append(token)
+        text = " ".join(deduped_tokens)
+
     if len(text) < 3 or text in ("ACH", "DEBIT", "CREDIT", "PAYMENT", "TRANSFER", "CHECK", "UNKNOWN"):
         return ""
 

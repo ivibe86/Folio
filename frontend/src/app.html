@@ -2,7 +2,13 @@
 <html lang="en" class="">
 <head>
     <script>
-        window.__dashboardData = fetch('/api/dashboard-bundle?nw_interval=biweekly', {
+        var dashboardNow = new Date();
+        var dashboardAsOf = [
+            dashboardNow.getFullYear(),
+            String(dashboardNow.getMonth() + 1).padStart(2, '0'),
+            String(dashboardNow.getDate()).padStart(2, '0')
+        ].join('-');
+        window.__dashboardData = fetch('/api/dashboard-bundle?nw_interval=biweekly&as_of=' + encodeURIComponent(dashboardAsOf), {
             headers: { 'X-API-Key': '%Folio_API_KEY%' }
         })
         .then(function(r) { return r.ok ? r.json() : null; })

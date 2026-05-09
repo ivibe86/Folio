@@ -62,6 +62,8 @@
     let categoriesMeta = [];
     let categorySearch = '';
     let categorySavingKey = null;   // name of the category currently being saved
+    let categoryRemovingKey = null;
+    let categoryReplacementDrafts = {};
 
     // ── History ──────────────────────────────────────────────────
     let historyItems = [];
@@ -154,7 +156,10 @@
     // ── Profile reactivity ───────────────────────────────────────
     $: activeProfileId = $activeProfile || 'household';
     $: scopedProfile   = activeProfileId !== 'household' ? activeProfileId : null;
-    $: allCategoryNames = categoriesMeta.map((item) => item.name).filter(Boolean);
+    $: allCategoryNames = categoriesMeta
+        .filter((item) => item.is_active)
+        .map((item) => item.name)
+        .filter(Boolean);
     $: visibleTabs = allTabs.filter((tab) => appConfig.bankLinkingEnabled || tab.key !== 'connections');
     $: tabKeys = new Set(visibleTabs.map((tab) => tab.key));
 
@@ -246,6 +251,7 @@
 
     // ── Categories derived ───────────────────────────────────────
     $: visibleCategories = categoriesMeta.filter((item) => {
+        if (!item.is_active) return false;
         if (!categorySearch.trim()) return true;
         const needle = categorySearch.trim().toLowerCase();
         return [item.name, item.parent_category, item.expense_type]
@@ -932,6 +938,50 @@
             await loadCategories();
         } finally {
             if (categorySavingKey === item.name) categorySavingKey = null;
+        }
+    }
+
+    function replacementOptionsFor(item) {
+        return categoriesMeta
+            .filter((candidate) => candidate.is_active && candidate.name !== item.name)
+            .map((candidate) => candidate.name);
+    }
+
+    function categoryReplacementValue(item) {
+        return categoryReplacementDrafts[item.name] || '';
+    }
+
+    function updateCategoryReplacement(item, value) {
+        categoryReplacementDrafts = {
+            ...categoryReplacementDrafts,
+            [item.name]: value,
+        };
+    }
+
+    async function removeCustomCategory(item) {
+        if (!item || item.is_system || categoryRemovingKey) return;
+        const txCount = Number(item.transaction_count || 0);
+        const replacement = txCount > 0 ? categoryReplacementValue(item) : '';
+        if (txCount > 0 && !replacement) {
+            setNotice('Choose a replacement category first.');
+            return;
+        }
+        const message = txCount > 0
+            ? `Remove ${item.name} and move ${txCount} transactions to ${replacement}?`
+            : `Remove ${item.name}?`;
+        if (typeof window !== 'undefined' && !window.confirm(message)) return;
+
+        categoryRemovingKey = item.name;
+        try {
+            const result = await api.deleteCategory(item.name, replacement || null);
+            invalidateCache();
+            await Promise.all([loadCategories(), loadRules()]);
+            const moved = result?.transactions_moved || 0;
+            setNotice(moved > 0 ? `Removed category and moved ${moved} transactions.` : 'Category removed.');
+        } catch (error) {
+            setNotice(error?.message || 'Failed to remove category.');
+        } finally {
+            if (categoryRemovingKey === item.name) categoryRemovingKey = null;
         }
     }
 
@@ -2078,16 +2128,20 @@
                 {:else if visibleCategories.length === 0}
                     <div class="cc-empty">No categories matched the search.</div>
                 {:else}
-                    <div class="cc-cat-table" style="--cc-cat-cols: 1.5fr 10rem 1.6rem;">
-                        <div class="cc-cat-header" style="--cc-cat-cols: 1.5fr 10rem 1.6rem;">
+                    <div class="cc-cat-table" style="--cc-cat-cols: 1.4fr 9rem 7rem 12rem 2.5rem;">
+                        <div class="cc-cat-header" style="--cc-cat-cols: 1.4fr 9rem 7rem 12rem 2.5rem;">
                             <div>Category</div>
                             <div>Expense Type</div>
+                            <div>Usage</div>
+                            <div>Replacement</div>
                             <div></div>
                         </div>
                         {#each visibleCategories as item (item.name)}
                             {@const isLocked = item.expense_type === 'non_expense'}
                             {@const isSaving = categorySavingKey === item.name}
-                            <div class="cc-cat-row" style="--cc-cat-cols: 1.5fr 10rem 1.6rem;" class:cc-cat-row-saving={isSaving}>
+                            {@const isRemoving = categoryRemovingKey === item.name}
+                            {@const isCustom = !item.is_system}
+                            <div class="cc-cat-row" style="--cc-cat-cols: 1.4fr 9rem 7rem 12rem 2.5rem;" class:cc-cat-row-saving={isSaving || isRemoving}>
                                 <div class="cc-cat-name">{item.name}</div>
 
                                 <!-- Expense type pill toggle or lock -->
@@ -2117,10 +2171,39 @@
                                     </div>
                                 {/if}
 
+                                <div class="cc-cell-subtitle">
+                                    {item.transaction_count || 0} tx · {item.active_rule_count || 0} rules
+                                </div>
+
+                                <div>
+                                    {#if isCustom && Number(item.transaction_count || 0) > 0}
+                                        <select
+                                            class="cc-select"
+                                            value={categoryReplacementValue(item)}
+                                            disabled={isRemoving}
+                                            on:change={(event) => updateCategoryReplacement(item, event.currentTarget.value)}>
+                                            <option value="">Move to…</option>
+                                            {#each replacementOptionsFor(item) as categoryName}
+                                                <option value={categoryName}>{categoryName}</option>
+                                            {/each}
+                                        </select>
+                                    {:else}
+                                        <span class="cc-cell-subtitle">—</span>
+                                    {/if}
+                                </div>
+
                                 <!-- Saving indicator -->
                                 <div style="display:flex;align-items:center;justify-content:center;">
-                                    {#if isSaving}
+                                    {#if isSaving || isRemoving}
                                         <span class="material-symbols-outlined" style="font-size:14px;color:var(--accent);animation:spin 0.8s linear infinite;">progress_activity</span>
+                                    {:else if isCustom}
+                                        <button
+                                            class="cc-icon-btn"
+                                            type="button"
+                                            title="Remove category"
+                                            on:click={() => removeCustomCategory(item)}>
+                                            <span class="material-symbols-outlined">delete</span>
+                                        </button>
                                     {/if}
                                 </div>
                             </div>

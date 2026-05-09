@@ -1082,6 +1082,30 @@
     white-space: nowrap;
 }
 
+.cc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid color-mix(in srgb, var(--card-border) 82%, transparent);
+    border-radius: 0.55rem;
+    background: color-mix(in srgb, var(--card-bg) 92%, transparent);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.cc-icon-btn:hover {
+    color: var(--danger, #dc2626);
+    border-color: color-mix(in srgb, var(--danger, #dc2626) 36%, var(--card-border));
+    background: color-mix(in srgb, var(--danger, #dc2626) 7%, var(--card-bg));
+}
+
+.cc-icon-btn .material-symbols-outlined {
+    font-size: 1.05rem;
+}
+
 /* Compact pill toggle sizing for inline table rows */
 .cc-cat-row .period-toggle-track {
     font-size: 0.78rem;

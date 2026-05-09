@@ -17,23 +17,28 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from statistics import pstdev
 from typing import Any
 
 from database import get_db
 from range_parser import parse_range
 from data_manager import (
+    NON_SPENDING_CATEGORIES as DATA_NON_SPENDING_CATEGORIES,
     get_category_analytics_data,
     get_category_budgets,
+    get_categories_meta,
     get_dashboard_bundle_data,
     get_merchant_insights_data,
     get_monthly_analytics_data,
     get_net_worth_delta_metrics,
     get_net_worth_series_data,
+    get_plan_snapshot_data,
     get_recurring_from_db,
     get_summary_data,
     get_transactions_paginated,
 )
+from cashflow_classifier import CREDITS_REFUNDS_CATEGORY
 from mira import metric_registry
 from mira import cashflow_forecast
 
@@ -140,7 +145,8 @@ _RANGE_DESC = (
     "last_7d, last_30d, last_90d, last_180d, last_365d, ytd, last_year, all, "
     "last_N_months such as last_13_months, or a specific YYYY-MM."
 )
-_NON_SPENDING_CATEGORIES = ("Savings Transfer", "Personal Transfer", "Credit Card Payment", "Income")
+_NON_SPENDING_CATEGORIES = tuple(DATA_NON_SPENDING_CATEGORIES)
+_NON_SPENDING_CATEGORY_KEYS = {str(name).strip().lower() for name in _NON_SPENDING_CATEGORIES}
 
 
 def _profile_filter(profile: str | None) -> tuple[str, list]:
@@ -164,6 +170,122 @@ def _fmt_money(v) -> float:
         return 0.0
 
 
+def _transfer_ok_clause(profile: str | None) -> str:
+    if not profile or profile == "household":
+        return "AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal', 'transfer_household'))"
+    return "AND (expense_type IS NULL OR expense_type != 'transfer_internal')"
+
+
+def _personal_transfer_type_clause(profile: str | None) -> str:
+    if not profile or profile == "household":
+        return "expense_type = 'transfer_external'"
+    return "expense_type IN ('transfer_external', 'transfer_household')"
+
+
+def _category_config(category: str, conn) -> tuple[str, str] | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT name, expense_type
+            FROM categories
+            WHERE LOWER(name) = LOWER(?) AND is_active = 1
+            LIMIT 1
+            """,
+            (category,),
+        ).fetchone()
+    except Exception:
+        row = None
+    if not row:
+        return None
+    name = row["name"] if hasattr(row, "keys") else row[0]
+    expense_type = row["expense_type"] if hasattr(row, "keys") else row[1]
+    return str(name or category), str(expense_type or "")
+
+
+def _is_non_spending_category(category: str, conn) -> tuple[bool, str, str]:
+    configured = _category_config(category, conn)
+    display = configured[0] if configured else category
+    expense_type = configured[1] if configured else ""
+    if expense_type == "non_expense":
+        return True, display, expense_type
+    if category.strip().lower() in _NON_SPENDING_CATEGORY_KEYS:
+        return True, display, "non_expense"
+    try:
+        for meta in get_categories_meta(conn=conn):
+            if not meta.get("is_active", 1):
+                continue
+            if str(meta.get("expense_type") or "") != "non_expense":
+                continue
+            if str(meta.get("name") or "").strip().lower() == category.strip().lower():
+                return True, str(meta.get("name") or category), "non_expense"
+    except Exception:
+        pass
+    return False, display, expense_type
+
+
+def _unsupported_category_spend_result(
+    *,
+    category: str,
+    label: str,
+    start: str | None,
+    end: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    suggested = ["find_transactions"]
+    key = category.strip().lower()
+    if key == "income":
+        suggested.insert(0, "get_period_summary(metric='income')")
+    elif key == "savings transfer":
+        suggested.insert(0, "get_period_summary(metric='savings')")
+    elif key == "credit card payment":
+        suggested.insert(0, "get_period_summary(metric='credit_card_payments')")
+    elif key == "credits & refunds":
+        suggested.insert(0, "get_period_summary(metric='refunds')")
+    else:
+        suggested.insert(0, "get_period_summary")
+    caveat = f"{category} is configured as a non-expense category, so it is not a spending category."
+    return {
+        "error": "unsupported_category_for_spend",
+        "unsupported": True,
+        "category": category,
+        "range": label,
+        "start": start,
+        "end": end,
+        "semantic_type": "non_expense",
+        "reason": reason or caveat,
+        "message": caveat,
+        "suggested_tools": suggested,
+        "metric_id": None,
+        "metric_ids": [],
+        "metric_definition": None,
+        "metric_definition_summary": "",
+        "filters": {"category": category},
+        "row_count": 0,
+        "count": 0,
+        "sample_transaction_ids": [],
+        "calculation_basis": caveat,
+        "data_quality": {"caveats": [caveat]},
+        "caveats": [caveat],
+        "provenance": {
+            "tool": "get_category_spend",
+            "args": {"category": category},
+            "metric_id": None,
+            "metric_ids": [],
+            "metric_definition_summary": "",
+            "range": label,
+            "start": start,
+            "end": end,
+            "filters": {"category": category},
+            "row_count": 0,
+            "count": 0,
+            "sample_transaction_ids": [],
+            "calculation_basis": caveat,
+            "data_quality": {"caveats": [caveat]},
+            "caveats": [caveat],
+        },
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool implementations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -179,7 +301,200 @@ def _t_get_month_summary(args: dict, profile: str | None, conn) -> Any:
         target = rows[-1]
     idx = rows.index(target)
     prior = rows[idx - 1] if idx > 0 else None
-    return {"current": target, "prior": prior}
+    return _add_contract(
+        {"current": target, "prior": prior},
+        tool="get_month_summary",
+        args=args,
+        label=args.get("range") or label,
+        row_count=1,
+        filters={"profile": profile or "household", "month": label},
+    )
+
+
+def _period_component_filter(metric: str, profile: str | None) -> tuple[str, list[Any]]:
+    non_spending_ph = ",".join("?" * len(_NON_SPENDING_CATEGORIES))
+    transfer_ok = _transfer_ok_clause(profile)
+    personal_transfer_clause = _personal_transfer_type_clause(profile)
+    if metric == "income":
+        return f"category = 'Income' AND amount > 0 {transfer_ok}", []
+    if metric == "expenses":
+        return f"amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok}", list(_NON_SPENDING_CATEGORIES)
+    if metric == "refunds":
+        return (
+            f"amount > 0 AND (category = ? OR (category NOT IN ({non_spending_ph}) AND category != 'Income')) {transfer_ok}",
+            [CREDITS_REFUNDS_CATEGORY, *list(_NON_SPENDING_CATEGORIES)],
+        )
+    if metric == "savings":
+        return "category = 'Savings Transfer' AND amount < 0", []
+    if metric == "credit_card_payments":
+        return "category = 'Credit Card Payment' AND amount < 0", []
+    if metric == "personal_transfers":
+        return f"{personal_transfer_clause}", []
+    if metric == "cash_deposits":
+        return "category = 'Cash Deposit' AND amount > 0", []
+    if metric == "cash_withdrawals":
+        return "category = 'Cash Withdrawal' AND amount < 0", []
+    if metric == "investment_transfers":
+        return "category = 'Investment Transfer'", []
+    return "1=1", []
+
+
+def _period_summary_samples(
+    metric: str,
+    *,
+    profile: str | None,
+    start: str | None,
+    end: str | None,
+    conn,
+) -> list[str]:
+    where, params = _period_component_filter(metric, profile)
+    clauses = [where]
+    if profile and profile != "household":
+        clauses.append("profile_id = ?")
+        params.append(profile)
+    if start:
+        clauses.append("date >= ?")
+        params.append(start)
+    if end:
+        clauses.append("date <= ?")
+        params.append(end)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT id AS original_id
+            FROM transactions_visible
+            WHERE {" AND ".join(clauses)}
+            ORDER BY date DESC
+            LIMIT 5
+            """,
+            params,
+        ).fetchall()
+    except Exception:
+        return []
+    return _sample_transaction_ids([dict(row) for row in rows])
+
+
+def _t_get_period_summary(args: dict, profile: str | None, conn) -> Any:
+    """Range-aware income, expense, and cashflow-component summary."""
+    range_token = args.get("range") or "current_month"
+    start, end, label = _resolve_range(range_token)
+    metric = str(args.get("metric") or "summary").strip().lower()
+    metric_aliases = {
+        "income_total": "income",
+        "expense": "expenses",
+        "expense_total": "expenses",
+        "spending": "expenses",
+        "credit_card_payment": "credit_card_payments",
+        "cc_payments": "credit_card_payments",
+        "refund": "refunds",
+        "credits_refunds": "refunds",
+        "savings_transfer": "savings",
+    }
+    metric = metric_aliases.get(metric, metric)
+
+    profile_clauses: list[str] = []
+    profile_params: list[Any] = []
+    if profile and profile != "household":
+        profile_clauses.append("profile_id = ?")
+        profile_params.append(profile)
+    if start:
+        profile_clauses.append("date >= ?")
+        profile_params.append(start)
+    if end:
+        profile_clauses.append("date <= ?")
+        profile_params.append(end)
+    where_sql = " AND ".join(profile_clauses) if profile_clauses else "1=1"
+    non_spending_ph = ",".join("?" * len(_NON_SPENDING_CATEGORIES))
+    transfer_ok = _transfer_ok_clause(profile)
+    personal_transfer_clause = _personal_transfer_type_clause(profile)
+    sql = f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN category = 'Income' AND amount > 0 {transfer_ok} THEN amount ELSE 0 END), 0) AS income,
+            COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok} THEN ABS(amount) ELSE 0 END), 0) AS expenses,
+            COALESCE(SUM(CASE WHEN amount > 0 AND (category = ? OR (category NOT IN ({non_spending_ph}) AND category != 'Income')) {transfer_ok} THEN amount ELSE 0 END), 0) AS refunds,
+            COALESCE(SUM(CASE WHEN category = 'Savings Transfer' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS savings,
+            COALESCE(SUM(CASE WHEN category = 'Credit Card Payment' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS credit_card_payments,
+            COALESCE(SUM(CASE WHEN {personal_transfer_clause} AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS personal_transfers_out,
+            COALESCE(SUM(CASE WHEN {personal_transfer_clause} AND amount > 0 THEN amount ELSE 0 END), 0) AS personal_transfers_in,
+            COALESCE(SUM(CASE WHEN category = 'Cash Deposit' AND amount > 0 THEN amount ELSE 0 END), 0) AS cash_deposits,
+            COALESCE(SUM(CASE WHEN category = 'Cash Withdrawal' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS cash_withdrawals,
+            COALESCE(SUM(CASE WHEN category = 'Investment Transfer' AND amount > 0 THEN amount ELSE 0 END), 0) AS investment_inflows,
+            COALESCE(SUM(CASE WHEN category = 'Investment Transfer' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS investment_outflows,
+            COALESCE(SUM(CASE WHEN category = 'Income' AND amount > 0 {transfer_ok} THEN 1 ELSE 0 END), 0) AS income_count,
+            COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok} THEN 1 ELSE 0 END), 0) AS expense_count,
+            COALESCE(SUM(CASE WHEN amount > 0 AND (category = ? OR (category NOT IN ({non_spending_ph}) AND category != 'Income')) {transfer_ok} THEN 1 ELSE 0 END), 0) AS refund_count,
+            COALESCE(SUM(CASE WHEN category = 'Savings Transfer' AND amount < 0 THEN 1 ELSE 0 END), 0) AS savings_count,
+            COALESCE(SUM(CASE WHEN category = 'Credit Card Payment' AND amount < 0 THEN 1 ELSE 0 END), 0) AS credit_card_payment_count,
+            COALESCE(SUM(CASE WHEN {personal_transfer_clause} THEN 1 ELSE 0 END), 0) AS personal_transfer_count,
+            COUNT(*) AS transaction_count
+        FROM transactions_visible
+        WHERE {where_sql}
+    """
+    params = (
+        list(_NON_SPENDING_CATEGORIES)
+        + [CREDITS_REFUNDS_CATEGORY]
+        + list(_NON_SPENDING_CATEGORIES)
+        + list(_NON_SPENDING_CATEGORIES)
+        + [CREDITS_REFUNDS_CATEGORY]
+        + list(_NON_SPENDING_CATEGORIES)
+        + profile_params
+    )
+    row = conn.execute(sql, params).fetchone()
+    values = dict(row) if hasattr(row, "keys") else {}
+    values = {key: _fmt_money(value) for key, value in values.items() if key not in {"income_count", "expense_count", "refund_count", "savings_count", "credit_card_payment_count", "personal_transfer_count", "transaction_count"}}
+    counts = {
+        "income": int(row["income_count"] if hasattr(row, "keys") else 0),
+        "expenses": int(row["expense_count"] if hasattr(row, "keys") else 0),
+        "refunds": int(row["refund_count"] if hasattr(row, "keys") else 0),
+        "savings": int(row["savings_count"] if hasattr(row, "keys") else 0),
+        "credit_card_payments": int(row["credit_card_payment_count"] if hasattr(row, "keys") else 0),
+        "personal_transfers": int(row["personal_transfer_count"] if hasattr(row, "keys") else 0),
+        "summary": int(row["transaction_count"] if hasattr(row, "keys") else 0),
+    }
+    values["net"] = _fmt_money(
+        values.get("income", 0)
+        + values.get("refunds", 0)
+        + values.get("personal_transfers_in", 0)
+        + values.get("cash_deposits", 0)
+        + values.get("investment_inflows", 0)
+        - values.get("expenses", 0)
+        - values.get("personal_transfers_out", 0)
+        - values.get("cash_withdrawals", 0)
+        - values.get("investment_outflows", 0)
+    )
+    selected_values = {
+        "income": values.get("income", 0),
+        "expenses": values.get("expenses", 0),
+        "refunds": values.get("refunds", 0),
+        "savings": values.get("savings", 0),
+        "credit_card_payments": values.get("credit_card_payments", 0),
+        "personal_transfers": values.get("personal_transfers_out", 0),
+        "cash_deposits": values.get("cash_deposits", 0),
+        "cash_withdrawals": values.get("cash_withdrawals", 0),
+        "investment_transfers": values.get("investment_outflows", 0),
+        "summary": values.get("net", 0),
+    }
+    row_count = counts.get(metric, counts["summary"])
+    samples = _period_summary_samples(metric, profile=profile, start=start, end=end, conn=conn)
+    return _add_contract(
+        {
+            "range": label,
+            "start": start,
+            "end": end,
+            "metric": metric,
+            "value": _fmt_money(selected_values.get(metric, selected_values["summary"])),
+            **values,
+            "counts": counts,
+        },
+        tool="get_period_summary",
+        args={**args, "metric": metric, "range": range_token},
+        label=label,
+        start=start,
+        end=end,
+        row_count=row_count,
+        sample_transaction_ids=samples,
+        filters={"profile": profile or "household", "metric": metric},
+    )
 
 
 def _range_to_kwargs(args: dict) -> tuple[str, str | None, str | None, str]:
@@ -222,12 +537,159 @@ def _t_get_top_merchants(args: dict, profile: str | None, conn) -> Any:
     }
 
 
+def _t_get_finance_priorities(args: dict, profile: str | None, conn) -> Any:
+    """Rank current-month money items to watch or fix, using scoped semantic tools."""
+    focus = str(args.get("focus") or "watch").strip().lower()
+    if focus not in {"watch", "fix"}:
+        focus = "watch"
+    range_token = args.get("range") or "current_month"
+    top_categories = _t_get_top_categories({"range": range_token, "limit": 8}, profile, conn) or {}
+    budget = _t_get_budget_plan_summary({"range": range_token}, profile, conn) or {}
+    recurring = _t_get_recurring_summary({"status": "active", "all": True}, profile, conn) or {}
+    categories = top_categories.get("categories") if isinstance(top_categories.get("categories"), list) else []
+    variable_categories = [
+        row for row in categories
+        if str(row.get("expense_type") or "").lower() != "fixed"
+    ]
+
+    items: list[dict[str, Any]] = []
+    if focus == "fix" and not budget.get("has_budget_plan"):
+        items.append({
+            "kind": "budget_setup",
+            "title": "Build a real budget baseline",
+            "why": "I do not see a configured category budget plan for this profile yet.",
+            "recommended_action": "Set category budgets first, then use safe-to-spend checks against the plan.",
+            "severity": "warning",
+            "priority": 10,
+            "evidence": {"budget_count": budget.get("budget_count") or 0},
+        })
+    elif budget.get("has_budget_plan"):
+        over_count = int(budget.get("over_count") or 0)
+        safe_to_spend = float(budget.get("safe_to_spend") or 0)
+        if over_count > 0:
+            items.append({
+                "kind": "budget_overage",
+                "title": "Budget categories are over plan",
+                "why": f"{over_count} budget category/categories are already over their configured target.",
+                "recommended_action": "Start with the over-budget category before adding new discretionary spend.",
+                "severity": "warning",
+                "priority": 15,
+                "evidence": {"over_count": over_count, "safe_to_spend": _fmt_money(safe_to_spend)},
+            })
+        elif safe_to_spend <= 0:
+            items.append({
+                "kind": "safe_to_spend",
+                "title": "Safe-to-spend is tight",
+                "why": f"Budget safe-to-spend is {_fmt_money(safe_to_spend)} for the current plan snapshot.",
+                "recommended_action": "Treat optional purchases as review-only until income or budgets move.",
+                "severity": "warning",
+                "priority": 18,
+                "evidence": {"safe_to_spend": _fmt_money(safe_to_spend)},
+            })
+
+    if variable_categories:
+        lead = variable_categories[0]
+        category = lead.get("category") or lead.get("name") or "variable spending"
+        amount = lead.get("total") if lead.get("total") is not None else lead.get("amount")
+        percent = lead.get("percent")
+        why = f"{category} is the largest current-month variable category at ${_fmt_money(amount):,.2f}"
+        if percent is not None:
+            why += f" ({_fmt_money(percent)}% of categorized spend)"
+        items.append({
+            "kind": "variable_spend",
+            "title": f"Watch {category}",
+            "why": why + ".",
+            "recommended_action": "Open this category before changing budgets or adding new discretionary spend.",
+            "severity": "info" if focus == "watch" else "warning",
+            "priority": 25 if focus == "watch" else 20,
+            "evidence": {"category": category, "amount": _fmt_money(amount), "range": top_categories.get("range")},
+        })
+
+    recurring_items = recurring.get("items") if isinstance(recurring.get("items"), list) else []
+    total_monthly = float(recurring.get("total_monthly") or 0)
+    if recurring_items and total_monthly > 0:
+        items.append({
+            "kind": "recurring_pressure",
+            "title": "Review recurring charges",
+            "why": f"{len(recurring_items)} active recurring item(s) total about ${_fmt_money(total_monthly):,.2f}/month.",
+            "recommended_action": "Look for duplicates, annual renewals, or low-value subscriptions before trimming daily spend.",
+            "severity": "info",
+            "priority": 35 if focus == "watch" else 30,
+            "evidence": {
+                "active_count": len(recurring_items),
+                "total_monthly": _fmt_money(total_monthly),
+                "sample": [
+                    item.get("merchant") or item.get("name") or item.get("description")
+                    for item in recurring_items[:3]
+                ],
+            },
+        })
+
+    if not items and categories:
+        lead = categories[0]
+        category = lead.get("category") or lead.get("name") or "spending"
+        amount = lead.get("total") if lead.get("total") is not None else lead.get("amount")
+        items.append({
+            "kind": "spend_overview",
+            "title": f"Start with {category}",
+            "why": f"{category} is the biggest current-month category at ${_fmt_money(amount):,.2f}.",
+            "recommended_action": "Use it as the first drill-down, then compare merchants inside it.",
+            "severity": "info",
+            "priority": 50,
+            "evidence": {"category": category, "amount": _fmt_money(amount), "range": top_categories.get("range")},
+        })
+
+    items = sorted(items, key=lambda item: int(item.get("priority") or 99))[: int(args.get("limit") or 3)]
+    label = str(top_categories.get("range") or range_token)
+    summary = (
+        f"Ranked {len(items)} current-month item(s) to {'fix' if focus == 'fix' else 'watch'}."
+        if items else "No clear priority items were found for this scope."
+    )
+    caveats = []
+    if not budget.get("has_budget_plan"):
+        caveats.append("No configured budget plan was found, so budget-based prioritization is limited.")
+    return _add_contract({
+        "focus": focus,
+        "range": label,
+        "summary": summary,
+        "items": items,
+        "top_categories": categories,
+        "budget_plan": {
+            "has_budget_plan": bool(budget.get("has_budget_plan")),
+            "remaining": budget.get("remaining"),
+            "safe_to_spend": budget.get("safe_to_spend"),
+            "over_count": budget.get("over_count"),
+        },
+        "recurring": {
+            "active_count": len(recurring_items),
+            "total_monthly": _fmt_money(total_monthly),
+        },
+        "provenance": _semantic_provenance(
+            tool="get_finance_priorities",
+            args={"range": range_token, "focus": focus},
+            label=label,
+            row_count=len(items),
+            filters={"profile": profile or "household", "focus": focus},
+            caveats=caveats,
+        ),
+    }, tool="get_finance_priorities", args={"range": range_token, "focus": focus}, label=label, row_count=len(items), filters={"profile": profile or "household", "focus": focus}, caveats=caveats)
+
+
 def _t_get_category_spend(args: dict, profile: str | None, conn) -> Any:
-    """Lookup a specific category via the same aggregation as the dashboard, plus recent txns."""
+    """Lookup one spending category via the same aggregation as the dashboard, plus recent txns."""
     category = (args.get("category") or "").strip()
     if not category:
         return {"error": "category required"}
     month, start, end, label = _range_to_kwargs(args)
+    non_spending, display_category, expense_type = _is_non_spending_category(category, conn)
+    if non_spending:
+        return _unsupported_category_spend_result(
+            category=display_category,
+            label=label,
+            start=start,
+            end=end,
+            reason=f"{display_category} has expense_type={expense_type or 'non_expense'} and cannot be used with get_category_spend.",
+        )
 
     data = get_category_analytics_data(
         month=month, profile=profile, conn=conn, start_date=start, end_date=end,
@@ -384,13 +846,24 @@ def _t_get_transactions(args: dict, profile: str | None, conn) -> Any:
 def _t_get_category_breakdown(args: dict, profile: str | None, conn) -> Any:
     """Full per-category breakdown (Sankey / cash-waterfall data source)."""
     month, start, end, label = _range_to_kwargs(args)
-    return {
+    result = {
         "range": label,
         "start": start, "end": end,
         **(get_category_analytics_data(
             month=month, profile=profile, conn=conn, start_date=start, end_date=end,
         ) or {}),
     }
+    categories = result.get("categories") if isinstance(result.get("categories"), list) else []
+    return _add_contract(
+        result,
+        tool="get_category_breakdown",
+        args=args,
+        label=label,
+        start=start,
+        end=end,
+        row_count=len(categories),
+        filters={"profile": profile or "household"},
+    )
 
 
 def _t_get_dashboard_bundle(args: dict, profile: str | None, conn) -> Any:
@@ -549,6 +1022,14 @@ def _t_get_dashboard_snapshot(args: dict, profile: str | None, conn) -> Any:
         sections = bundle
     if not sections:
         caveats.append("Dashboard bundle returned no sections.")
+    range_token = args.get("range")
+    if range_token:
+        ranged_categories = _t_get_top_categories({"range": range_token, "limit": int(args.get("category_limit") or 5)}, profile, conn) or {}
+        ranged_merchants = _t_get_top_merchants({"range": range_token, "limit": int(args.get("merchant_limit") or 5)}, profile, conn) or {}
+        sections = dict(sections)
+        sections["categories"] = ranged_categories.get("categories") or []
+        sections["merchants"] = ranged_merchants.get("merchants") or []
+        caveats.append(f"Dashboard snapshot category/merchant sections are scoped to {range_token}; other dashboard sections keep their native dashboard scope.")
     return _add_contract({
         "summary": "Dashboard snapshot from Folio's dashboard bundle.",
         "sections": sections,
@@ -569,6 +1050,8 @@ def _t_find_transactions(args: dict, profile: str | None, conn) -> Any:
         "category": args.get("category"),
         "account": args.get("account"),
         "search": args.get("search") or merchant or args.get("query"),
+        "subtype": args.get("subtype"),
+        "mode": args.get("mode"),
         "limit": max(1, min(int(args.get("limit") or 25), 50)),
         "offset": max(0, int(args.get("offset") or 0)),
     }
@@ -577,6 +1060,20 @@ def _t_find_transactions(args: dict, profile: str | None, conn) -> Any:
     if not isinstance(result, dict):
         result = {}
     rows = _semantic_rows(result)
+    row_count = _semantic_count(result, rows)
+    if query_args.get("mode") == "total" and row_count > len(rows):
+        all_rows = list(rows)
+        while len(all_rows) < row_count:
+            page_args = {**query_args, "limit": 50, "offset": len(all_rows)}
+            page = _t_get_transactions(page_args, profile, conn)
+            page_rows = _semantic_rows(page if isinstance(page, dict) else {})
+            if not page_rows:
+                break
+            all_rows.extend(page_rows)
+        rows = all_rows
+        result["data"] = rows
+    if query_args.get("mode") == "total":
+        result["total_amount"] = sum(float(row.get("amount") or 0) for row in rows if isinstance(row, dict))
     _, start, end, label = _range_to_kwargs(query_args) if query_args.get("range") else (None, None, None, "all")
     row_count = _semantic_count(result, rows)
     return _add_contract({
@@ -729,6 +1226,266 @@ def _t_get_budget_status(args: dict, profile: str | None, conn) -> Any:
             caveats=caveats,
         ),
     }, tool="get_budget_status", args={"category": category, "range": range_token}, label=str(spend.get("range") or range_token), start=spend.get("start"), end=spend.get("end"), row_count=row_count, sample_transaction_ids=_sample_transaction_ids(rows), filters={"category": category}, caveats=caveats)
+
+
+def _t_get_budget_plan_summary(args: dict, profile: str | None, conn) -> Any:
+    range_token = args.get("range") or "current_month"
+    plan = get_plan_snapshot_data(profile=profile, conn=conn) or {}
+    budgets = get_category_budgets(profile=profile, conn=conn) or []
+    configured = [item for item in budgets if float(item.get("amount") or 0) > 0]
+    total_budget = float(plan.get("total_budget") or 0)
+    budgeted_spent = float(plan.get("budgeted_spent") or 0)
+    remaining = float(plan.get("remaining") or 0)
+    safe_to_spend = float(plan.get("safe_to_spend") or 0)
+    caveats = [] if configured else ["No category budget plan is configured yet."]
+    return _add_contract({
+        "range": range_token,
+        "month": plan.get("month"),
+        "has_budget_plan": bool(configured and total_budget > 0),
+        "budget_count": len(configured),
+        "total_budget": round(total_budget, 2),
+        "budgeted_spent": round(budgeted_spent, 2),
+        "remaining": round(remaining, 2),
+        "safe_to_spend": round(safe_to_spend, 2),
+        "mandatory_spend": plan.get("mandatory_spend"),
+        "mandatory_remaining": plan.get("mandatory_remaining"),
+        "variable_spend": plan.get("variable_spend"),
+        "over_count": int(plan.get("over_count") or 0),
+        "active_goal_count": int(plan.get("active_goal_count") or 0),
+        "budgets": configured[:10],
+        "summary": (
+            f"Budget plan has ${remaining:,.2f} remaining against ${total_budget:,.2f} configured."
+            if configured and total_budget > 0
+            else "No budget plan is configured yet."
+        ),
+        "provenance": _semantic_provenance(
+            tool="get_budget_plan_summary",
+            args={"range": range_token},
+            label=str(plan.get("month") or range_token),
+            row_count=len(configured),
+            filters={"profile": profile or "household"},
+            caveats=caveats,
+        ),
+    }, tool="get_budget_plan_summary", args={"range": range_token}, label=str(plan.get("month") or range_token), row_count=len(configured), filters={"profile": profile or "household"}, caveats=caveats)
+
+
+def _t_get_savings_capacity(args: dict, profile: str | None, conn) -> Any:
+    range_token = args.get("range") or "current_month"
+    today = date.today()
+    current_month = today.strftime("%Y-%m")
+    plan = get_plan_snapshot_data(profile=profile, conn=conn) or {}
+    budget_summary = _t_get_budget_plan_summary({"range": range_token}, profile, conn) or {}
+    forecast = _t_get_cashflow_forecast({"horizon_days": 30}, profile, conn) or {}
+    budgets = get_category_budgets(profile=profile, conn=conn) or []
+    configured_budgets = [item for item in budgets if float(item.get("amount") or 0) > 0]
+    recurring = _t_get_recurring_summary({"status": "active", "all": True}, profile, conn) or {}
+    recurring_items = recurring.get("items") if isinstance(recurring.get("items"), list) else []
+
+    completed_months = _completed_visible_months(conn, profile, current_month)
+    income_events, income_sample_ids = _income_events_last_90_days(conn, profile, today)
+    monthly_income_values = _completed_month_income_values(profile, conn, current_month)
+    average_income = sum(monthly_income_values) / len(monthly_income_values) if monthly_income_values else 0.0
+    income_cv = pstdev(monthly_income_values) / average_income if len(monthly_income_values) >= 2 and average_income > 0 else 0.0
+
+    planned_income = float(plan.get("planned_income") or 0)
+    mandatory_projected = float(plan.get("mandatory_projected") or 0)
+    variable_spend = float(plan.get("variable_spend") or 0)
+    save_first_target = float(plan.get("save_first_target") or 0)
+    surplus_after_spend = max(planned_income - mandatory_projected - variable_spend, 0)
+    point = round(max(0.0, min(save_first_target, surplus_after_spend)), 2)
+
+    caveats: list[str] = []
+    if completed_months < 3:
+        caveats.append("Fewer than 3 completed months of visible transaction history are available, so Mira will not give a confident point estimate.")
+    if income_events < 2:
+        caveats.append("Fewer than 2 income events appear in the last 90 days, so Mira will not give a confident point estimate.")
+    if income_cv > 0.35:
+        caveats.append("Income varies by more than 35%, so Mira is returning a range instead of a point estimate.")
+    if not configured_budgets:
+        caveats.append("No category budgets are configured, so spending capacity is less constrained than it would be with a budget plan.")
+    if not recurring_items:
+        caveats.append("No active recurring obligations are available, so fixed monthly commitments may be understated.")
+    if int(plan.get("active_goal_count") or 0) <= 0:
+        caveats.append("No active goals are configured, so savings guidance is not tied to a target date or goal amount.")
+    stale_accounts = _stale_account_count(conn, profile, today)
+    if stale_accounts:
+        caveats.append("At least one account sync is 7+ days old, so balance-derived guidance may be stale.")
+    forecast_caveats = forecast.get("caveats") if isinstance(forecast.get("caveats"), list) else []
+    for caveat in forecast_caveats:
+        text = str(caveat)
+        if text and text not in caveats:
+            caveats.append(text)
+
+    hard_insufficient = completed_months < 3 or income_events < 2 or planned_income <= 0
+    limited = hard_insufficient or income_cv > 0.35 or not configured_budgets or not recurring_items or int(plan.get("active_goal_count") or 0) <= 0
+    status = "insufficient" if hard_insufficient else ("limited" if limited else "ready")
+
+    low_high = _savings_capacity_band(
+        point=point,
+        planned_income=planned_income,
+        mandatory_projected=mandatory_projected,
+        variable_spend=variable_spend,
+        save_first_target=save_first_target,
+        income_cv=income_cv,
+        monthly_income_values=monthly_income_values,
+    )
+
+    inputs = {
+        "completed_history_months": {"value": completed_months, "basis": "Distinct completed months with visible transactions before the current month."},
+        "income_events_last_90_days": {"value": income_events, "basis": "Visible Income transactions in the last 90 days."},
+        "income_coefficient_of_variation": {"value": round(income_cv, 4), "basis": "Population standard deviation divided by average completed-month income."},
+        "planned_income": {"value": round(planned_income, 2), "basis": "data_manager.get_plan_snapshot_data planned_income."},
+        "mandatory_projected": {"value": round(mandatory_projected, 2), "basis": "Plan snapshot mandatory spend plus scheduled mandatory remaining."},
+        "variable_spend": {"value": round(variable_spend, 2), "basis": "Plan snapshot current-month variable spend."},
+        "save_first_target": {"value": round(save_first_target, 2), "basis": "Plan snapshot save-first target."},
+        "surplus_after_spend": {"value": round(surplus_after_spend, 2), "basis": "planned_income minus mandatory_projected minus variable_spend."},
+        "budget_count": {"value": len(configured_budgets), "basis": "Configured category budgets with amount > 0."},
+        "recurring_item_count": {"value": len(recurring_items), "basis": "Active recurring obligations from get_recurring_summary."},
+        "active_goal_count": {"value": int(plan.get("active_goal_count") or 0), "basis": "Active goals in the plan snapshot."},
+        "stale_account_count": {"value": stale_accounts, "basis": "Active accounts with last_synced_at older than 7 days."},
+    }
+    basis = [
+        "Savings capacity is the lower of the Folio plan snapshot save-first target and remaining surplus after planned income, mandatory projected spend, and variable spend.",
+        "A point estimate requires at least 3 completed months of visible history, at least 2 income events in the last 90 days, and income coefficient of variation at or below 35%.",
+        "The 30-day cash-flow forecast is included for caveats and provenance; it does not override the plan snapshot arithmetic.",
+    ]
+
+    payload: dict[str, Any] = {
+        "status": status,
+        "range": range_token,
+        "basis": basis,
+        "inputs": inputs,
+        "caveats": caveats,
+        "budget_plan": {
+            "has_budget_plan": bool(budget_summary.get("has_budget_plan")),
+            "remaining": {
+                "value": budget_summary.get("remaining"),
+                "basis": "get_budget_plan_summary remaining.",
+            },
+            "safe_to_spend": {
+                "value": budget_summary.get("safe_to_spend"),
+                "basis": "get_budget_plan_summary safe_to_spend.",
+            },
+            "provenance": budget_summary.get("provenance"),
+        },
+        "cashflow_forecast": {
+            "confidence": forecast.get("confidence"),
+            "projected_low_point": {
+                "value": forecast.get("projected_low_point"),
+                "basis": "get_cashflow_forecast projected_low_point.",
+            },
+            "projected_ending_balance": {
+                "value": forecast.get("projected_ending_balance"),
+                "basis": "get_cashflow_forecast projected_ending_balance.",
+            },
+            "provenance": forecast.get("provenance"),
+        },
+    }
+    if status == "ready":
+        payload["suggested_monthly_savings"] = point
+    elif status == "limited" and low_high:
+        payload["suggested_monthly_savings_low"] = low_high[0]
+        payload["suggested_monthly_savings_high"] = low_high[1]
+
+    row_count = completed_months + income_events + len(configured_budgets) + len(recurring_items)
+    return _add_contract(
+        payload,
+        tool="get_savings_capacity",
+        args={"range": range_token},
+        label=range_token,
+        row_count=row_count,
+        sample_transaction_ids=income_sample_ids,
+        filters={"profile": profile or "household"},
+        caveats=caveats,
+        calculation_basis="; ".join(basis),
+    )
+
+
+def _completed_visible_months(conn, profile: str | None, current_month: str) -> int:
+    profile_sql, params = _profile_filter(profile)
+    rows = conn.execute(
+        f"""
+        SELECT substr(date, 1, 7) AS month
+          FROM transactions_visible
+         WHERE date < ?
+           {profile_sql}
+         GROUP BY substr(date, 1, 7)
+        """,
+        [current_month + "-01", *params],
+    ).fetchall()
+    return len(rows)
+
+
+def _income_events_last_90_days(conn, profile: str | None, today: date) -> tuple[int, list[str]]:
+    profile_sql, params = _profile_filter(profile)
+    start = (today - timedelta(days=90)).isoformat()
+    rows = conn.execute(
+        f"""
+        SELECT id
+          FROM transactions_visible
+         WHERE amount > 0
+           AND category = 'Income'
+           AND date >= ?
+           {profile_sql}
+         ORDER BY date DESC
+        """,
+        [start, *params],
+    ).fetchall()
+    ids = [str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows[:8]]
+    return len(rows), ids
+
+
+def _completed_month_income_values(profile: str | None, conn, current_month: str) -> list[float]:
+    monthly = get_monthly_analytics_data(profile=profile, conn=conn) or []
+    values = []
+    for row in monthly:
+        month = str(row.get("month") or "")
+        if not month or month >= current_month:
+            continue
+        income = float(row.get("income") or 0)
+        if income > 0:
+            values.append(income)
+    return values[-6:]
+
+
+def _stale_account_count(conn, profile: str | None, today: date) -> int:
+    profile_sql, params = _profile_filter(profile)
+    cutoff = (today - timedelta(days=7)).isoformat()
+    rows = conn.execute(
+        f"""
+        SELECT last_synced_at
+          FROM accounts
+         WHERE COALESCE(is_active, 1) = 1
+           AND COALESCE(last_synced_at, '') != ''
+           AND substr(last_synced_at, 1, 10) <= ?
+           {profile_sql}
+        """,
+        [cutoff, *params],
+    ).fetchall()
+    return len(rows)
+
+
+def _savings_capacity_band(
+    *,
+    point: float,
+    planned_income: float,
+    mandatory_projected: float,
+    variable_spend: float,
+    save_first_target: float,
+    income_cv: float,
+    monthly_income_values: list[float],
+) -> tuple[float, float] | None:
+    if planned_income <= 0:
+        return None
+    if income_cv > 0.35 and monthly_income_values:
+        low_income = min(monthly_income_values)
+        high_income = max(monthly_income_values)
+        low = max(0.0, min(low_income * 0.20, low_income - mandatory_projected - variable_spend))
+        high = max(low, min(high_income * 0.20, high_income - mandatory_projected - variable_spend))
+        return round(low, 2), round(high, 2)
+    low = round(max(0.0, point * 0.75), 2)
+    high = round(max(low, point), 2)
+    return low, high
 
 
 def _t_explain_metric(args: dict, profile: str | None, conn) -> Any:
@@ -912,8 +1669,15 @@ def _t_get_recurring_summary(args: dict, profile: str | None, conn) -> Any:
     items = data.get("items") or []
     status_filter = args.get("status")
     if status_filter:
-        items = [i for i in items if (i.get("subscription_status") or "").lower() == status_filter.lower()]
-    rows = items[: int(args.get("limit") or 25)]
+        wanted = str(status_filter).lower()
+        items = [
+            i for i in items
+            if str(i.get("status") or i.get("subscription_status") or i.get("state") or "").lower() == wanted
+        ]
+    if args.get("all"):
+        rows = items
+    else:
+        rows = items[: int(args.get("limit") or 25)]
     return _add_contract({
         "active_count": data.get("active_count", 0),
         "inactive_count": data.get("inactive_count", 0),
@@ -989,7 +1753,7 @@ def _t_get_monthly_spending_trend(args: dict, profile: str | None, conn) -> Any:
           AND is_excluded = 0
           AND category IS NOT NULL
           AND category != ''
-          AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
+          AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income','Credits & Refunds')
           AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
           {category_clause}
           {pclause}
@@ -1950,7 +2714,36 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Income/expense/net/savings for a month, with prior-month comparison. month='current' | 'prior' | 'YYYY-MM'.",
         "parameters": {
             "type": "object",
-            "properties": {"month": {"type": "string", "description": "current, prior, or YYYY-MM"}},
+            "properties": {
+                "month": {"type": "string", "description": "current, prior, or YYYY-MM"},
+                "metric": {"type": "string", "enum": ["summary", "income", "expenses"], "description": "Optional component to emphasize in the answer."},
+            },
+        },
+    },
+    "get_period_summary": {
+        "fn": _t_get_period_summary,
+        "description": "Range-aware finance summary for income, expenses, savings transfers, credit card payments, refunds, and other cashflow components. Use this for period income totals and non-spending cashflow totals; it is not a category spend tool.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "metric": {
+                    "type": "string",
+                    "enum": [
+                        "summary",
+                        "income",
+                        "expenses",
+                        "refunds",
+                        "savings",
+                        "credit_card_payments",
+                        "personal_transfers",
+                        "cash_deposits",
+                        "cash_withdrawals",
+                        "investment_transfers",
+                    ],
+                    "description": "Which period component to emphasize.",
+                },
+            },
         },
     },
     "get_top_categories": {
@@ -1975,13 +2768,25 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             },
         },
     },
-    "get_category_spend": {
-        "fn": _t_get_category_spend,
-        "description": "Exact total and recent transactions for a SPECIFIC category by name (e.g. 'Groceries', 'Food & Dining') over a time range. Use this when the user names a specific category.",
+    "get_finance_priorities": {
+        "fn": _t_get_finance_priorities,
+        "description": "Ranked current-month finance priorities for 'what should I watch' or 'what should I fix first' questions. Combines scoped top categories, active recurring charges, and budget-plan state.",
         "parameters": {
             "type": "object",
             "properties": {
-                "category": {"type": "string", "description": "Category name, case-insensitive exact match"},
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+                "focus": {"type": "string", "enum": ["watch", "fix"], "description": "watch for monitoring guidance, fix for prioritized action guidance"},
+                "limit": {"type": "integer", "default": 3},
+            },
+        },
+    },
+    "get_category_spend": {
+        "fn": _t_get_category_spend,
+        "description": "Exact spending total and recent transactions for one SPECIFIC spending category by name (e.g. 'Groceries', 'Food & Dining') over a time range. Do not use for Income, Savings Transfer, Personal Transfer, Credit Card Payment, Credits & Refunds, Cash Withdrawal/Deposit, Investment Transfer, or any category configured as non_expense; use summary or transaction tools instead.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Spending category name, case-insensitive exact match"},
                 "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
             },
             "required": ["category"],
@@ -2006,6 +2811,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "status": {"type": "string"},
+                "all": {"type": "boolean", "description": "When true, return every matching recurring item without applying the default limit."},
                 "limit": {"type": "integer", "default": 25},
             },
         },
@@ -2050,7 +2856,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "get_summary": {
         "fn": _t_get_summary,
-        "description": "Overall financial snapshot: totals, counts, net worth, savings.",
+        "description": "Overall dashboard financial snapshot: income, expenses, net flow, counts, net worth, and savings in the dashboard's native scope.",
         "parameters": {"type": "object", "properties": {}},
     },
     "get_account_balances": {
@@ -2076,7 +2882,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "get_category_breakdown": {
         "fn": _t_get_category_breakdown,
-        "description": "Full per-category spending breakdown for a time range — the exact data source used by the dashboard Sankey / cash waterfall. Includes gross, refunds, net, and percent-of-total per category.",
+        "description": "Aggregate expense total plus per-spending-category breakdown for a time range — the dashboard category analytics source. Includes gross, refunds, net, and percent-of-total per spending category; non-expense categories are excluded from spend.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2133,9 +2939,29 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "required": ["category"],
         },
     },
+    "get_budget_plan_summary": {
+        "fn": _t_get_budget_plan_summary,
+        "description": "Budget plan summary from Folio budget settings and current-month planning data. Use for broad budget health, safe-to-spend, and 'can I spend more this week?' questions when no specific purchase amount is given.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+            },
+        },
+    },
+    "get_savings_capacity": {
+        "fn": _t_get_savings_capacity,
+        "description": "Conservative monthly savings capacity contract using the Folio plan snapshot, income history, budgets, recurring obligations, goals, cash-flow caveats, and provenance. Use for 'how much should I save monthly?' questions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "range": {"type": "string", "description": _RANGE_DESC, "enum": _RANGE_ENUM},
+            },
+        },
+    },
     "find_transactions": {
         "fn": _t_find_transactions,
-        "description": "Semantic transaction finder with merchant/category/range/account/search filters, normalized rows, count, samples, and provenance.",
+        "description": "Semantic transaction finder with merchant/category/range/account/search filters, normalized rows, count, samples, and provenance. Use for timing/details of income, transfers, payments, refunds, and ordinary spending transactions.",
         "parameters": {
             "type": "object",
             "properties": {

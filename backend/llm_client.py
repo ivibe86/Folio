@@ -111,7 +111,12 @@ def _keep_alive_for_purpose(purpose: str) -> str | None:
     return None
 
 
-def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> str:
+def complete(
+    prompt: str,
+    max_tokens: int = 1024,
+    purpose: str = "copilot",
+    response_format=None,
+) -> str:
     """
     Send a prompt to the configured LLM and return the response text.
 
@@ -128,7 +133,17 @@ def complete(prompt: str, max_tokens: int = 1024, purpose: str = "copilot") -> s
     """
     if get_provider() == "llamacpp" and purpose in {"controller", "copilot"}:
         return _complete_llamacpp(prompt, max_tokens)
-    return _complete_ollama(prompt, max_tokens, purpose)
+    return _complete_ollama(prompt, max_tokens, purpose, response_format=response_format)
+
+
+def complete_stream(prompt: str, max_tokens: int = 1024, purpose: str = "copilot"):
+    """
+    Stream plain chat completion text chunks from the configured local LLM.
+    """
+    if get_provider() == "llamacpp" and purpose in {"controller", "copilot"}:
+        yield from _complete_stream_llamacpp(prompt, max_tokens)
+        return
+    yield from _complete_stream_ollama(prompt, max_tokens, purpose)
 
 
 def complete_vision(
@@ -542,7 +557,37 @@ def _complete_llamacpp(prompt: str, max_tokens: int) -> str:
     return (message.get("content") or "").strip()
 
 
-def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
+def _complete_stream_llamacpp(prompt: str, max_tokens: int):
+    config = get_llamacpp_config()
+    payload = _llamacpp_payload(
+        [{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        stream=True,
+    )
+    url = f"{config['base_url'].rstrip('/')}/v1/chat/completions"
+    with httpx.stream("POST", url, json=payload, timeout=LLAMACPP_TIMEOUT) as resp:
+        for raw_line in resp.iter_lines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = _json.loads(data)
+            except Exception:
+                continue
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+            content = (choices[0].get("delta") or {}).get("content")
+            if content:
+                yield content
+            if choices[0].get("finish_reason"):
+                break
+
+
+def _complete_ollama(prompt: str, max_tokens: int, purpose: str, response_format=None) -> str:
     ollama_config = get_ollama_config()
     model = _model_for_purpose(ollama_config, purpose)
     timeout = _timeout_for_purpose(purpose)
@@ -556,6 +601,8 @@ def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
     keep_alive = _keep_alive_for_purpose(purpose)
     if keep_alive:
         payload["keep_alive"] = keep_alive
+    if response_format is not None:
+        payload["format"] = response_format
 
     if purpose in {"categorize", "controller", "copilot"}:
         # Merchant enrichment, categorization, routing, and extraction are
@@ -573,6 +620,41 @@ def _complete_ollama(prompt: str, max_tokens: int, purpose: str) -> str:
     if "message" not in result:
         raise Exception(f"Ollama API error: {result}")
     return result["message"]["content"].strip()
+
+
+def _complete_stream_ollama(prompt: str, max_tokens: int, purpose: str):
+    ollama_config = get_ollama_config()
+    model = _model_for_purpose(ollama_config, purpose)
+    timeout = _timeout_for_purpose(purpose)
+    url = f"{ollama_config['base_url'].rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+        "options": {"num_predict": max_tokens},
+    }
+    keep_alive = _keep_alive_for_purpose(purpose)
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
+
+    if purpose in {"categorize", "controller", "copilot"}:
+        payload["think"] = False
+        payload["options"]["temperature"] = 0
+
+    with httpx.stream("POST", url, json=payload, timeout=timeout) as resp:
+        for raw_line in resp.iter_lines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = _json.loads(line)
+            except Exception:
+                continue
+            content = (event.get("message") or {}).get("content")
+            if content:
+                yield content
+            if event.get("done"):
+                break
 
 
 def _complete_ollama_vision(

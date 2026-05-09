@@ -10,7 +10,8 @@
     } from '$lib/utils.js';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
 
-    const NON_BUDGET_CATEGORIES = new Set(['Income', 'Savings Transfer', 'Personal Transfer', 'Credit Card Payment']);
+    const NON_BUDGET_CATEGORIES = new Set(['Income', 'Credits & Refunds', 'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Cash Withdrawal', 'Cash Deposit', 'Investment Transfer']);
+    const PROJECTED_PERCENT_DELTA_THRESHOLD = 5;
 
     let monthly = [];
     let allCategoryAnalytics = [];
@@ -423,6 +424,38 @@
         }[status] || status;
     }
 
+    function projectedContextText(item) {
+        if (!selectedMonthIsCurrent || item.budget <= 0) return '';
+
+        const projectedOver = item.projected - item.available;
+        if (projectedOver > 0) return `Projected over by ${formatCurrency(projectedOver)}`;
+
+        const projectedDelta = item.projectedPercent - item.budgetPercent;
+        if (Math.abs(projectedDelta) >= PROJECTED_PERCENT_DELTA_THRESHOLD) {
+            return `projected ${formatPercent(item.projectedPercent)}`;
+        }
+
+        return '';
+    }
+
+    function isSpentOverAvailable(item) {
+        return item.budget > 0 && item.spent > item.available;
+    }
+
+    function isRemainingHealthy(item) {
+        return item.budget > 0 && item.remaining > 0 && item.status === 'healthy';
+    }
+
+    function isRemainingWatch(item) {
+        return item.budget > 0
+            && item.remaining >= 0
+            && ['watch', 'projected-over', 'above-average', 'subscription-heavy'].includes(item.status);
+    }
+
+    function isRecurringHighShare(item) {
+        return item.budget > 0 && item.recurringTotal > item.budget * 0.65;
+    }
+
     function categoryElementId(category) {
         return `budget-cat-${category.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
     }
@@ -585,112 +618,178 @@
         <ProfileSwitcher />
     </div>
 
-    <section class="budget-hero card fade-in-up" style="animation-delay: 40ms">
-        <div class="budget-hero-main">
-            <div class="budget-health-icon budget-tone-{planHealth.tone}">
-                <span class="material-symbols-outlined">{planHealth.icon}</span>
-            </div>
-            <div>
-                <p class="budget-kicker">{formatMonth(selectedMonth)} plan health</p>
-                <h3>{planHealth.label}</h3>
-                <p class="budget-hero-copy">{planHealth.message}</p>
-            </div>
-        </div>
-
-        <div class="budget-hero-metrics">
-            <div>
-                <span>Total plan</span>
-                <strong>{formatCurrency(planStats.totalBudget)}</strong>
-            </div>
-            <div>
-                <span>Remaining</span>
-                <strong class:budget-negative={planStats.totalRemaining < 0}>{formatCurrency(planStats.totalRemaining)}</strong>
-            </div>
-            <div>
-                <span>Variable left</span>
-                <strong>{formatCurrency(planStats.discretionaryRemaining)}</strong>
-            </div>
-            <div>
-                <span>{selectedMonthIsCurrent ? 'Projected spend' : 'Actual spend'}</span>
-                <strong>{formatCurrency(selectedMonthIsCurrent ? planStats.projectedSpend : planStats.totalSpent)}</strong>
-            </div>
-        </div>
-
-        <div class="budget-hero-footer">
-            <div class="budget-progress">
-                <div class="budget-progress-head">
-                    <span>{formatPercent(Math.min(planStats.utilization, 999))} used</span>
-                    <span>{monthProgress.remainingDays} day{monthProgress.remainingDays === 1 ? '' : 's'} left</span>
+    <section class="budget-command-island card fade-in-up" style="animation-delay: 40ms">
+        <div class="budget-command-header">
+            <div class="budget-command-title">
+                <div class="budget-health-icon budget-tone-{planHealth.tone}">
+                    <span class="material-symbols-outlined">{planHealth.icon}</span>
                 </div>
-                <div class="budget-progress-track">
-                    <div
-                        class="budget-progress-fill budget-tone-{planHealth.tone}"
-                        style="width: {Math.min(planStats.utilization, 100)}%">
-                    </div>
-                    {#if selectedMonthIsCurrent && planStats.projectedUtilization > planStats.utilization}
-                        <div
-                            class="budget-progress-ghost"
-                            style="width: {Math.min(planStats.projectedUtilization, 100)}%">
-                        </div>
-                    {/if}
+                <div>
+                    <p class="budget-kicker">{formatMonth(selectedMonth)} · Budget plan</p>
+                    <h3>{planHealth.label}</h3>
+                    <p class="budget-hero-copy">{planHealth.message}</p>
                 </div>
             </div>
 
-            <select bind:value={selectedMonth} class="budget-month-select" aria-label="Budget month">
-                {#each sortedMonths as m}
-                    <option value={m.month}>{formatMonth(m.month)}</option>
-                {/each}
-            </select>
+            <div class="budget-command-actions">
+                {#if suggestedItems.length > 0}
+                    <button class="budget-primary-action" on:click={() => Promise.all(suggestedItems.map(item => applySuggestion(item)))}>
+                        <span class="material-symbols-outlined">auto_fix_high</span>
+                        Apply draft plan
+                    </button>
+                {/if}
+                <select bind:value={selectedMonth} class="budget-month-select" aria-label="Budget month">
+                    {#each sortedMonths as m}
+                        <option value={m.month}>{formatMonth(m.month)}</option>
+                    {/each}
+                </select>
+            </div>
+        </div>
+
+        <div class="budget-command-rule" aria-hidden="true">
+            <div
+                class="budget-command-rule-used budget-tone-{planHealth.tone}"
+                style="width: {Math.min(planStats.utilization, 100)}%">
+            </div>
+            {#if selectedMonthIsCurrent && planStats.projectedUtilization > planStats.utilization}
+                <div
+                    class="budget-command-rule-projected"
+                    style="width: {Math.min(planStats.projectedUtilization, 100)}%">
+                </div>
+            {/if}
+        </div>
+
+        <div class="budget-command-body">
+            <div class="budget-command-metrics">
+                <div>
+                    <span>Total plan</span>
+                    <strong>{formatCurrency(planStats.totalBudget)}</strong>
+                </div>
+                <div>
+                    <span>Spent</span>
+                    <strong>{formatCurrency(planStats.budgetedSpent)}</strong>
+                </div>
+                <div>
+                    <span>Remaining</span>
+                    <strong class:budget-negative={planStats.totalRemaining < 0}>{formatCurrency(planStats.totalRemaining)}</strong>
+                </div>
+                <div>
+                    <span>{selectedMonthIsCurrent ? 'Projected' : 'Actual'}</span>
+                    <strong>{formatCurrency(selectedMonthIsCurrent ? planStats.projectedSpend : planStats.totalSpent)}</strong>
+                </div>
+            </div>
+
+            <aside class="budget-command-safe">
+                <span>{planStats.totalBudget > 0 ? 'Variable left' : 'Open categories'}</span>
+                <strong class:budget-negative={planStats.totalRemaining < 0}>
+                    {planStats.totalBudget > 0 ? formatCurrency(planStats.discretionaryRemaining) : planStats.unsetCount}
+                </strong>
+                <small>
+                    {planStats.budgetedCount} budgeted · {monthProgress.remainingDays} day{monthProgress.remainingDays === 1 ? '' : 's'} left
+                </small>
+                <div class="budget-command-mini-track">
+                    <i style="width: {Math.min(planStats.utilization, 100)}%"></i>
+                </div>
+            </aside>
+        </div>
+
+        <div class="budget-command-insight">
+            <span class="material-symbols-outlined">tips_and_updates</span>
+            <p>
+                {#if planStats.totalBudget === 0}
+                    Start lightweight: use your top categories from the last three months as a draft, then tune each row below.
+                {:else}
+                    Keep this as the editable version of your monthly plan: adjust category rows below as spending pace changes.
+                {/if}
+            </p>
         </div>
     </section>
 
-    {#if planStats.totalBudget === 0}
-        <section class="budget-empty card fade-in-up" style="animation-delay: 80ms">
-            <div>
-                <p class="budget-kicker">Start lightweight</p>
-                <h3>Use your actual spending as the first draft.</h3>
-                <p>Start with your top variable categories, use the last three months as a baseline, and keep strict limits optional.</p>
+    <section class="budget-planning-strip card fade-in-up" style="animation-delay: 100ms">
+        <div class="budget-strip-grid">
+            <div class="budget-strip-block budget-strip-commitments">
+                <div class="budget-section-header">
+                    <div>
+                        <h3>Planning Commitments</h3>
+                        <p>Recurring and goal pressure above the category plan.</p>
+                    </div>
+                </div>
+                <div class="budget-commitment-grid">
+                    <div>
+                        <span>Recurring / mo</span>
+                        <strong>{formatCurrency(planStats.recurringMonthly)}</strong>
+                    </div>
+                    <div>
+                        <span>Goal gap</span>
+                        <strong>{formatCurrency(planStats.goalGap)}</strong>
+                    </div>
+                    <div>
+                        <span>Monthly pace</span>
+                        <strong>{planStats.goalMonthlyNeed > 0 ? formatCurrency(planStats.goalMonthlyNeed) : 'Unset'}</strong>
+                    </div>
+                </div>
             </div>
-            {#if suggestedItems.length > 0}
-                <button class="budget-primary-action" on:click={() => Promise.all(suggestedItems.map(item => applySuggestion(item)))}>
-                    <span class="material-symbols-outlined">auto_fix_high</span>
-                    Apply top suggestions
-                </button>
-            {/if}
-        </section>
-    {/if}
 
-    <section class="budget-plan-grid fade-in-up" style="animation-delay: 100ms">
-        <div class="budget-panel card">
-            <div class="budget-section-header">
-                <div>
-                    <h3>Planning Commitments</h3>
-                    <p>Recurring subscriptions and goal funding layered on top of the monthly category plan.</p>
+            <div class="budget-strip-block">
+                <div class="budget-section-header">
+                    <div>
+                        <h3>Needs Attention</h3>
+                        <p>{attentionItems.length > 0 ? `${attentionItems.length} categories flagged` : 'No urgent budget issues.'}</p>
+                    </div>
                 </div>
+
+                {#if attentionItems.length > 0}
+                    <div class="budget-chip-list">
+                        {#each attentionItems as item}
+                            <button class="budget-plan-chip" on:click={() => loadCategoryTransactions(item.category)}>
+                                <span class="budget-dot" style="background: {CATEGORY_COLORS[item.category] || 'var(--accent)'}"></span>
+                                <span>
+                                    <strong>{item.category}</strong>
+                                    <em>{statusLabel(item.status)} · {formatCurrency(item.spent)}</em>
+                                </span>
+                            </button>
+                        {/each}
+                    </div>
+                {:else}
+                    <div class="budget-soft-state">Room to breathe.</div>
+                {/if}
             </div>
-            <div class="budget-commitment-grid">
-                <div>
-                    <span>Recurring / mo</span>
-                    <strong>{formatCurrency(planStats.recurringMonthly)}</strong>
+
+            <div class="budget-strip-block">
+                <div class="budget-section-header">
+                    <div>
+                        <h3>Suggested Budgets</h3>
+                        <p>{suggestedItems.length > 0 ? `${suggestedItems.length} ready to apply` : 'No fresh suggestions.'}</p>
+                    </div>
                 </div>
-                <div>
-                    <span>Goal gap</span>
-                    <strong>{formatCurrency(planStats.goalGap)}</strong>
-                </div>
-                <div>
-                    <span>Monthly goal pace</span>
-                    <strong>{planStats.goalMonthlyNeed > 0 ? formatCurrency(planStats.goalMonthlyNeed) : 'Set target dates'}</strong>
-                </div>
+
+                {#if suggestedItems.length > 0}
+                    <div class="budget-chip-list">
+                        {#each suggestedItems as item}
+                            <button class="budget-plan-chip budget-suggestion-chip" on:click={() => applySuggestion(item)}>
+                                <span>
+                                    <strong>{item.category}</strong>
+                                    <em>{formatCurrency(item.suggestedBudget)} · avg {formatCurrency(item.averageMonthly)}</em>
+                                </span>
+                                <span class="material-symbols-outlined">add</span>
+                            </button>
+                        {/each}
+                    </div>
+                {:else}
+                    <div class="budget-soft-state">Everything active is covered.</div>
+                {/if}
             </div>
         </div>
 
-        <div class="budget-panel card">
-            <div class="budget-section-header">
+        <details class="budget-goals-drawer">
+            <summary>
                 <div>
                     <h3>Goals & Sinking Funds</h3>
-                    <p>Track emergency funds, annual bills, trips, and other targets without needing investment integrations.</p>
+                    <p>{goals.length} active · {formatCurrency(planStats.goalMonthlyNeed)} monthly pace · emergency funds, annual bills, trips</p>
                 </div>
-            </div>
+                <span class="budget-goals-summary-action">Manage goals</span>
+            </summary>
+
             {#if goals.length > 0}
                 <div class="budget-goal-list">
                     {#each goals as goal}
@@ -717,6 +816,7 @@
                     {/each}
                 </div>
             {/if}
+
             <div class="budget-goal-form">
                 <input bind:value={goalDraft.name} placeholder="Goal name" />
                 <select bind:value={goalDraft.goal_type}>
@@ -733,64 +833,7 @@
                     {savingGoal ? 'Saving...' : 'Add goal'}
                 </button>
             </div>
-        </div>
-    </section>
-
-    <section class="budget-two-panel fade-in-up" style="animation-delay: 120ms">
-        <div class="budget-panel card">
-            <div class="budget-section-header">
-                <div>
-                    <h3>Needs Attention</h3>
-                    <p>{attentionItems.length > 0 ? 'Categories where pace, overage, or recurring costs stand out.' : 'No urgent budget issues in this view.'}</p>
-                </div>
-            </div>
-
-            {#if attentionItems.length > 0}
-                <div class="budget-attention-list">
-                    {#each attentionItems as item}
-                        <button class="budget-attention-item" on:click={() => loadCategoryTransactions(item.category)}>
-                            <span class="budget-dot" style="background: {CATEGORY_COLORS[item.category] || 'var(--accent)'}"></span>
-                            <span>
-                                <strong>{item.category}</strong>
-                                <em>{statusLabel(item.status)} · {formatCurrency(item.spent)} spent{item.budget > 0 ? ` of ${formatCurrency(item.budget)}` : ''}</em>
-                            </span>
-                            <span class="material-symbols-outlined">chevron_right</span>
-                        </button>
-                    {/each}
-                </div>
-            {:else}
-                <div class="budget-soft-state">Your plan has room to breathe.</div>
-            {/if}
-        </div>
-
-        <div class="budget-panel card">
-            <div class="budget-section-header">
-                <div>
-                    <h3>Suggested Budgets</h3>
-                    <p>Based on recent spend, current month activity, and active recurring items.</p>
-                </div>
-            </div>
-
-            {#if suggestedItems.length > 0}
-                <div class="budget-suggestion-list">
-                    {#each suggestedItems as item}
-                        <div class="budget-suggestion-row">
-                            <div>
-                                <strong>{item.category}</strong>
-                                <span>avg {formatCurrency(item.averageMonthly)} · rounded {formatCurrency(item.suggestedBudget)}</span>
-                            </div>
-                            <div class="budget-suggestion-actions">
-                                <button on:click={() => applySuggestion(item, 'average')}>Avg</button>
-                                <button on:click={() => applySuggestion(item, 'lean')}>-10%</button>
-                                <button class="budget-apply-btn" on:click={() => applySuggestion(item)}>Apply</button>
-                            </div>
-                        </div>
-                    {/each}
-                </div>
-            {:else}
-                <div class="budget-soft-state">Every active category either has a budget or needs more history.</div>
-            {/if}
-        </div>
+        </details>
     </section>
 
     <section class="budget-planner fade-in-up" style="animation-delay: 160ms">
@@ -801,62 +844,75 @@
             </div>
         </div>
 
-        <div class="budget-category-list">
+        <div class="budget-category-table card">
+            <div class="budget-category-table-head" aria-hidden="true">
+                <span>Category</span>
+                <div>
+                    <span>Spent</span>
+                    <span>Remaining</span>
+                    <span>Recurring</span>
+                </div>
+                <div>
+                    <span>Status</span>
+                    <span>Budget</span>
+                </div>
+            </div>
             {#each visibleBudgetItems as item, i}
+                {@const projectionNote = projectedContextText(item)}
                 <article
                     id={categoryElementId(item.category)}
-                    class="budget-category-card card"
+                    class="budget-category-row"
                     class:budget-highlight={highlightedCategory === item.category}
                     style="animation-delay: {190 + i * 24}ms">
-                    <div class="budget-category-top">
-                        <button class="budget-category-title" on:click={() => loadCategoryTransactions(item.category)}>
-                            <span class="budget-category-icon" style="--cat-color: {CATEGORY_COLORS[item.category] || '#627d98'}">
-                                <span class="material-symbols-outlined">{CATEGORY_ICONS[item.category] || 'label'}</span>
-                            </span>
-                            <span>
-                                <strong>{item.category}</strong>
-                                <em>{item.expenseType === 'fixed' ? 'Fixed' : 'Variable'} · avg {formatCurrency(item.averageMonthly)}</em>
-                            </span>
-                        </button>
-
-                        <div class="budget-category-actions">
-                            <span class="budget-status budget-status-{item.status}">{statusLabel(item.status)}</span>
-                            {#if editingCategory === item.category}
-                                <label class="budget-edit-field">
-                                    <span>$</span>
-                                    <input
-                                        bind:value={editValue}
-                                        type="number"
-                                        min="0"
-                                        step="1"
-                                        on:keydown={(e) => { if (e.key === 'Enter') commitEdit(item.category); if (e.key === 'Escape') editingCategory = null; }}
-                                        on:blur={() => commitEdit(item.category)} />
-                                </label>
-                            {:else}
-                                <button class="budget-amount-btn" disabled={savingCategory === item.category} on:click={() => startEdit(item.category, item.budget)}>
-                                    {item.budget > 0 ? formatCurrency(item.budget) : 'Set budget'}
-                                </button>
-                            {/if}
-                        </div>
-                    </div>
+                    <button class="budget-category-title" on:click={() => loadCategoryTransactions(item.category)}>
+                        <span class="budget-category-icon" style="--cat-color: {CATEGORY_COLORS[item.category] || '#627d98'}">
+                            <span class="material-symbols-outlined">{CATEGORY_ICONS[item.category] || 'label'}</span>
+                        </span>
+                        <span>
+                            <strong>{item.category}</strong>
+                            <em>{item.expenseType === 'fixed' ? 'Fixed' : 'Variable'} · avg {formatCurrency(item.averageMonthly)}</em>
+                        </span>
+                    </button>
 
                     <div class="budget-category-metrics">
                         <div>
                             <span>Spent</span>
-                            <strong>{formatCurrency(item.spent)}</strong>
+                            <strong class:budget-value-over={isSpentOverAvailable(item)}>{formatCurrency(item.spent)}</strong>
                         </div>
                         <div>
                             <span>Remaining</span>
-                            <strong class:budget-negative={item.remaining < 0}>{item.budget > 0 ? formatCurrency(item.remaining) : 'Unset'}</strong>
-                        </div>
-                        <div>
-                            <span>{selectedMonthIsCurrent ? 'Projected' : 'Actual'}</span>
-                            <strong>{formatCurrency(item.projected)}</strong>
+                            <strong
+                                class:budget-negative={item.remaining < 0}
+                                class:budget-value-positive={isRemainingHealthy(item)}
+                                class:budget-value-warning={isRemainingWatch(item)}
+                                class:budget-value-unset={item.budget <= 0}>
+                                {item.budget > 0 ? formatCurrency(item.remaining) : 'Unset'}
+                            </strong>
                         </div>
                         <div>
                             <span>Recurring</span>
-                            <strong>{item.recurring.length > 0 ? formatCurrency(item.recurringTotal) : 'None'}</strong>
+                            <strong class:budget-value-warning={isRecurringHighShare(item)}>{item.recurring.length > 0 ? formatCurrency(item.recurringTotal) : 'None'}</strong>
                         </div>
+                    </div>
+
+                    <div class="budget-category-actions">
+                        <span class="budget-status budget-status-{item.status}">{statusLabel(item.status)}</span>
+                        {#if editingCategory === item.category}
+                            <label class="budget-edit-field">
+                                <span>$</span>
+                                <input
+                                    bind:value={editValue}
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    on:keydown={(e) => { if (e.key === 'Enter') commitEdit(item.category); if (e.key === 'Escape') editingCategory = null; }}
+                                    on:blur={() => commitEdit(item.category)} />
+                            </label>
+                        {:else}
+                            <button class="budget-amount-btn" disabled={savingCategory === item.category} on:click={() => startEdit(item.category, item.budget)}>
+                                {item.budget > 0 ? formatCurrency(item.budget) : 'Set budget'}
+                            </button>
+                        {/if}
                     </div>
 
                     {#if item.rolloverBalance !== 0}
@@ -866,23 +922,25 @@
                     {/if}
 
                     {#if item.budget > 0}
-                        <div class="budget-category-progress">
+                        <div class="budget-category-progress budget-category-row-bottom">
                             <div class="budget-progress-track">
                                 <div
                                     class="budget-progress-fill budget-status-fill-{item.status}"
                                     style="width: {Math.min(item.budgetPercent, 100)}%">
                                 </div>
-                                {#if selectedMonthIsCurrent && item.projectedPercent > item.budgetPercent}
+                                {#if projectionNote && item.projectedPercent > item.budgetPercent}
                                     <div class="budget-progress-ghost" style="width: {Math.min(item.projectedPercent, 100)}%"></div>
                                 {/if}
                             </div>
                             <div class="budget-progress-head">
-                                <span>{formatPercent(item.budgetPercent)}</span>
-                                <span>{selectedMonthIsCurrent ? `${formatPercent(item.projectedPercent)} projected` : formatPercent(item.budgetPercent)}</span>
+                                <span>{formatPercent(item.budgetPercent)} used</span>
+                                {#if projectionNote}
+                                    <span class:budget-projected-note-warning={item.projected > item.available}>{projectionNote}</span>
+                                {/if}
                             </div>
                         </div>
                     {:else if item.suggestedBudget > 0}
-                        <div class="budget-inline-suggest">
+                        <div class="budget-inline-suggest budget-category-row-bottom">
                             <span>Suggested starting point: {formatCurrency(item.suggestedBudget)}</span>
                             <button on:click={() => applySuggestion(item)}>Apply</button>
                         </div>

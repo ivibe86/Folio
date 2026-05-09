@@ -20,6 +20,15 @@ function getApiKey() {
         : '';
 }
 
+function getLocalDateKey() {
+    const now = new Date();
+    return [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0')
+    ].join('-');
+}
+
 /* ── Client-side response cache (TTL: 2 minutes) ── */
 const CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const _cache = new Map();
@@ -73,6 +82,8 @@ const PROFILE_EXEMPT_ENDPOINTS = new Set([
     '/migration/status',
     '/migration/preview',
     '/migration/execute',
+    '/experiments/import-review/status',
+    '/experiments/import-review/rows',
 ]);
 
 const UNCACHED_ENDPOINTS = new Set([
@@ -113,6 +124,10 @@ function isMutation(method) {
 function appendProfileParam(endpoint, method) {
     // Never append to exempt endpoints
     if (isProfileExempt(endpoint)) return endpoint;
+    if (endpoint.includes('?')) {
+        const params = new URLSearchParams(endpoint.split('?')[1]);
+        if (params.has('profile')) return endpoint;
+    }
 
     // Don't append to mutation endpoints EXCEPT copilot/proactive insights (which need profile scope)
     // Note: subscription endpoints that need profile pass it manually in their method definitions
@@ -261,12 +276,66 @@ export function createApi(fetchFn = fetch) {
 
         getCategories: () => request('/categories'),
 
+        getImportReviewStatus: () => request('/experiments/import-review/status'),
+
+        getImportReviewRows: (params = {}) => {
+            const query = new URLSearchParams();
+            if (params.status) query.set('status', params.status);
+            if (params.group_key) query.set('group_key', params.group_key);
+            if (params.suggested_category) query.set('suggested_category', params.suggested_category);
+            if (params.review_category) query.set('review_category', params.review_category);
+            if (params.q) query.set('q', params.q);
+            if (params.limit != null) query.set('limit', params.limit);
+            if (params.offset != null) query.set('offset', params.offset);
+            const qs = query.toString();
+            return request(`/experiments/import-review/rows${qs ? '?' + qs : ''}`);
+        },
+
+        saveImportReviewDecision: async (payload) => {
+            const result = await request('/experiments/import-review/decision', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+            invalidateCacheByPrefix('/experiments/import-review');
+            return result;
+        },
+
+        bulkImportReviewDecision: async (payload) => {
+            const result = await request('/experiments/import-review/bulk-decision', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+            invalidateCacheByPrefix('/experiments/import-review');
+            return result;
+        },
+
+        runImportReviewSuggestions: async (payload = {}) => {
+            const result = await request('/experiments/import-review/suggest', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+            invalidateCacheByPrefix('/experiments/import-review');
+            return result;
+        },
+
+        exportImportReviewTraining: (payload = {}) =>
+            request('/experiments/import-review/export-training', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            }),
+
         getCategoriesMeta: () => request('/categories/meta'),
 
         createCategory: (name) =>
             request('/categories', {
                 method: 'POST',
                 body: JSON.stringify({ name })
+            }),
+
+        deleteCategory: (categoryName, replacementCategory = null) =>
+            request(`/categories/${encodeURIComponent(categoryName)}`, {
+                method: 'DELETE',
+                body: JSON.stringify({ replacement_category: replacementCategory || null })
             }),
 
         updateCategoryParent: (categoryName, parentCategory) =>
@@ -629,10 +698,10 @@ export function createApi(fetchFn = fetch) {
         getNetWorthSeries: (interval = 'weekly') =>
             request(`/analytics/net-worth-series?interval=${interval}`),
 
-        getDashboardBundle: (nwInterval = 'biweekly', month = null) => {
+        getDashboardBundle: (nwInterval = 'biweekly', asOf = getLocalDateKey()) => {
             const params = new URLSearchParams();
             params.set('nw_interval', nwInterval);
-            if (month) params.set('month', month);
+            if (asOf) params.set('as_of', asOf);
             return request(`/dashboard-bundle?${params.toString()}`);
         },
 
@@ -923,7 +992,18 @@ export function createApi(fetchFn = fetch) {
                 const err = await res.json().catch(() => ({ detail: res.statusText }));
                 throw new Error(err.detail || 'Receipt parse failed');
             }
-            return res.json();
+            const data = await res.json();
+            invalidateCacheByPrefix('/receipts');
+            return data;
+        },
+
+        getReceipts: (profile = null, options = {}) => {
+            const params = new URLSearchParams();
+            if (profile && profile !== 'household') params.set('profile', profile);
+            if (options.status) params.set('status', options.status);
+            if (options.limit) params.set('limit', String(options.limit));
+            const qs = params.toString();
+            return request(`/receipts${qs ? '?' + qs : ''}`);
         },
 
         getReceipt: (receiptId, profile = null) => {
@@ -933,28 +1013,34 @@ export function createApi(fetchFn = fetch) {
             return request(`/receipts/${receiptId}${qs ? '?' + qs : ''}`);
         },
 
-        updateReceiptItems: (receiptId, items, profile = null, metadata = {}) => {
+        updateReceiptItems: async (receiptId, items, profile = null, metadata = {}) => {
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
-            return request(`/receipts/${receiptId}/items${qs ? '?' + qs : ''}`, {
+            const result = await request(`/receipts/${receiptId}/items${qs ? '?' + qs : ''}`, {
                 method: 'PATCH',
                 body: JSON.stringify({ items, ...metadata }),
             });
+            invalidateCacheByPrefix('/receipts');
+            return result;
         },
 
-        approveReceipt: (receiptId, profile = null) => {
+        approveReceipt: async (receiptId, profile = null) => {
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
-            return request(`/receipts/${receiptId}/approve${qs ? '?' + qs : ''}`, { method: 'POST' });
+            const result = await request(`/receipts/${receiptId}/approve${qs ? '?' + qs : ''}`, { method: 'POST' });
+            invalidateCacheByPrefix('/receipts');
+            return result;
         },
 
-        discardReceipt: (receiptId, profile = null) => {
+        discardReceipt: async (receiptId, profile = null) => {
             const params = new URLSearchParams();
             if (profile && profile !== 'household') params.set('profile', profile);
             const qs = params.toString();
-            return request(`/receipts/${receiptId}/discard${qs ? '?' + qs : ''}`, { method: 'POST' });
+            const result = await request(`/receipts/${receiptId}/discard${qs ? '?' + qs : ''}`, { method: 'POST' });
+            invalidateCacheByPrefix('/receipts');
+            return result;
         },
 
         getReceiptComparisons: (profile = null) => {

@@ -22,12 +22,34 @@ from copilot_tools import TOOL_REGISTRY, execute_tool
 from database import get_db
 import memory
 from mira.grounding import resolve_category_name
-from mira.number_guard import guard_finance_numbers
-from mira import persona
-from mira.persona import compose_persona_answer
 from range_parser import chart_months, words as range_words
 
 logger = logging.getLogger(__name__)
+
+
+class _RetiredPersonaShim:
+    @staticmethod
+    def core_voice_guide() -> str:
+        return "Answer in a concise, grounded Folio voice."
+
+    @staticmethod
+    def persona_prompt_block() -> str:
+        return ""
+
+
+persona = _RetiredPersonaShim()
+
+
+def compose_persona_answer(answer: str, **_: Any) -> str:
+    return answer
+
+
+def guard_finance_numbers(answer: str, **_: Any) -> str:
+    return answer
+
+
+def guard_no_tool_finance_answer(answer: str, **_: Any) -> str:
+    return answer
 
 MAX_ITERATIONS = 3
 TOOL_RESULT_PAYLOAD_LIMIT = 12000  # chars
@@ -79,7 +101,7 @@ TREND_CHART_TOOLS = (
 )
 SQL_SCHEMA_ON_DEMAND = """SQL schema notes for run_sql:
 - Internal/debug only. Normal Mira routing must use specialized grounded tools instead of run_sql.
-- Read transactions through transactions_visible. Spending filter: amount < 0, category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income'), and expense_type not internal/household transfer.
+- Read transactions through transactions_visible. Spending filter: amount < 0, category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income','Credits & Refunds'), and expense_type not internal/household transfer.
 - Useful tables: transactions_visible(id, account_id, profile_id, date, description, amount, category, merchant_name, is_excluded, expense_type), accounts(id, profile_id, account_name, account_type, current_balance), categories(name, expense_type), category_rules(pattern, category), merchants(clean_name, category, total_spent), net_worth_history(date, profile_id, total_assets, total_owed, net_worth), saved_insights(question, answer, kind, pinned).
 - profile='household' means omit a profile filter.
 """
@@ -225,7 +247,7 @@ def _fast_watch_system(profile: str | None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     return (
         "Your name is Mira. You're the user's Folio companion. "
-        f"{persona.CORE_VOICE_GUIDE} "
+        f"{persona.core_voice_guide()} "
         "Summarize the provided live finance data in 2-4 warm, direct sentences. "
         "Call out the biggest current-month watch item, cite concrete numbers, "
         "and do not invent data. No markdown table. "
@@ -400,6 +422,12 @@ def _finalize_answer(
     display_rows, display_source = _extract_display_data(trace, cache, profile)
     if number_guard:
         raw_answer = guard_finance_numbers(raw_answer, route=route, trace=trace, cache=cache, profile=profile)
+    raw_answer = guard_no_tool_finance_answer(
+        raw_answer,
+        route=route,
+        trace=trace,
+        provenance_context_available=bool((route or {}).get("provenance_context_available")),
+    )
     raw_answer = compose_persona_answer(
         raw_answer,
         question=question,
@@ -461,7 +489,7 @@ SYSTEM_PROMPT = """TOOL DISCIPLINE
 - Specialized tools match dashboard aggregation. If a result disagrees with the UI, trust the dashboard and say you'll double-check.
 
 FINANCE SEMANTICS
-- Spending excludes Savings Transfer, Personal Transfer, Credit Card Payment, Income, and internal/household transfers.
+- Spending excludes Savings Transfer, Personal Transfer, Credit Card Payment, Income, Credits & Refunds, and internal/household transfers.
 - Negative amount = money out. Positive amount = income/refund.
 - Net category spend subtracts refunds. Merchant identity uses merchant_name, falling back to description.
 - "Watch / keep an eye on" means financial concerns here. "Park my money" means where to hold cash. "Burn rate/runway" means spending velocity.
@@ -706,21 +734,16 @@ def _normalize_history(history: list[dict] | None) -> list[dict]:
 
 
 def _dispatcher_enabled() -> bool:
-    from copilot_agents.classifier import dispatcher_enabled
-
-    return dispatcher_enabled()
+    return True
 
 
 def _selected_schema_tokens(tool_names: list[str] | tuple[str, ...]) -> int:
-    from copilot_agents.classifier import selected_schema_tokens
-
-    return selected_schema_tokens(tool_names)
+    return 0
 
 
 def _planned_tools_for_route(route: dict) -> list[str]:
-    from copilot_agents.classifier import planned_tools_for_route
-
-    return planned_tools_for_route(route)
+    selected = route.get("selected_tools") if isinstance(route, dict) else None
+    return [str(tool) for tool in selected] if isinstance(selected, list) else []
 
 
 def route_question(
@@ -729,7 +752,7 @@ def route_question(
     forced_intent: str | None = None,
     profile: str | None = None,
 ) -> dict:
-    from copilot_agents.classifier import route_question as classify_route
+    from copilot_agents.dispatcher import route_question as classify_route
 
     return classify_route(question, history, forced_intent=forced_intent, profile=profile)
 
@@ -782,44 +805,26 @@ def _legacy_tool_names() -> list[str]:
 
 
 def _run_legacy_escape_hatch(question: str, profile: str | None, history: list[dict] | None = None) -> dict:
-    from copilot_agents.base import tool_loop_result
-
-    tools = _legacy_tool_names()
-    result = tool_loop_result(
-        question=question,
-        profile=profile,
-        history=history,
-        selected_tools=tools,
-        system=_build_system_prompt(profile, tools),
-        max_iterations=MAX_ITERATIONS,
-    )
-    result["route"] = {
-        "intent": "legacy",
-        "shortcut": "env_escape_hatch",
-        "selected_tools": tools,
-        "tool_schema_tokens_est": _selected_schema_tokens(tools),
+    return {
+        "answer": "The legacy Mira escape hatch has been retired. Mira vNext is the active copilot runtime.",
+        "tool_trace": [],
+        "iterations": 0,
+        "error": "legacy escape hatch retired",
+        "data": None,
+        "data_source": None,
+        "route": {
+            "intent": "legacy_retired",
+            "shortcut": "env_escape_hatch",
+            "selected_tools": [],
+            "tool_schema_tokens_est": 0,
+        },
     }
-    return result
 
 
 def _run_legacy_escape_hatch_stream(question: str, profile: str | None, history: list[dict] | None = None):
-    from copilot_agents.base import tool_loop_stream
-
-    tools = _legacy_tool_names()
     yield {
-        "type": "route",
-        "intent": "legacy",
+        "type": "error",
+        "message": "The legacy Mira escape hatch has been retired. Mira vNext is the active copilot runtime.",
+        "intent": "legacy_retired",
         "shortcut": "env_escape_hatch",
-        "route_ms": 0,
-        "classifier_ms": 0,
-        "selected_tools": tools,
-        "tool_schema_tokens_est": _selected_schema_tokens(tools),
     }
-    yield from tool_loop_stream(
-        question=question,
-        profile=profile,
-        history=history,
-        selected_tools=tools,
-        system=_build_system_prompt(profile, tools),
-        max_iterations=MAX_ITERATIONS,
-    )

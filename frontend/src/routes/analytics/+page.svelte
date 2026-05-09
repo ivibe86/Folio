@@ -31,6 +31,7 @@
     const analyticsPeriods = ['This Month', 'Last Month', 'Custom'];
     let selectedAnalyticsPeriod = 'This Month';
     $: activeAnalyticsPeriodIdx = Math.max(analyticsPeriods.indexOf(selectedAnalyticsPeriod), 0);
+    $: monthPickerMonths = getSelectableMonths();
 
     let monthCategories = [];
     let monthTransactions = [];
@@ -119,7 +120,7 @@
     let redetectLoading = false;
 
     // Categories that are not real spending in the accrual model
-    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Cash Withdrawal', 'Cash Deposit', 'Investment Transfer', 'Income', 'Credits & Refunds']);
     const merchantPalette = ['#d96d4a', '#1f2937', '#8bbfd9', '#7f9fd6', '#9a7de2', '#ef8fc3', '#f3a36d', '#6bd0a4'];
 
     // Inactive subscriptions dropdown state (closed by default)
@@ -154,6 +155,46 @@
     let waterfallEl;
     let waterfallTooltip = { show: false, x: 0, y: 0, label: '', amount: 0, runningFrom: 0, runningTo: 0, count: 0 };
 
+    function getLastMonthKey() {
+        const now = new Date();
+        const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        return `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    function getPreviousMonthKey(month) {
+        const [year, monthNum] = month.split('-').map(Number);
+        const previous = new Date(year, monthNum - 2, 1);
+        return `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    function emptyMonthSummary(month) {
+        return {
+            month,
+            income: 0,
+            expenses: 0,
+            refunds: 0,
+            credits_refunds: 0,
+            savings: 0,
+            net: 0,
+            cc_repaid: 0,
+            external_transfers: 0,
+            incoming_transfers: 0
+        };
+    }
+
+    function getMonthSummary(month) {
+        if (!month) return null;
+        return monthly.find(m => m.month === month) || emptyMonthSummary(month);
+    }
+
+    function getSelectableMonths() {
+        const byMonth = new Map((monthly || []).map(m => [m.month, m]));
+        for (const month of [getCurrentMonth(), getLastMonthKey()]) {
+            if (!byMonth.has(month)) byMonth.set(month, emptyMonthSummary(month));
+        }
+        return [...byMonth.values()].sort((a, b) => b.month.localeCompare(a.month));
+    }
+
     /* ═══════════════════════════════════════
        LIFECYCLE
        ═══════════════════════════════════════ */
@@ -161,41 +202,24 @@
         // Fetch recurring detection (profile-aware, not month-specific)
         api.getRecurring().then(data => { recurringData = data; recurringLoading = false; }).catch(() => { recurringLoading = false; });
 
-        if (monthly.length > 0) {
-            const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
+        let initialMonth = getCurrentMonth();
+        let storedPeriod, storedCustom;
+        const unsubP = selectedPeriodStore.subscribe(v => { storedPeriod = v; });
+        const unsubC = selectedCustomMonthStore.subscribe(v => { storedCustom = v; });
+        unsubP(); unsubC();
 
-            // If the dashboard had a specific month selected, use it
-            let initialMonth = sorted[0].month;
-            let storedPeriod, storedCustom;
-            const unsubP = selectedPeriodStore.subscribe(v => { storedPeriod = v; });
-            const unsubC = selectedCustomMonthStore.subscribe(v => { storedCustom = v; });
-            unsubP(); unsubC();
-
-            if (storedPeriod === 'custom' && storedCustom && sorted.some(m => m.month === storedCustom)) {
-                initialMonth = storedCustom;
-                selectedAnalyticsPeriod = 'Custom';
-            } else if (storedPeriod === 'last_month') {
-                const now = new Date();
-                const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-                const lmStr = `${lm.getFullYear()}-${String(lm.getMonth() + 1).padStart(2, '0')}`;
-                if (sorted.some(m => m.month === lmStr)) {
-                    initialMonth = lmStr;
-                    selectedAnalyticsPeriod = 'Last Month';
-                }
-            } else {
-                // Default case: check if initialMonth matches current month
-                const now = new Date();
-                const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-                if (initialMonth === currentMonthStr) {
-                    selectedAnalyticsPeriod = 'This Month';
-                } else {
-                    selectedAnalyticsPeriod = 'Custom';
-                }
-            }
-
-            selectedMonth = initialMonth;
-            await loadMonthData();
+        if (storedPeriod === 'custom' && storedCustom) {
+            initialMonth = storedCustom;
+            selectedAnalyticsPeriod = 'Custom';
+        } else if (storedPeriod === 'last_month') {
+            initialMonth = getLastMonthKey();
+            selectedAnalyticsPeriod = 'Last Month';
+        } else {
+            selectedAnalyticsPeriod = 'This Month';
         }
+
+        selectedMonth = initialMonth;
+        await loadMonthData();
     });
 
     /* ═══════════════════════════════════════
@@ -203,22 +227,29 @@
        ═══════════════════════════════════════ */
     async function loadMonthData() {
         if (!selectedMonth) return;
+        const requestMonth = selectedMonth;
         try {
             const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
-            const currentIdx = sorted.findIndex(m => m.month === selectedMonth);
-            const hasPrev = currentIdx >= 0 && currentIdx < sorted.length - 1;
-            const prevMonth = hasPrev ? sorted[currentIdx + 1].month : null;
+            const currentIdx = sorted.findIndex(m => m.month === requestMonth);
+            const calendarPrevMonth = getPreviousMonthKey(requestMonth);
+            const hasPrev = currentIdx >= 0
+                ? currentIdx < sorted.length - 1
+                : sorted.some(m => m.month === calendarPrevMonth);
+            const prevMonth = currentIdx >= 0
+                ? (hasPrev ? sorted[currentIdx + 1].month : null)
+                : (hasPrev ? calendarPrevMonth : null);
 
             const promises = [
-                api.getCategoryAnalytics(selectedMonth),
-                api.getTransactions({ month: selectedMonth, limit: 1000 }).then(res => res.data),
-                api.getMerchants(selectedMonth).catch(() => []),
+                api.getCategoryAnalytics(requestMonth),
+                api.getTransactions({ month: requestMonth, limit: 1000 }).then(res => res.data),
+                api.getMerchants(requestMonth).catch(() => []),
             ];
             if (prevMonth) {
                 promises.push(api.getCategoryAnalytics(prevMonth).catch(() => []));
             }
 
             const results = await Promise.all(promises);
+            if (requestMonth !== selectedMonth) return;
             const catResult0 = results[0];
             monthCategories = Array.isArray(catResult0) ? catResult0 : (catResult0?.categories || []);
             monthTransactions = results[1];
@@ -261,13 +292,14 @@
             recurringData = rec;
             monthly = m;
             allCategories = Array.isArray(c) ? c : (c?.categories || []);
-            if (monthly.length > 0) {
-                const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
-                if (!sorted.some(s => s.month === selectedMonth)) {
-                    selectedMonth = sorted[0].month;
-                }
-                await loadMonthData();
+            if (selectedAnalyticsPeriod === 'This Month') {
+                selectedMonth = getCurrentMonth();
+            } else if (selectedAnalyticsPeriod === 'Last Month') {
+                selectedMonth = getLastMonthKey();
+            } else if (selectedMonth && !getSelectableMonths().some(s => s.month === selectedMonth)) {
+                selectedMonth = getCurrentMonth();
             }
+            await loadMonthData();
         } catch (e) {
             console.error('Failed to reload analytics for profile:', e);
         } finally {
@@ -277,7 +309,7 @@
 
     // ── Unified pre-computed analytics context ──
     $: analyticsContext = (() => {
-        const currentMonthSummary = monthly.find(m => m.month === selectedMonth) || null;
+        const currentMonthSummary = getMonthSummary(selectedMonth);
         const sortedMonthly = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
         const totalMonths = monthly.length;
         return { currentMonthSummary, sortedMonthly, totalMonths };
@@ -381,7 +413,7 @@
        S2: CASH FLOW WATERFALL — SVG Data
        ═══════════════════════════════════════ */
     $: waterfallData = (() => {
-        if (!currentMonthSummary || !monthCategories.length) return null;
+        if (!currentMonthSummary) return null;
 
         const income = currentMonthSummary.income;
         const expenses = currentMonthSummary.expenses;
@@ -430,7 +462,7 @@
                 type: 'credit',
                 color: 'var(--positive)',
                 icon: 'undo',
-                count: monthTransactions.filter(t => parseFloat(t.amount) > 0 && !NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income').length
+                count: monthTransactions.filter(t => parseFloat(t.amount) > 0 && (t.category === 'Credits & Refunds' || (!NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income'))).length
             });
         }
 
@@ -454,6 +486,13 @@
         const expenseCats = [...monthCategories]
             .filter(c => c.category !== 'Savings Transfer' && c.category !== 'Personal Transfer')
             .sort((a, b) => (b.gross ?? b.total) - (a.gross ?? a.total));
+        const hasAnyFlow =
+            income > 0 ||
+            creditsRefunds > 0 ||
+            incomingTransfers > 0 ||
+            externalTransfers > 0 ||
+            expenseCats.some(c => (c.gross ?? c.total) > 0);
+        if (!hasAnyFlow) return null;
 
         // Get transaction counts per category
         const txnCounts = {};
@@ -644,7 +683,7 @@
         if (bar.type === 'credit') {
             selectedCategory = 'Credits & Refunds';
             categoryTransactions = monthTransactions
-                .filter(t => parseFloat(t.amount) > 0 && !NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income')
+                .filter(t => parseFloat(t.amount) > 0 && (t.category === 'Credits & Refunds' || (!NON_SPENDING_CATEGORIES_SET.has(t.category) && t.category !== 'Income')))
                 .sort((a, b) => Math.abs(parseFloat(b.amount)) - Math.abs(parseFloat(a.amount)));
             return;
         }
@@ -1030,20 +1069,10 @@
 
     function selectAnalyticsPeriod(period) {
         selectedAnalyticsPeriod = period;
-        const sorted = [...monthly].sort((a, b) => b.month.localeCompare(a.month));
         if (period === 'This Month') {
-            const now = new Date();
-            const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-            const match = sorted.find(m => m.month === thisMonth);
-            if (match) selectedMonth = thisMonth;
-            else if (sorted.length > 0) selectedMonth = sorted[0].month;
+            selectedMonth = getCurrentMonth();
         } else if (period === 'Last Month') {
-            const now = new Date();
-            const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            const lmStr = `${lm.getFullYear()}-${String(lm.getMonth() + 1).padStart(2, '0')}`;
-            const match = sorted.find(m => m.month === lmStr);
-            if (match) selectedMonth = lmStr;
-            else if (sorted.length > 1) selectedMonth = sorted[1].month;
+            selectedMonth = getLastMonthKey();
         }
         // 'Custom' does nothing — user picks from dropdown
     }
@@ -1378,7 +1407,7 @@
         </section>
     {/if}
 
-    {#if waterfallData && waterfallGeometry}
+    {#if selectedMonth}
         <section class="mb-10 fade-in-up" style="animation-delay: 60ms">
             <div class="flex flex-col gap-3 mb-1 sm:flex-row sm:items-center sm:justify-between" style="position: relative; z-index: 90;">
                 <div class="analytics-section-header" style="margin-bottom:0">
@@ -1411,7 +1440,7 @@
                         {#if monthPickerOpen}
                             <!-- svelte-ignore a11y-click-events-have-key-events -->
                             <div class="analytics-month-picker-dropdown" role="presentation" on:click|stopPropagation>
-                                {#each [...monthly].sort((a,b) => b.month.localeCompare(a.month)) as m}
+                                {#each monthPickerMonths as m}
                                     <button
                                         class="analytics-month-picker-option"
                                         class:active={m.month === selectedMonth}
@@ -1432,6 +1461,7 @@
             </p>
 
             <div class="card analytics-waterfall-theater" style="padding: 1rem 0.5rem 0.5rem">
+                {#if waterfallData && waterfallGeometry}
                 <div bind:this={waterfallEl} class="analytics-waterfall-container" style="position: relative;">
                     <svg width="100%" viewBox="0 0 {waterfallGeometry.W} {waterfallGeometry.H}" preserveAspectRatio="xMidYMid meet">
                         <defs>
@@ -1580,6 +1610,11 @@
                         </span>
                     </div>
                 </div>
+                {:else}
+                    <div class="analytics-waterfall-empty">
+                        No cash flow yet for {formatMonth(selectedMonth)}
+                    </div>
+                {/if}
             </div>
 
             <!-- ── Contextual Drill-Down (inside waterfall section) ── -->

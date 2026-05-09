@@ -12,6 +12,7 @@ from mira import metric_registry
 
 NON_SPENDING_CATEGORIES = {
     "Income",
+    "Credits & Refunds",
     "Savings Transfer",
     "Personal Transfer",
     "Credit Card Payment",
@@ -611,22 +612,12 @@ def _relevant_goal_memories(conn, profile: str | None, question: str) -> list[di
 
 
 def _memory_constraints(memories: list[dict[str, Any]], category: str, amount: float) -> dict[str, Any]:
-    conflicts = []
-    used = []
-    category_lower = (category or "").lower()
-    for memory in memories:
-        memory_type = str(memory.get("memory_type") or "")
-        if memory_type not in {"goal", "constraint", "commitment"}:
-            continue
-        text = str(memory.get("normalized_text") or memory.get("text") or "")
-        used.append({"id": memory.get("id"), "memory_type": memory_type, "topic": memory.get("topic"), "sensitivity": memory.get("sensitivity")})
-        cap = _extract_amount(text)
-        if category_lower and category_lower in text.lower() and cap is not None and amount > cap:
-            conflicts.append(f"it conflicts with your saved {category} cap context")
-        elif any(token in text.lower() for token in ("save", "saving", "debt", "house", "emergency")):
-            if amount >= 100:
-                conflicts.append("it works against a saved goal or constraint")
-    return {"used_memories": used, "conflicts": conflicts}
+    try:
+        from mira import memory_v2
+
+        return memory_v2.affordability_constraint_context(memories, category=category, amount=amount)
+    except Exception:
+        return {"used_memories": [], "conflicts": []}
 
 
 def _looks_one_off_income(text: str) -> bool:

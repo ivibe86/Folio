@@ -4,7 +4,7 @@
     import { page } from '$app/stores';
     import { onMount, tick } from 'svelte';
     import { api, invalidateCache } from '$lib/api.js';
-    import { activeProfile } from '$lib/stores/profileStore.js';
+    import { activeProfile, profiles } from '$lib/stores/profileStore.js';
     import { formatCurrency, formatDate } from '$lib/utils.js';
     import ProfileSwitcher from '$lib/components/ProfileSwitcher.svelte';
     import CopilotChart from '$lib/components/CopilotChart.svelte';
@@ -27,7 +27,7 @@
     let copilotModel = '';
     let copilotModelSaving = false;
     let copilotModelInstalling = false;
-    let appConfig = { receiptIntelligenceEnabled: false };
+    let appConfig = { receiptIntelligenceEnabled: false, miraAgenticRuntime: 'current' };
 
     let receiptsOpen = false;
     let receiptFile = null;
@@ -35,12 +35,14 @@
     let receiptSaving = false;
     let receiptError = '';
     let receiptDraft = null;
+    let receiptDrafts = [];
     let receiptItems = [];
     let receiptComparisons = [];
     let receiptSummaryEditing = false;
     let receiptParseStartedAt = null;
     let receiptParseElapsed = 0;
     let receiptParseTimer = null;
+    const receiptReadyStorageKey = 'folio:receipt-ready';
 
     $: receiptParseStage = (() => {
         if (!receiptParsing) return '';
@@ -75,6 +77,7 @@
         out = out.replace(/<memory_proposal\b[^>]*>[\s\S]*?<\/memory_proposal>/gi, '');
         out = out.replace(/<observation\b[^>]*\/>/gi, '');
         out = out.replace(/<memory_proposal\b[^>]*\/>/gi, '');
+        out = out.replace(/\*?\(?\s*Self-Correction\s*:[\s\S]*?(?:\)\*?|\n\n|$)/gi, '');
         // Mid-stream: hide the open tag onward until close arrives, so we don't flicker XML
         const openIdx = out.search(/<(observation|memory_proposal)\b/i);
         if (openIdx >= 0) out = out.slice(0, openIdx);
@@ -83,22 +86,75 @@
         return out;
     }
 
+    function profileGreetingName(profileId) {
+        const raw = String(profileId || '').trim();
+        if (!raw || raw === 'household') return 'you';
+        const profile = ($profiles || []).find((item) => item?.id === raw);
+        const display = String(profile?.name || raw).trim();
+        return display.charAt(0).toUpperCase() + display.slice(1);
+    }
+
+    function miraWelcome(profileId) {
+        const name = profileGreetingName(profileId);
+        return `Hey ${name}. There you are.\n\nWhere do you want to start?`;
+    }
+
+    function modelFamilyName(modelId, modelMeta) {
+        const raw = String(modelMeta?.display_name || modelMeta?.label || modelMeta?.name || modelId || '').trim();
+        const first = raw.split(/[\s:/_-]+/).filter(Boolean)[0] || 'local model';
+        return first.charAt(0).toUpperCase() + first.slice(1);
+    }
+
     let messages = [
         {
             role: 'assistant',
-            content: "Mira helps you understand your finances, notice what matters, draft safe changes for your approval, and talk through anything on your mind.",
+            content: miraWelcome($activeProfile || 'household'),
             operation: null,
             data: null,
             sql: null,
             preview_changes: [],
             needs_confirmation: false,
-            rows_affected: 0
+            rows_affected: 0,
+            is_welcome: true
         }
     ];
 
     // ── Chip action descriptors ──
     // Each chip describes a structured operation with its required inputs.
     // Chips with no inputs execute immediately; others show an inline mini-form.
+    const starterChips = [
+        {
+            id: 'start_unknown',
+            label: "I don't know where to start",
+            prompt: "What should I watch in my finances this month?",
+        },
+        {
+            id: 'where_money_went',
+            label: 'Show me where my money went',
+            prompt: 'Show my top spending categories this month.',
+        },
+        {
+            id: 'fix_first',
+            label: 'What should I fix first?',
+            prompt: 'What should I fix first in my finances?',
+        },
+        {
+            id: 'spend_this_week',
+            label: 'Can I spend more this week?',
+            prompt: 'Can I spend more this week?',
+        },
+        {
+            id: 'subscriptions',
+            label: 'Clean up subscriptions',
+            prompt: 'Show all active recurring charges.',
+        },
+        {
+            id: 'budget',
+            label: 'Check my budget',
+            prompt: 'How is my budget looking this month?',
+        },
+    ];
+
     const chipActions = [
         {
             id: 'explain_category',
@@ -157,27 +213,22 @@
         ? localLlmCatalog.tiers.flatMap((tier) => tier.models.filter((model) => model.task_fit?.includes('copilot')))
         : [];
     $: selectedCopilotModelMeta = copilotModelOptions.find((model) => model.id === copilotModel) || null;
-    function modelFamilyName(modelId, modelMeta) {
-        const raw = `${modelMeta?.label || ''} ${modelId || ''}`.trim();
-        const lower = raw.toLowerCase();
-        if (lower.includes('gemma')) return 'Gemma';
-        if (lower.includes('qwen')) return 'Qwen';
-        if (lower.includes('phi')) return 'Phi';
-        if (lower.includes('mistral')) return 'Mistral';
-        if (lower.includes('llama')) return 'Llama';
-        if (lower.includes('deepseek')) return 'DeepSeek';
-        const first = (modelMeta?.label || modelId || 'your selected model')
-            .split(/[\s:\/_-]+/)
-            .find(Boolean);
-        return first ? first.charAt(0).toUpperCase() + first.slice(1) : 'your selected model';
-    }
     $: copilotModelFamily = modelFamilyName(copilotModel, selectedCopilotModelMeta);
+    $: showMiraDebug = ['1', 'true', 'mira', 'all'].includes(($page.url.searchParams.get('debugMira') || '').toLowerCase());
+
+    $: if (messages.length === 1 && messages[0]?.is_welcome) {
+        const nextWelcome = miraWelcome(activeProfileId);
+        if (messages[0].content !== nextWelcome) {
+            messages = [{ ...messages[0], content: nextWelcome }];
+        }
+    }
 
     onMount(async () => {
         const prompt = $page.url.searchParams.get('prompt');
         if (prompt) input = prompt;
         await Promise.all([refreshSidebar(), loadLocalLlm(), loadAppConfig()]);
         lastLoadedProfile = activeProfileId;
+        await restoreReceiptFromNavigation();
         // Load categories for chip form dropdowns
         try {
             const catRes = await api.getCategories();
@@ -188,7 +239,12 @@
     $: if (activeProfileId && lastLoadedProfile !== undefined && activeProfileId !== lastLoadedProfile) {
         lastLoadedProfile = activeProfileId;
         refreshSidebar();
-        if (receiptsOpen && appConfig.receiptIntelligenceEnabled) loadReceiptComparisons();
+        if (receiptsOpen && appConfig.receiptIntelligenceEnabled) {
+            receiptDraft = null;
+            receiptItems = [];
+            receiptFile = null;
+            loadReceiptWorkspace();
+        }
     }
 
     function setNotice(message) {
@@ -376,42 +432,42 @@
     }
 
     async function handleShortcut(question) {
-        const lower = question.toLowerCase();
-        const pageNavigation = /\b(open|go to|navigate to)\b/.test(lower) || (/\bshow\b/.test(lower) && /\b(page|screen|tab)\b/.test(lower));
+        const command = question.trim().toLowerCase().replace(/\s+/g, ' ');
+        if (!command.startsWith('/')) return null;
 
-        if (pageNavigation && /\b(transaction|transactions)\b/.test(lower)) {
+        if (command === '/open transactions') {
             await openPage('/transactions');
             return "Opened Transactions.";
         }
-        if (pageNavigation && /\b(merchant|merchants)\b/.test(lower)) {
+        if (command === '/open merchants') {
             await openControlCenter('merchants');
             return "Opened Control Center on Merchants.";
         }
-        if (pageNavigation && /\brules?\b/.test(lower)) {
+        if (command === '/open rules') {
             await openControlCenter('rules');
             return "Opened Control Center on Rules.";
         }
-        if (pageNavigation && /\b(categories|category)\b/.test(lower)) {
+        if (command === '/open categories') {
             await openControlCenter('categories');
             return "Opened Control Center on Categories.";
         }
-        if (pageNavigation && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
+        if (command === '/open subscriptions') {
             await openControlCenter('merchants', { merchantFilter: 'subscriptions' });
             return "Opened Control Center on recurring merchants.";
         }
-        if (pageNavigation && /\bhistory\b/.test(lower)) {
+        if (command === '/open history') {
             openHistory();
             return "Opened recent Mira activity.";
         }
-        if (/\b(sync|refresh)\b/.test(lower) && !/\bhistory\b/.test(lower)) {
+        if (command === '/sync' || command === '/refresh') {
             const result = await runSync();
             return `Sync finished: ${result.accounts} accounts and ${result.transactions} transactions processed.`;
         }
-        if (/\b(redetect|rescan)\b/.test(lower) && /\b(subscription|subscriptions|recurring)\b/.test(lower)) {
+        if (command === '/redetect subscriptions') {
             await runRedetectSubscriptions();
             return "Subscription detection has been re-run.";
         }
-        if (/\b(mark|clear)\b/.test(lower) && /\b(alert|alerts|event|events)\b/.test(lower) && /\bread\b/.test(lower)) {
+        if (command === '/clear alerts') {
             await markAllEventsRead();
             return "Marked all subscription alerts as read.";
         }
@@ -469,6 +525,25 @@
                 const turn = { role: m.role, content: m.content };
                 if (m.dialogue_state) turn.dialogue_state = m.dialogue_state;
                 if (m.answer_context) turn.answer_context = m.answer_context;
+                if (m.answer_guard) turn.answer_guard = {
+                    path: m.answer_guard.path || '',
+                    used_fallback: !!m.answer_guard.used_fallback,
+                    error: m.answer_guard.error || ''
+                };
+                if (m.trace) turn.trace = {
+                    runtime: m.trace.runtime || '',
+                    answer_path: m.trace.answer_path || '',
+                    tool_result_count: m.trace.tool_result_count || 0,
+                    evidence_fact_count: m.trace.evidence_fact_count || 0,
+                    evidence_row_count: m.trace.evidence_row_count || 0,
+                    evidence_chart_count: m.trace.evidence_chart_count || 0
+                };
+                if (m.tool_trace && m.tool_trace.length > 0) {
+                    turn.tool_context = m.tool_trace.slice(0, 4).map(t => ({
+                        name: t.name,
+                        args: t.args || {}
+                    }));
+                }
                 return turn;
             });
 
@@ -484,8 +559,11 @@
             rows_affected: 0,
             original_question: question,
             tool_trace: [],
+            trace: null,
+            answer_guard: null,
+            runtime: appConfig.miraAgenticRuntime || null,
             active_tool: null,
-            progress: 'Routing the request',
+            progress: 'Thinking',
         }];
         const streamIdx = messages.length - 1;
         await tick();
@@ -496,10 +574,12 @@
             const msg = { ...messages[streamIdx] };
             switch (ev.type) {
                 case 'routing_started':
-                    msg.progress = ev.label || ev.stage || 'Routing the request';
+                    msg.progress = 'Thinking';
                     break;
                 case 'route':
                     if (ev.dialogue_state) msg.dialogue_state = ev.dialogue_state;
+                    msg.runtime = ev.mira_planner || ev.trace?.runtime || msg.runtime || null;
+                    if (ev.trace) msg.trace = ev.trace;
                     break;
                 case 'controller':
                     msg.controller_act = ev.controller_act || null;
@@ -508,7 +588,11 @@
                     msg.domain_action = ev.domain_action || null;
                     break;
                 case 'progress':
-                    msg.progress = ev.label || ev.stage || 'Working';
+                    {
+                        const label = ev.label || ev.stage || 'Working';
+                        const normalizedLabel = label.toLowerCase().includes('routing the request') ? 'Thinking' : label;
+                        msg.progress = normalizedLabel.toLowerCase().includes('selected general answer') ? null : normalizedLabel;
+                    }
                     break;
                 case 'reset_text':
                     currentContent = '';
@@ -517,6 +601,7 @@
                 case 'token':
                     currentContent += ev.text || '';
                     msg.content = scrubMemoryTags(currentContent);
+                    msg.progress = null;
                     break;
                 case 'tool_call':
                     msg.active_tool = ev.name;
@@ -551,6 +636,9 @@
                     msg.memory_proposals = ev.memory_proposals || [];
                     msg.dialogue_state = ev.dialogue_state || ev.route?.dialogue_state || null;
                     msg.answer_context = ev.answer_context || null;
+                    msg.trace = ev.trace || ev.route?.trace || msg.trace || null;
+                    msg.answer_guard = ev.answer_guard || null;
+                    msg.runtime = ev.trace?.runtime || ev.route?.mira_planner || ev.route?.trace?.runtime || msg.runtime || null;
                     if (ev.chart) msg.chart = ev.chart;
                     if (ev.pending_write) {
                         msg.operation = 'write_preview';
@@ -774,6 +862,12 @@
     }
 
     async function activateChip(chip) {
+        if (chip.prompt) {
+            input = chip.prompt;
+            await tick();
+            await send();
+            return;
+        }
         if (chip.id === 'receipt_compare') {
             openReceipts();
             return;
@@ -888,7 +982,7 @@
     function openReceipts() {
         receiptsOpen = true;
         receiptError = '';
-        loadReceiptComparisons();
+        loadReceiptWorkspace();
     }
 
     function closeReceipts() {
@@ -904,6 +998,20 @@
         } catch (error) {
             receiptComparisons = [];
         }
+    }
+
+    async function loadReceiptDrafts() {
+        if (!appConfig.receiptIntelligenceEnabled) return;
+        try {
+            const result = await api.getReceipts(activeProfileId, { status: 'draft', limit: 6 });
+            receiptDrafts = result?.items || [];
+        } catch (error) {
+            receiptDrafts = [];
+        }
+    }
+
+    async function loadReceiptWorkspace() {
+        await Promise.all([loadReceiptComparisons(), loadReceiptDrafts()]);
     }
 
     function handleReceiptFile(event) {
@@ -928,6 +1036,71 @@
         receiptItems = (receipt?.items || []).map((item) => ({ ...item }));
     }
 
+    function clearReceiptReady(receiptId = null) {
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            const raw = sessionStorage.getItem(receiptReadyStorageKey);
+            if (!raw) return;
+            const saved = JSON.parse(raw);
+            if (!receiptId || Number(saved?.receiptId) === Number(receiptId)) {
+                sessionStorage.removeItem(receiptReadyStorageKey);
+            }
+        } catch (_) {
+            sessionStorage.removeItem(receiptReadyStorageKey);
+        }
+    }
+
+    function publishReceiptReady(receipt, profile, fileName) {
+        const detail = {
+            receiptId: receipt?.id,
+            profile,
+            fileName,
+            storeName: receipt?.store_name || '',
+            itemCount: receipt?.items?.length || 0,
+            completedAt: new Date().toISOString(),
+        };
+        if (typeof sessionStorage !== 'undefined') {
+            try {
+                sessionStorage.setItem(receiptReadyStorageKey, JSON.stringify(detail));
+            } catch (_) {}
+        }
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('folio:receipt-parse-done', { detail }));
+        }
+    }
+
+    async function loadReceiptDraft(receiptId, profile = activeProfileId) {
+        if (!receiptId) return;
+        receiptError = '';
+        try {
+            const receipt = await api.getReceipt(receiptId, profile);
+            syncReceiptState(receipt);
+            receiptsOpen = true;
+            receiptSummaryEditing = false;
+            clearReceiptReady(receiptId);
+            await loadReceiptWorkspace();
+        } catch (error) {
+            receiptError = error?.message || 'Failed to load receipt draft.';
+        }
+    }
+
+    async function restoreReceiptFromNavigation() {
+        if (!appConfig.receiptIntelligenceEnabled) return;
+        const receiptId = Number($page.url.searchParams.get('receipt') || 0);
+        const receiptProfile = $page.url.searchParams.get('receiptProfile') || activeProfileId;
+        if (receiptId) {
+            await loadReceiptDraft(receiptId, receiptProfile);
+            return;
+        }
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            const saved = JSON.parse(sessionStorage.getItem(receiptReadyStorageKey) || 'null');
+            if (saved?.receiptId && (saved.profile || 'household') === activeProfileId) {
+                await loadReceiptDraft(saved.receiptId, saved.profile);
+            }
+        } catch (_) {}
+    }
+
     function setReceiptDraftValue(key, value) {
         if (!receiptDraft || receiptDraft.status !== 'draft') return;
         receiptDraft = { ...receiptDraft, [key]: value };
@@ -942,14 +1115,19 @@
 
     async function parseSelectedReceipt() {
         if (!receiptFile || receiptParsing) return;
+        const parseFileName = receiptFile.name || 'receipt image';
+        const parseProfile = activeProfileId;
         receiptParsing = true;
         receiptError = '';
         startReceiptParseTimer();
         try {
-            const receipt = await api.parseReceipt(receiptFile, activeProfileId);
-            syncReceiptState(receipt);
-            setNotice('Receipt parsed. Review the items before approving.');
-            await loadReceiptComparisons();
+            const receipt = await api.parseReceipt(receiptFile, parseProfile);
+            publishReceiptReady(receipt, parseProfile, parseFileName);
+            if (parseProfile === activeProfileId) {
+                syncReceiptState(receipt);
+                setNotice('Receipt parsed. Review the items before approving.');
+                await loadReceiptWorkspace();
+            }
         } catch (error) {
             receiptError = error?.message || 'Receipt parsing failed.';
         } finally {
@@ -966,6 +1144,7 @@
             const receipt = await api.updateReceiptItems(receiptDraft.id, receiptItems, activeProfileId, receiptDraftMetadata());
             syncReceiptState(receipt);
             receiptSummaryEditing = false;
+            await loadReceiptDrafts();
             setNotice('Receipt draft saved.');
         } catch (error) {
             receiptError = error?.message || 'Failed to save receipt items.';
@@ -983,7 +1162,9 @@
             const receipt = await api.approveReceipt(receiptDraft.id, activeProfileId);
             syncReceiptState(receipt);
             receiptSummaryEditing = false;
+            clearReceiptReady(receipt.id);
             await loadReceiptComparisons();
+            await loadReceiptDrafts();
             setNotice('Receipt approved. Prices are now in comparisons.');
         } catch (error) {
             receiptError = error?.message || 'Failed to approve receipt.';
@@ -998,12 +1179,13 @@
         receiptError = '';
         try {
             await api.discardReceipt(receiptDraft.id, activeProfileId);
+            clearReceiptReady(receiptDraft.id);
             receiptDraft = null;
             receiptItems = [];
             receiptFile = null;
             receiptSummaryEditing = false;
             setNotice('Receipt discarded.');
-            await loadReceiptComparisons();
+            await loadReceiptWorkspace();
         } catch (error) {
             receiptError = error?.message || 'Failed to discard receipt.';
         } finally {
@@ -1017,6 +1199,7 @@
         receiptFile = null;
         receiptError = '';
         receiptSummaryEditing = false;
+        loadReceiptDrafts();
     }
 
     function formatReceiptMoney(value) {
@@ -1204,6 +1387,33 @@
                 </div>
             </div>
 
+            {#if receiptDrafts.length > 0}
+                <div class="copilot-receipt-section">
+                    <div class="copilot-panel-header">
+                        <div>
+                            <h3>Draft Receipts</h3>
+                            <p>Receipts waiting for review in this profile.</p>
+                        </div>
+                    </div>
+                    <div class="copilot-receipt-draft-list">
+                        {#each receiptDrafts as draft}
+                            <button
+                                type="button"
+                                class="copilot-receipt-draft-row"
+                                class:copilot-receipt-draft-row-active={receiptDraft?.id === draft.id}
+                                on:click={() => loadReceiptDraft(draft.id)}
+                            >
+                                <span>
+                                    <strong>{draft.store_name || 'Unknown store'}</strong>
+                                    <small>{formatDate(draft.receipt_date || draft.created_at)} · {draft.item_count || 0} items · {formatReceiptMoney(draft.total)}</small>
+                                </span>
+                                <span class="material-symbols-outlined">chevron_right</span>
+                            </button>
+                        {/each}
+                    </div>
+                </div>
+            {/if}
+
             {#if receiptDraft}
                 <div class="copilot-receipt-section">
                     <div class="copilot-panel-header">
@@ -1376,7 +1586,7 @@
                                                 <span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
                                                 Calling {msg.active_tool.replaceAll('_', ' ')}…
                                             </div>
-                                        {:else if msg.progress}
+                                        {:else if msg.progress && !msg.content?.trim()}
                                             <div class="copilot-op-badge copilot-op-read" style="margin-bottom: 6px; opacity: 0.9;">
                                                 <span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
                                                 {msg.progress}…
@@ -1460,16 +1670,30 @@
                                             {/if}
                                         {/if}
 
-                                        {#if msg.tool_trace && msg.tool_trace.length > 0 && msg.operation !== 'streaming'}
+                                        {#if ((msg.tool_trace && msg.tool_trace.length > 0) || (showMiraDebug && msg.trace)) && msg.operation !== 'streaming'}
                                             <button class="copilot-sql-toggle" on:click={() => showSqlForMsg = { ...showSqlForMsg, ['trace_' + i]: !showSqlForMsg['trace_' + i] }}>
                                                 <span class="material-symbols-outlined text-[12px]">manage_search</span>
-                                                {showSqlForMsg['trace_' + i] ? 'Hide' : 'How I answered'} ({msg.tool_trace.length} tool{msg.tool_trace.length !== 1 ? 's' : ''})
+                                                {showSqlForMsg['trace_' + i] ? 'Hide' : 'How I answered'}{#if msg.tool_trace && msg.tool_trace.length > 0} ({msg.tool_trace.length} tool{msg.tool_trace.length !== 1 ? 's' : ''}){/if}
                                             </button>
                                             {#if showSqlForMsg['trace_' + i]}
                                                 <div class="copilot-sql-block" style="font-size: 11px; line-height: 1.6;">
-                                                    {#each msg.tool_trace as t}
-                                                        <div>→ <strong>{t.name}</strong>({Object.entries(t.args || {}).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ')}){t.duration_ms != null ? ` · ${t.duration_ms}ms` : ''}</div>
-                                                    {/each}
+                                                    {#if showMiraDebug && msg.trace}
+                                                        <div><strong>Runtime</strong>: {msg.runtime || msg.trace.runtime || 'current'}</div>
+                                                        {#if msg.answer_guard?.path || msg.trace.answer_path}
+                                                            <div><strong>Answer path</strong>: {msg.answer_guard?.path || msg.trace.answer_path}</div>
+                                                        {/if}
+                                                        {#if msg.trace.selector_ms != null}
+                                                            <div><strong>Selector</strong>: {msg.trace.selector_ms}ms</div>
+                                                        {/if}
+                                                        {#if msg.trace.prompt_tokens_est != null}
+                                                            <div><strong>Prompt</strong>: {msg.trace.prompt_tokens_est} est. tokens{#if msg.trace.manifest_tokens_est != null} · manifest {msg.trace.manifest_tokens_est}{/if}</div>
+                                                        {/if}
+                                                    {/if}
+                                                    {#if msg.tool_trace && msg.tool_trace.length > 0}
+                                                        {#each msg.tool_trace as t}
+                                                            <div>→ <strong>{t.name}</strong>({Object.entries(t.args || {}).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ')}){t.duration_ms != null ? ` · ${t.duration_ms}ms` : ''}</div>
+                                                        {/each}
+                                                    {/if}
                                                 </div>
                                             {/if}
                                         {/if}
@@ -1581,9 +1805,9 @@
                             </div>
                         </div>
                     {:else}
-                        <p class="text-[9px] font-bold tracking-[0.2em] uppercase mb-2.5" style="color: var(--text-muted)">Try asking</p>
+                        <p class="text-[9px] font-bold tracking-[0.2em] uppercase mb-2.5" style="color: var(--text-muted)">Start here</p>
                         <div class="flex flex-wrap gap-2">
-                            {#each chipActions.filter((chip) => !chip.requiresReceipts || appConfig.receiptIntelligenceEnabled) as chip}
+                            {#each starterChips as chip}
                                 <button on:click={() => activateChip(chip)} class="copilot-suggestion-btn">
                                     {chip.label}
                                 </button>

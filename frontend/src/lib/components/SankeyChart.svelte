@@ -8,6 +8,10 @@ export let income = 0;
 export let expenses = 0;
 export let creditsRefunds = 0;
 export let incomingTransfers = 0;
+export let cashDeposits = 0;
+export let cashWithdrawals = 0;
+export let investmentInflows = 0;
+export let investmentOutflows = 0;
 export let savingsTransfer = 0;
 export let personalTransfer = 0;
 export let ccRepaid = 0;
@@ -52,6 +56,10 @@ const FLOW_COLORS = {
     income:            { color: 'var(--flow-income)',       glow: 'var(--flow-income-glow)' },
     credits_refunds:   { color: 'var(--positive)',          glow: 'rgba(16, 185, 129, 0.18)' },
     incoming_transfer: { color: 'var(--flow-transfer)',     glow: 'var(--flow-transfer-glow)' },
+    cash_deposit:      { color: '#0D9488',                  glow: 'rgba(13, 148, 136, 0.18)' },
+    cash_withdrawal:   { color: '#A16207',                  glow: 'rgba(245, 158, 11, 0.18)' },
+    investment_inflow: { color: '#2563EB',                  glow: 'rgba(37, 99, 235, 0.18)' },
+    investment_transfer: { color: '#4F46E5',                glow: 'rgba(79, 70, 229, 0.18)' },
     expenses:          { color: 'var(--flow-expenses)',     glow: 'var(--flow-expenses-glow)' },
     savings_transfer:  { color: 'var(--flow-savings)',      glow: 'var(--flow-savings-glow)' },
     personal_transfer: { color: 'var(--flow-transfer)',     glow: 'var(--flow-transfer-glow)' },
@@ -87,17 +95,31 @@ function getFlowColor(nodeId) {
     let ghostNode = null;
     let ghostComputedHeight = 0;
 
+    function clearGraph() {
+        nodes = [];
+        links = [];
+        realValues = {};
+        hoveredLink = null;
+        tooltip = { ...tooltip, show: false };
+        ghostFlowPath = null;
+        ghostNode = null;
+        ghostComputedHeight = 0;
+        computedHeight = height;
+    }
+
     $: {
         // Build a lightweight key from the data that actually affects layout.
         // selectedCategory and theme changes do NOT affect layout — only visual props.
         // Privacy mode is included to force label re-render (layout stays the same).
-        const key = `${income}|${creditsRefunds}|${incomingTransfers}|${expenses}|${savingsTransfer}|${personalTransfer}|${ccRepaid}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
+        const key = `${income}|${creditsRefunds}|${incomingTransfers}|${cashDeposits}|${cashWithdrawals}|${investmentInflows}|${investmentOutflows}|${expenses}|${savingsTransfer}|${personalTransfer}|${ccRepaid}|${(categories || []).map(c => c.category + ':' + c.total).join(',')}|priv:${$privacyMode}`;
 
         if (key !== prevGraphKey) {
             prevGraphKey = key;
-            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories, ccRepaid, creditsRefunds, incomingTransfers);
+            graphData = buildGraph(income, expenses, savingsTransfer, personalTransfer, categories, ccRepaid, creditsRefunds, incomingTransfers, cashDeposits, cashWithdrawals, investmentInflows, investmentOutflows);
             if (containerEl && graphData && mounted) {
                 layoutSankey(graphData);
+            } else if (!graphData) {
+                clearGraph();
             }
         }
     }
@@ -110,7 +132,9 @@ function getFlowColor(nodeId) {
             const balanceNode = nodes.find(n => n.id === 'from_balance');
             const creditNode = nodes.find(n => n.id === 'credits_refunds');
             const incomingNode = nodes.find(n => n.id === 'incoming_transfer');
-            const fundingNode = balanceNode || incomeNode || creditNode || incomingNode;
+            const cashNode = nodes.find(n => n.id === 'cash_deposit');
+            const investmentNode = nodes.find(n => n.id === 'investment_inflow');
+            const fundingNode = balanceNode || incomeNode || creditNode || incomingNode || cashNode || investmentNode;
             const maxDepth = nodes.reduce((mx, n) => Math.max(mx, n.depth || 0), 0);
             const destNodes = nodes.filter(n => n.depth === maxDepth && !n.isGhost);
             const maxX = destNodes.length > 0 ? Math.max(...destNodes.map(n => n.x0)) : (svgWidth - 120);
@@ -155,19 +179,21 @@ function getFlowColor(nodeId) {
         }
     }
 
-function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsRefundsAmt = 0, incomingTransfersAmt = 0) {
-    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0 && ccRepaidAmt === 0 && creditsRefundsAmt === 0 && incomingTransfersAmt === 0) return null;
+function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsRefundsAmt = 0, incomingTransfersAmt = 0, cashDepositsAmt = 0, cashWithdrawalsAmt = 0, investmentInflowsAmt = 0, investmentOutflowsAmt = 0) {
+    if ((!cats || cats.length === 0) && savTotal === 0 && ptTotal === 0 && ccRepaidAmt === 0 && creditsRefundsAmt === 0 && incomingTransfersAmt === 0 && cashDepositsAmt === 0 && cashWithdrawalsAmt === 0 && investmentInflowsAmt === 0 && investmentOutflowsAmt === 0) return null;
 
     const top = (cats || []).slice(0, 10);
     const categoryTotal = top.reduce((s, c) => s + (c.total || 0), 0);
 
-    const totalOutflow = categoryTotal + savTotal + ptTotal;
+    const totalOutflow = categoryTotal + savTotal + ptTotal + cashWithdrawalsAmt + investmentOutflowsAmt;
     if (totalOutflow === 0) return null;
 
     const realIncome = inc || 0;
     const realCreditsRefunds = creditsRefundsAmt || 0;
     const realIncomingTransfers = incomingTransfersAmt || 0;
-    const realInflow = realIncome + realCreditsRefunds + realIncomingTransfers;
+    const realCashDeposits = cashDepositsAmt || 0;
+    const realInvestmentInflows = investmentInflowsAmt || 0;
+    const realInflow = realIncome + realCreditsRefunds + realIncomingTransfers + realCashDeposits + realInvestmentInflows;
 
     // ── Balance-as-Reservoir model ──
     // When income doesn't cover outflow, the shortfall comes "from balance".
@@ -183,6 +209,10 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsR
         'income': realIncome,
         'credits_refunds': realCreditsRefunds,
         'incoming_transfer': realIncomingTransfers,
+        'cash_deposit': realCashDeposits,
+        'cash_withdrawal': cashWithdrawalsAmt,
+        'investment_inflow': realInvestmentInflows,
+        'investment_transfer': investmentOutflowsAmt,
         'expenses': categoryTotal,
         'savings_transfer': savTotal,
         'personal_transfer': ptTotal,
@@ -209,6 +239,12 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsR
     if (realIncomingTransfers > 0) {
         nodeList.push({ id: 'incoming_transfer', label: 'Incoming', color: FLOW_COLORS.incoming_transfer.color });
     }
+    if (realCashDeposits > 0) {
+        nodeList.push({ id: 'cash_deposit', label: 'Cash Deposits', color: FLOW_COLORS.cash_deposit.color });
+    }
+    if (realInvestmentInflows > 0) {
+        nodeList.push({ id: 'investment_inflow', label: 'Investments', color: FLOW_COLORS.investment_inflow.color });
+    }
 
     // Show "From Balance" node when drawing down reserves
     if (shortfall > 0.01) {
@@ -229,6 +265,14 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsR
 
     if (ptTotal > 0) {
         nodeList.push({ id: 'personal_transfer', label: 'Transfers', color: FLOW_COLORS.personal_transfer.color });
+    }
+
+    if (cashWithdrawalsAmt > 0) {
+        nodeList.push({ id: 'cash_withdrawal', label: 'Cash Out', color: FLOW_COLORS.cash_withdrawal.color });
+    }
+
+    if (investmentOutflowsAmt > 0) {
+        nodeList.push({ id: 'investment_transfer', label: 'Investments', color: FLOW_COLORS.investment_transfer.color });
     }
 
     // Show "To Balance" node when income exceeds all outflows (surplus)
@@ -257,6 +301,8 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsR
         { id: 'income', remaining: realIncome },
         { id: 'credits_refunds', remaining: realCreditsRefunds },
         { id: 'incoming_transfer', remaining: realIncomingTransfers },
+        { id: 'cash_deposit', remaining: realCashDeposits },
+        { id: 'investment_inflow', remaining: realInvestmentInflows },
         { id: 'from_balance', remaining: shortfall }
     ].filter(s => s.remaining > 0.01 && idToIndex[s.id] !== undefined);
 
@@ -281,6 +327,8 @@ function buildGraph(inc, exp, savTotal, ptTotal, cats, ccRepaidAmt = 0, creditsR
     allocateTo('expenses', top.length > 0 ? categoryTotal : 0);
     allocateTo('savings_transfer', savTotal);
     allocateTo('personal_transfer', ptTotal);
+    allocateTo('cash_withdrawal', cashWithdrawalsAmt);
+    allocateTo('investment_transfer', investmentOutflowsAmt);
     allocateTo('to_balance', surplus);
 
     //    Ghost: CC Repaid (visual only, does not affect Sankey balance)   
@@ -315,7 +363,7 @@ function layoutSankey(data) {
         const visibleNodes = data.nodes.filter(n => !n.isHidden).length;
         const catNodes = visibleNodes - 1;
         const needed = MARGIN.top + MARGIN.bottom + Math.max(catNodes, 3) * (MIN_NODE_HEIGHT + PAD);
-        computedHeight = Math.max(height, Math.min(needed, 650));
+        computedHeight = Math.max(height, Math.min(needed, 560));
     } else {
         computedHeight = height;
     }
@@ -408,6 +456,9 @@ function selectedNodeId() {
     if (selectedCategory === 'Credits & Refunds') return 'credits_refunds';
     if (selectedCategory === 'Savings Transfer') return 'savings_transfer';
     if (selectedCategory === 'Personal Transfer') return 'personal_transfer';
+    if (selectedCategory === 'Cash Deposit') return 'cash_deposit';
+    if (selectedCategory === 'Cash Withdrawal') return 'cash_withdrawal';
+    if (selectedCategory === 'Investment Transfer') return 'investment_transfer';
     return selectedCategory;
 }
 
@@ -415,11 +466,15 @@ function getLinkTargetCategory(link) {
     const targetNode = typeof link.target === 'object' ? link.target : nodes[link.target];
     const sourceNode = typeof link.source === 'object' ? link.source : nodes[link.source];
     if (sourceNode?.id === 'credits_refunds') return 'Credits & Refunds';
+    if (sourceNode?.id === 'cash_deposit') return 'Cash Deposit';
+    if (sourceNode?.id === 'investment_inflow') return 'Investment Transfer';
     if (!targetNode || targetNode.isHidden) return null;
     if (targetNode.id === 'income' || targetNode.id === 'expenses') return null;
     if (targetNode.id === 'from_balance' || targetNode.id === 'to_balance') return null;
     if (targetNode.id === 'savings_transfer') return 'Savings Transfer';
     if (targetNode.id === 'personal_transfer') return 'Personal Transfer';
+    if (targetNode.id === 'cash_withdrawal') return 'Cash Withdrawal';
+    if (targetNode.id === 'investment_transfer') return 'Investment Transfer';
     return targetNode.id;
 }
 
@@ -437,9 +492,9 @@ function getLinkOpacity(link) {
             opacity = 0.75;
         } else if (sourceNode?.id === activeNodeId || targetNode?.id === activeNodeId) {
             opacity = 0.75;
-        } else if ((sourceNode?.id === 'income' || sourceNode?.id === 'from_balance') && targetNode?.id === 'expenses') {
+        } else if ((sourceNode?.id === 'income' || sourceNode?.id === 'credits_refunds' || sourceNode?.id === 'incoming_transfer' || sourceNode?.id === 'cash_deposit' || sourceNode?.id === 'investment_inflow' || sourceNode?.id === 'from_balance') && targetNode?.id === 'expenses') {
         // Dim source→expenses trunk links (from income OR from_balance)
-            const isExpenseCat = nodes.some(n => n.id === selectedCategory && n.id !== 'savings_transfer' && n.id !== 'personal_transfer' && n.id !== 'from_balance' && n.id !== 'to_balance');
+            const isExpenseCat = nodes.some(n => n.id === selectedCategory && !['savings_transfer', 'personal_transfer', 'cash_withdrawal', 'investment_transfer', 'from_balance', 'to_balance'].includes(n.id));
             opacity = isExpenseCat ? 0.15 : 0.06;
         } else if (sourceNode?.id === 'expenses' && targetNode?.id === selectedCategory) {
             opacity = 0.75;
@@ -506,7 +561,7 @@ function getLinkTargetColor(link) {
 function getNodeRenderColor(node) {
     if (!syncOverlay) return node.color;
 
-    if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'from_balance') return '#7f8ea2';
+    if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'cash_deposit' || node.id === 'investment_inflow' || node.id === 'from_balance') return '#7f8ea2';
     if (node.id === 'expenses') return '#9fb1c8';
     if (node.id === 'to_balance') return '#95a8bb';
     return '#b7c4d5';
@@ -525,10 +580,10 @@ function getNodeOpacity(node) {
         opacity = 1;
     } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
         opacity = 1;
-    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'from_balance' || node.id === 'to_balance') {
+    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'cash_deposit' || node.id === 'investment_inflow' || node.id === 'from_balance' || node.id === 'to_balance') {
         opacity = 0.4;
     } else if (node.id === 'expenses') {
-        const isExpenseCat = nodes.some(n => n.id === selectedCategory && !['savings_transfer', 'personal_transfer', 'income', 'credits_refunds', 'incoming_transfer', 'expenses', 'from_balance', 'to_balance'].includes(n.id));
+        const isExpenseCat = nodes.some(n => n.id === selectedCategory && !['savings_transfer', 'personal_transfer', 'cash_withdrawal', 'investment_transfer', 'income', 'credits_refunds', 'incoming_transfer', 'cash_deposit', 'investment_inflow', 'expenses', 'from_balance', 'to_balance'].includes(n.id));
         opacity = isExpenseCat ? 0.4 : 0.1;
     } else {
         opacity = 0.1;
@@ -554,7 +609,7 @@ function getNodeLabelOpacity(node) {
         opacity = 1;
     } else if (node.id === 'personal_transfer' && selectedCategory === 'Personal Transfer') {
         opacity = 1;
-    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') {
+    } else if (node.id === 'income' || node.id === 'credits_refunds' || node.id === 'incoming_transfer' || node.id === 'cash_deposit' || node.id === 'investment_inflow' || node.id === 'expenses' || node.id === 'from_balance' || node.id === 'to_balance') {
         opacity = 0.4;
     } else {
         opacity = 0.1;
@@ -596,8 +651,8 @@ function getSyncMaskOpacity(link) {
 
 function getSyncNodeMaskOpacity(node) {
     if (node.id === 'expenses') return 0.18;
-    if (node.id === 'income' || node.id === 'from_balance' || node.id === 'to_balance') return 0.62;
-    if (node.id === 'savings_transfer' || node.id === 'personal_transfer') return 0.5;
+    if (node.id === 'income' || node.id === 'cash_deposit' || node.id === 'investment_inflow' || node.id === 'from_balance' || node.id === 'to_balance') return 0.62;
+    if (node.id === 'savings_transfer' || node.id === 'personal_transfer' || node.id === 'cash_withdrawal' || node.id === 'investment_transfer') return 0.5;
     return 0.4;
 }
 
@@ -617,6 +672,10 @@ function getClickCategory(node) {
     if (node.id === 'credits_refunds') return 'Credits & Refunds';
     if (node.id === 'savings_transfer') return 'Savings Transfer';
     if (node.id === 'personal_transfer') return 'Personal Transfer';
+    if (node.id === 'cash_deposit') return 'Cash Deposit';
+    if (node.id === 'cash_withdrawal') return 'Cash Withdrawal';
+    if (node.id === 'investment_inflow') return 'Investment Transfer';
+    if (node.id === 'investment_transfer') return 'Investment Transfer';
     return node.id;
 }
 
@@ -720,6 +779,7 @@ onMount(() => {
     mounted = true;
     checkDarkMode();
     if (graphData) layoutSankey(graphData);
+    else clearGraph();
 
     requestAnimationFrame(() => {
         animateIn = true;
@@ -727,6 +787,7 @@ onMount(() => {
 
     const observer = new ResizeObserver(() => {
         if (graphData) layoutSankey(graphData);
+        else clearGraph();
     });
     if (containerEl) observer.observe(containerEl);
 

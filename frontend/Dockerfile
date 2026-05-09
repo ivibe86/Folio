@@ -1,8 +1,15 @@
-FROM node:20-slim AS builder
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 WORKDIR /app
 
-# Accept VITE_ vars as build arguments (injected by docker-compose build.args)
+ARG DEPENDENCY_COOLDOWN_DAYS=7
+
+# Install dependencies first (layer caching)
+COPY package.json package-lock.json ./
+RUN cutoff="$(DEPENDENCY_COOLDOWN_DAYS="${DEPENDENCY_COOLDOWN_DAYS}" node -e "const days = Number(process.env.DEPENDENCY_COOLDOWN_DAYS || 7); console.log(new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString())")" && \
+    npm ci --before="$cutoff"
+
+# Accept VITE_ vars as build arguments only after dependency install scripts run.
 ARG VITE_API_KEY=""
 ARG VITE_TELLER_APP_ID=""
 ARG VITE_TELLER_ENVIRONMENT="sandbox"
@@ -12,17 +19,13 @@ ENV VITE_API_KEY=$VITE_API_KEY
 ENV VITE_TELLER_APP_ID=$VITE_TELLER_APP_ID
 ENV VITE_TELLER_ENVIRONMENT=$VITE_TELLER_ENVIRONMENT
 
-# Install dependencies first (layer caching)
-COPY package.json package-lock.json* ./
-RUN npm ci || npm install
-
 # Copy source and build
 COPY . .
 ENV DOCKER=true
 RUN npm run build
 
 # Production stage
-FROM node:20-slim
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 WORKDIR /app
 

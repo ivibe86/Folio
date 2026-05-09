@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
 from categorizer import categorize_transactions, _rule_based_categorize
+from cashflow_classifier import CREDITS_REFUNDS_CATEGORY
 from database import DB_PATH, get_db, dicts_from_rows, _extract_merchant_pattern
 from merchant_identity import (
     build_merchant_identity,
@@ -70,7 +71,8 @@ EMPTY_DATA = {
 # Categories excluded from spending calculations (duplicated from main.py for
 # SQL-level filtering — keep in sync with main.py constants).
 TRANSFER_CATEGORIES = ("Savings Transfer", "Personal Transfer", "Credit Card Payment")
-NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES + ("Income",)
+CASHFLOW_DIRECT_CATEGORIES = ("Cash Withdrawal", "Cash Deposit", "Investment Transfer")
+NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES + CASHFLOW_DIRECT_CATEGORIES + ("Income", CREDITS_REFUNDS_CATEGORY)
 
 
 # Valid transfer sub-classification values
@@ -120,6 +122,26 @@ def _merchant_metadata_join_sql(tx_alias: str = "t", merchant_meta: str = "merch
         f"LEFT JOIN merchants {merchant_meta} "
         f"ON {merchant_meta}.profile_id = {tx_alias}.profile_id "
         f"AND UPPER(TRIM(COALESCE({merchant_meta}.merchant_key, ''))) = {_canonical_merchant_key_sql(tx_alias)}"
+    )
+
+
+def _merchant_display_source_sql(
+    tx_alias: str = "t",
+    merchant_alias: str = "merchant_alias",
+    merchant_meta: str = "merchant_meta",
+) -> str:
+    """SQL expression for the source of the merchant label shown in the UI."""
+    merchant_label_sql = _canonical_merchant_label_sql(tx_alias)
+    return (
+        "CASE "
+        f"WHEN NULLIF({merchant_alias}.display_name, '') IS NOT NULL "
+        f"AND UPPER(TRIM({merchant_alias}.display_name)) != UPPER(TRIM(COALESCE(NULLIF({merchant_meta}.clean_name, ''), {merchant_label_sql}, ''))) "
+        "THEN 'user' "
+        f"WHEN NULLIF({merchant_meta}.clean_name, '') IS NOT NULL "
+        f"THEN COALESCE(NULLIF({merchant_meta}.source, ''), 'directory') "
+        f"WHEN NULLIF({tx_alias}.merchant_name, '') IS NOT NULL "
+        f"THEN COALESCE(NULLIF({tx_alias}.merchant_source, ''), 'enriched') "
+        "ELSE 'raw' END"
     )
 
 
@@ -440,6 +462,7 @@ def get_transactions_paginated(
         tx_source = _transactions_source(alias="t")
         merchant_key_sql = _canonical_merchant_key_sql("t")
         merchant_label_sql = _canonical_merchant_label_sql("t")
+        merchant_source_sql = _merchant_display_source_sql("t", "merchant_alias", "merchant_meta")
         alias_join_sql = _merchant_alias_join_sql("t", "merchant_alias")
         metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
         where_clauses = []
@@ -513,7 +536,8 @@ def get_transactions_paginated(
                               COALESCE(t.reviewed, 0) as reviewed,
                               {merchant_key_sql} AS merchant_display_key,
                               COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
-                              COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
+                              COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry,
+                              {merchant_source_sql} AS merchant_display_source
                        FROM {tx_source}
                        {alias_join_sql}
                        {metadata_join_sql}
@@ -676,12 +700,18 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
             list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
 
-        # Refunds: amount > 0 AND category NOT IN non_spending AND NOT income
+        # Credits/refunds: explicit category plus temporary compatibility for
+        # positive normal-category rows until historical data is migrated.
         refunds = c.execute(
-            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income'{transfer_excl}{profile_clause}",
-            list(NON_SPENDING_CATEGORIES) + profile_params,
+            f"""SELECT COALESCE(SUM(amount), 0)
+                FROM {tx_source}
+                WHERE amount > 0
+                  AND (
+                    category = ?
+                    OR (category NOT IN ({non_spending_ph}) AND category != 'Income')
+                  ){transfer_excl}{profile_clause}""",
+            [CREDITS_REFUNDS_CATEGORY] + list(NON_SPENDING_CATEGORIES) + profile_params,
         ).fetchone()[0]
-
         # Savings: category = 'Savings Transfer'
         savings = c.execute(
             f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE category = 'Savings Transfer'{profile_clause}",
@@ -736,14 +766,45 @@ def get_summary_data(profile: str | None = None, conn=None) -> dict:
             profile_params,
         ).fetchone()[0]
 
+        cash_deposits = c.execute(
+            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE category = 'Cash Deposit' AND amount > 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+        cash_withdrawals = c.execute(
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE category = 'Cash Withdrawal' AND amount < 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+        investment_inflows = c.execute(
+            f"SELECT COALESCE(SUM(amount), 0) FROM {tx_source} WHERE category = 'Investment Transfer' AND amount > 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+        investment_outflows = c.execute(
+            f"SELECT COALESCE(SUM(ABS(amount)), 0) FROM {tx_source} WHERE category = 'Investment Transfer' AND amount < 0{profile_clause}",
+            profile_params,
+        ).fetchone()[0]
+
         net_spending = expenses - refunds
-        net_flow = income - net_spending + incoming_transfers - external_transfers
+        net_flow = (
+            income
+            + refunds
+            + incoming_transfers
+            + cash_deposits
+            + investment_inflows
+            - expenses
+            - external_transfers
+            - cash_withdrawals
+            - investment_outflows
+        )
         return {
             "income": round(income, 2),
             "expenses": round(expenses, 2),
             "refunds": round(refunds, 2),
             "credits_refunds": round(refunds, 2),
             "incoming_transfers": round(incoming_transfers, 2),
+            "cash_deposits": round(cash_deposits, 2),
+            "cash_withdrawals": round(cash_withdrawals, 2),
+            "investment_inflows": round(investment_inflows, 2),
+            "investment_outflows": round(investment_outflows, 2),
             "net_spending": round(net_spending, 2),
             "savings": round(savings, 2),
             "net_flow": round(net_flow, 2),
@@ -797,15 +858,14 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
                 SUBSTR(date, 1, 7) as month,
                 COALESCE(SUM(CASE WHEN category = 'Income' AND amount > 0 {transfer_ok} THEN amount ELSE 0 END), 0) as income,
                 COALESCE(SUM(CASE WHEN amount < 0 AND category NOT IN ({non_spending_ph}) {transfer_ok} THEN ABS(amount) ELSE 0 END), 0) as expenses,
-                COALESCE(SUM(CASE WHEN amount > 0 AND category NOT IN ({non_spending_ph}) AND category != 'Income' {transfer_ok} THEN amount ELSE 0 END), 0) as refunds,
+                COALESCE(SUM(CASE WHEN amount > 0 AND (category = ? OR (category NOT IN ({non_spending_ph}) AND category != 'Income')) {transfer_ok} THEN amount ELSE 0 END), 0) as refunds,
                 COALESCE(SUM(CASE WHEN category = 'Savings Transfer' THEN ABS(amount) ELSE 0 END), 0) as savings
             FROM {tx_source}
             WHERE LENGTH(date) >= 7{profile_clause}
             GROUP BY SUBSTR(date, 1, 7)
             ORDER BY month ASC
         """
-        # Parameters: non_spending used twice (expenses and refunds), plus profile
-        params = list(NON_SPENDING_CATEGORIES) + list(NON_SPENDING_CATEGORIES) + profile_params
+        params = list(NON_SPENDING_CATEGORIES) + [CREDITS_REFUNDS_CATEGORY] + list(NON_SPENDING_CATEGORIES) + profile_params
         rows = c.execute(sql, params).fetchall()
 
         result = []
@@ -862,14 +922,48 @@ def get_monthly_analytics_data(profile: str | None = None, conn=None) -> list[di
         incoming_rows = c.execute(incoming_sql, profile_params).fetchall()
         incoming_by_month = {row[0]: row[1] for row in incoming_rows}
 
+        direct_sql = f"""
+            SELECT SUBSTR(date, 1, 7) as month,
+                   COALESCE(SUM(CASE WHEN category = 'Cash Deposit' AND amount > 0 THEN amount ELSE 0 END), 0) AS cash_deposits,
+                   COALESCE(SUM(CASE WHEN category = 'Cash Withdrawal' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS cash_withdrawals,
+                   COALESCE(SUM(CASE WHEN category = 'Investment Transfer' AND amount > 0 THEN amount ELSE 0 END), 0) AS investment_inflows,
+                   COALESCE(SUM(CASE WHEN category = 'Investment Transfer' AND amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS investment_outflows
+            FROM {tx_source}
+            WHERE LENGTH(date) >= 7{profile_clause}
+            GROUP BY SUBSTR(date, 1, 7)
+        """
+        direct_rows = c.execute(direct_sql, profile_params).fetchall()
+        direct_by_month = {
+            row[0]: {
+                "cash_deposits": row[1],
+                "cash_withdrawals": row[2],
+                "investment_inflows": row[3],
+                "investment_outflows": row[4],
+            }
+            for row in direct_rows
+        }
+
         for entry in result:
             m = entry["month"]
+            direct = direct_by_month.get(m, {})
             entry["cc_repaid"] = round(cc_by_month.get(m, 0), 2)
             entry["external_transfers"] = round(ext_by_month.get(m, 0), 2)
             entry["incoming_transfers"] = round(incoming_by_month.get(m, 0), 2)
+            entry["cash_deposits"] = round(direct.get("cash_deposits", 0), 2)
+            entry["cash_withdrawals"] = round(direct.get("cash_withdrawals", 0), 2)
+            entry["investment_inflows"] = round(direct.get("investment_inflows", 0), 2)
+            entry["investment_outflows"] = round(direct.get("investment_outflows", 0), 2)
             entry["credits_refunds"] = entry["refunds"]
             entry["net"] = round(
-                entry["income"] - entry["expenses"] + entry["refunds"] + entry["incoming_transfers"] - entry["external_transfers"],
+                entry["income"]
+                + entry["refunds"]
+                + entry["incoming_transfers"]
+                + entry["cash_deposits"]
+                + entry["investment_inflows"]
+                - entry["expenses"]
+                - entry["external_transfers"]
+                - entry["cash_withdrawals"]
+                - entry["investment_outflows"],
                 2,
             )
 
@@ -1247,12 +1341,14 @@ def get_category_analytics_data(
         return _query(c)
 
 
-def get_plan_snapshot_data(profile: str | None = None, conn=None) -> dict:
+def get_plan_snapshot_data(
+    profile: str | None = None,
+    conn=None,
+    as_of: str | date | datetime | None = None,
+) -> dict:
     """Return compact planning metrics for the dashboard."""
-    from datetime import date as dt_date
-
     def _query(c):
-        today = dt_date.today()
+        today = _resolve_as_of_date(as_of)
         current_month = today.strftime("%Y-%m")
         days_remaining_this_month = max(0, calendar.monthrange(today.year, today.month)[1] - today.day)
         categories = get_category_analytics_data(month=current_month, profile=profile, conn=c)["categories"]
@@ -1817,6 +1913,7 @@ def get_dashboard_bundle_data(
     nw_interval: str = "biweekly",
     profile: str | None = None,
     conn=None,
+    as_of: str | date | datetime | None = None,
 ) -> dict:
     """
     Single-request dashboard data using SQL-level aggregation for summary,
@@ -1830,7 +1927,7 @@ def get_dashboard_bundle_data(
         nw_series = get_net_worth_series_data(interval=nw_interval, profile=profile, conn=c)
         nw_deltas = get_net_worth_delta_metrics(profile=profile, conn=c)
         monthly_cat_breakdown = get_monthly_category_breakdown(profile=profile, months=12, conn=c)
-        plan_snapshot = get_plan_snapshot_data(profile=profile, conn=c)
+        plan_snapshot = get_plan_snapshot_data(profile=profile, conn=c, as_of=as_of)
         review_queue = get_review_queue_data(profile=profile, conn=c)
         data_health = get_data_health_summary(profile=profile, conn=c)
         scheduled = get_scheduled_transactions_data(days=45, profile=profile, conn=c)
@@ -1850,6 +1947,10 @@ def get_dashboard_bundle_data(
             "ccRepaid": summary_out.get("cc_repaid", 0),
             "externalTransfers": summary_out.get("external_transfers", 0),
             "incomingTransfers": summary_out.get("incoming_transfers", 0),
+            "cashDeposits": summary_out.get("cash_deposits", 0),
+            "cashWithdrawals": summary_out.get("cash_withdrawals", 0),
+            "investmentInflows": summary_out.get("investment_inflows", 0),
+            "investmentOutflows": summary_out.get("investment_outflows", 0),
             "creditsRefunds": summary_out.get("credits_refunds", summary_out.get("refunds", 0)),
             "monthlyCategoryBreakdown": monthly_cat_breakdown,
             "planSnapshot": plan_snapshot,
@@ -2390,6 +2491,14 @@ def _parse_date_only(value: str | None) -> date | None:
             return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
         except Exception:
             return None
+
+
+def _resolve_as_of_date(value: str | date | datetime | None = None) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return _parse_date_only(value) or date.today()
 
 
 def get_scheduled_transactions_data(days: int = 45, profile: str | None = None, conn=None) -> dict:
@@ -3975,6 +4084,7 @@ def _post_sync_recurring(all_new_transactions: list[dict]):
                         items=result["items"],
                         events=result.get("events", []),
                         profile=prof,
+                        mode="incremental",
                     )
 
                 logger.info("Incremental recurring detection complete.")
@@ -4268,7 +4378,9 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
     with get_db() as conn:
         # Get the transaction
         row = conn.execute(
-            """SELECT description, category, amount, merchant_name, profile_id, merchant_key
+            """SELECT description, category, amount, merchant_name, profile_id,
+                      merchant_key, raw_description, account_type, transaction_type,
+                      counterparty_type, teller_category
                FROM transactions
                WHERE id = ?""",
             (tx_id,),
@@ -4283,6 +4395,29 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
         tx_merchant_name = row[3]
         tx_profile_id = row[4]
         tx_merchant_key = row[5] if len(row) > 5 else ""
+        tx_for_expense_type = {
+            "description": description,
+            "raw_description": row[6] if len(row) > 6 else "",
+            "amount": tx_amount,
+            "category": new_category,
+            "profile_id": tx_profile_id,
+            "account_type": row[7] if len(row) > 7 else "",
+            "type": row[8] if len(row) > 8 else "",
+            "counterparty_type": row[9] if len(row) > 9 else "",
+            "teller_category": row[10] if len(row) > 10 else "",
+        }
+        account_lookup = _build_account_lookup(conn)
+        new_expense_type = (
+            _classify_transfer_type(tx_for_expense_type, account_lookup)
+            if new_category in TRANSFER_CATEGORIES
+            else None
+        )
+
+        # Ensure category exists before the transaction update for FK safety.
+        conn.execute(
+            "INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)",
+            (new_category,),
+        )
 
         # Update the transaction.
         # category_pinned=1 when one-off: guards against future rule overwrites.
@@ -4293,15 +4428,10 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
                    original_category = COALESCE(original_category, ?),
                    confidence = 'manual',
                    category_pinned = ?,
+                   expense_type = ?,
                    updated_at = datetime('now')
                WHERE id = ?""",
-            (new_category, old_category, 1 if one_off else 0, tx_id),
-        )
-
-        # Ensure category exists
-        conn.execute(
-            "INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)",
-            (new_category,),
+            (new_category, old_category, 1 if one_off else 0, new_expense_type, tx_id),
         )
 
         if not one_off:
@@ -4343,7 +4473,12 @@ def update_transaction_category(tx_id: str, new_category: str, one_off: bool = F
             "subscriptions",
             "insurance",
             "utilities",
+            "internet & phone",
             "housing",
+            "rent & mortgage",
+            "auto payment",
+            "debt & loan payment",
+            "childcare",
             "debt",
         }
         if new_category.strip().lower() in recurring_categories:
@@ -4430,16 +4565,47 @@ def _apply_category_rule_to_transactions(
         where.append("id != ?")
         params.append(exclude_tx_id)
 
-    cur = conn.execute(
-        f"""UPDATE transactions
-            SET category = ?,
-                categorization_source = 'user-rule',
-                confidence = 'rule',
-                updated_at = datetime('now')
-            WHERE {' AND '.join(where)}""",
-        params,
-    )
-    return cur.rowcount
+    rows = conn.execute(
+        f"""SELECT id, profile_id, description, raw_description, amount, account_type,
+                   transaction_type, counterparty_type, teller_category
+              FROM transactions
+             WHERE {' AND '.join(where)}""",
+        params[1:],
+    ).fetchall()
+    if not rows:
+        return 0
+
+    account_lookup = _build_account_lookup(conn)
+    updated = 0
+    for row in rows:
+        tx_for_expense_type = {
+            "profile_id": row[1],
+            "description": row[2] or "",
+            "raw_description": row[3] or "",
+            "amount": row[4] or 0,
+            "category": normalized_category,
+            "account_type": row[5] or "",
+            "type": row[6] or "",
+            "counterparty_type": row[7] or "",
+            "teller_category": row[8] or "",
+        }
+        new_expense_type = (
+            _classify_transfer_type(tx_for_expense_type, account_lookup)
+            if normalized_category in TRANSFER_CATEGORIES
+            else None
+        )
+        cur = conn.execute(
+            """UPDATE transactions
+               SET category = ?,
+                   categorization_source = 'user-rule',
+                   confidence = 'rule',
+                   expense_type = ?,
+                   updated_at = datetime('now')
+               WHERE id = ?""",
+            (normalized_category, new_expense_type, row[0]),
+        )
+        updated += cur.rowcount or 0
+    return updated
 
 
 def _upsert_merchant_category_metadata(
@@ -4746,13 +4912,15 @@ def get_transactions_for_merchant(
         metadata_join_sql = _merchant_metadata_join_sql("t", "merchant_meta")
         merchant_label_sql = _canonical_merchant_label_sql("t")
         merchant_key_sql = _canonical_merchant_key_sql("t")
+        merchant_source_sql = _merchant_display_source_sql("t", "merchant_alias", "merchant_meta")
         tx_source = _transactions_source(alias="t")
         sql = f"""SELECT t.id as original_id, t.profile_id as profile, t.date, t.description,
                         t.amount, t.category, t.original_category, t.categorization_source,
                         t.account_name, t.merchant_name, t.merchant_key, t.merchant_source,
                         t.merchant_confidence, t.merchant_kind, t.is_excluded, t.updated_at,
                         COALESCE(NULLIF(merchant_alias.display_name, ''), NULLIF(merchant_meta.clean_name, ''), {merchant_label_sql}) AS merchant_display_name,
-                        COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry
+                        COALESCE(NULLIF(merchant_meta.industry, ''), NULLIF(t.merchant_industry, ''), '') AS merchant_display_industry,
+                        {merchant_source_sql} AS merchant_display_source
                  FROM {tx_source}
                  {alias_join_sql}
                  {metadata_join_sql}
@@ -4885,6 +5053,131 @@ def add_category(name: str) -> bool:
             return False
 
 
+def deactivate_category(name: str, replacement_category: str | None = None, conn=None) -> dict | None:
+    """Deactivate a custom category, optionally moving existing references first."""
+    category_name = (name or "").strip()
+    replacement = (replacement_category or "").strip() or None
+    if not category_name:
+        raise ValueError("Category name cannot be empty.")
+    if replacement and replacement == category_name:
+        raise ValueError("Replacement category must be different.")
+
+    def _update(c):
+        row = c.execute(
+            "SELECT name, is_system, is_active FROM categories WHERE name = ?",
+            (category_name,),
+        ).fetchone()
+        if not row:
+            return None
+        if int(row["is_system"] or 0) == 1:
+            raise ValueError("System categories cannot be removed.")
+        if int(row["is_active"] or 0) == 0:
+            return {
+                "category": category_name,
+                "deactivated": True,
+                "already_inactive": True,
+                "replacement_category": replacement,
+                "transactions_moved": 0,
+                "splits_moved": 0,
+                "rules_updated": 0,
+            }
+
+        tx_count = c.execute(
+            "SELECT COUNT(*) FROM transactions WHERE category = ?",
+            (category_name,),
+        ).fetchone()[0]
+        split_count = c.execute(
+            "SELECT COUNT(*) FROM transaction_splits WHERE category = ?",
+            (category_name,),
+        ).fetchone()[0]
+        budget_count = c.execute(
+            "SELECT COUNT(*) FROM category_budgets WHERE category = ?",
+            (category_name,),
+        ).fetchone()[0]
+        goal_count = c.execute(
+            "SELECT COUNT(*) FROM goals WHERE linked_category = ?",
+            (category_name,),
+        ).fetchone()[0]
+
+        transactions_moved = 0
+        splits_moved = 0
+        rules_updated = 0
+
+        if replacement:
+            replacement_row = c.execute(
+                "SELECT name FROM categories WHERE name = ? AND is_active = 1",
+                (replacement,),
+            ).fetchone()
+            if not replacement_row:
+                raise ValueError("Replacement category not found.")
+
+            transactions_moved = c.execute(
+                "UPDATE transactions SET category = ?, updated_at = datetime('now') WHERE category = ?",
+                (replacement, category_name),
+            ).rowcount or 0
+            splits_moved = c.execute(
+                "UPDATE transaction_splits SET category = ?, updated_at = datetime('now') WHERE category = ?",
+                (replacement, category_name),
+            ).rowcount or 0
+            rules_updated = c.execute(
+                "UPDATE category_rules SET category = ? WHERE category = ?",
+                (replacement, category_name),
+            ).rowcount or 0
+            c.execute(
+                "UPDATE merchants SET category = ?, updated_at = datetime('now') WHERE category = ?",
+                (replacement, category_name),
+            )
+            c.execute(
+                "UPDATE goals SET linked_category = ?, updated_at = datetime('now') WHERE linked_category = ?",
+                (replacement, category_name),
+            )
+
+            for budget in c.execute(
+                """SELECT profile_id, amount, rollover_mode, rollover_balance
+                     FROM category_budgets
+                    WHERE category = ?""",
+                (category_name,),
+            ).fetchall():
+                c.execute(
+                    """INSERT OR IGNORE INTO category_budgets
+                       (profile_id, category, amount, rollover_mode, rollover_balance)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (budget[0], replacement, budget[1], budget[2], budget[3]),
+                )
+            c.execute("DELETE FROM category_budgets WHERE category = ?", (category_name,))
+        elif tx_count or split_count or budget_count or goal_count:
+            raise ValueError("Category is still in use. Choose a replacement category first.")
+        else:
+            rules_updated = c.execute(
+                "UPDATE category_rules SET is_active = 0 WHERE category = ? AND is_active = 1",
+                (category_name,),
+            ).rowcount or 0
+            c.execute(
+                "UPDATE merchants SET category = NULL, updated_at = datetime('now') WHERE category = ?",
+                (category_name,),
+            )
+
+        c.execute("UPDATE categories SET parent_category = NULL WHERE parent_category = ?", (category_name,))
+        c.execute(
+            "UPDATE categories SET is_active = 0, parent_category = NULL WHERE name = ?",
+            (category_name,),
+        )
+
+        return {
+            "category": category_name,
+            "deactivated": True,
+            "replacement_category": replacement,
+            "transactions_moved": transactions_moved,
+            "splits_moved": splits_moved,
+            "rules_updated": rules_updated,
+        }
+
+    if conn is not None:
+        return _update(conn)
+    with get_db() as c:
+        return _update(c)
+
+
 def get_categories() -> list[str]:
     """Get all active category names."""
     with get_db() as conn:
@@ -4899,9 +5192,17 @@ def get_categories_meta(conn=None) -> list[dict]:
     def _query(c):
         rows = c.execute(
             """SELECT name, is_system, parent_category, expense_type, expense_type_source,
-                      is_active, created_at
+                      is_active, created_at,
+                      (SELECT COUNT(*)
+                         FROM transactions t
+                        WHERE t.category = categories.name
+                          AND COALESCE(t.is_excluded, 0) = 0) AS transaction_count,
+                      (SELECT COUNT(*)
+                         FROM category_rules r
+                        WHERE r.category = categories.name
+                          AND r.is_active = 1) AS active_rule_count
                FROM categories
-               ORDER BY name"""
+               ORDER BY is_active DESC, name"""
         ).fetchall()
         return dicts_from_rows(rows)
 
@@ -5937,7 +6238,8 @@ def repair_non_spending_transaction_categories(conn=None) -> int:
                FROM transactions
                WHERE amount < 0
                  AND transaction_type IN ('ach', 'transfer')
-                 AND COALESCE(categorization_source, '') NOT IN ('user', 'user-rule')"""
+                 AND COALESCE(categorization_source, '') NOT IN ('user', 'user-rule')
+                 AND COALESCE(category_pinned, 0) = 0"""
         ).fetchall()
 
         updated = 0
@@ -6017,61 +6319,15 @@ def repair_polluted_merchant_categories(conn=None) -> int:
 
 def repair_cc_income_misclassifications(conn=None) -> int:
     """
-    Fix historical CC payment inflows incorrectly categorized as Income.
-    Credit card accounts never receive income — any positive inflow tagged
-    Income is a CC bill payment. Joins on the accounts table so stale
-    account_type values in the transactions rows don't cause misses.
-    User-pinned categories are never touched.
+    Legacy hook retained for startup compatibility.
+
+    The old implementation assumed every positive credit-account Income row was
+    a Credit Card Payment. The category-first model no longer performs that live
+    mutation automatically; use scripts/audit_cashflow_category_rewrite.py to
+    review proposed historical changes before applying any migration.
     """
     def _repair(c):
-        # Fix stale account_type on CC transactions (stored as depository at
-        # sync time when balance was $0; accounts table has the correct type).
-        cc_account_ids = [
-            r[0] for r in c.execute(
-                "SELECT id FROM accounts WHERE account_type IN ('credit', 'loan')"
-            ).fetchall()
-        ]
-        if cc_account_ids:
-            ph = ",".join("?" * len(cc_account_ids))
-            c.execute(
-                f"""UPDATE transactions
-                    SET account_type = (
-                        SELECT a.account_type FROM accounts a WHERE a.id = transactions.account_id
-                    )
-                    WHERE account_id IN ({ph})
-                      AND account_type NOT IN ('credit', 'credit_card', 'loan')""",
-                cc_account_ids,
-            )
-
-        # Find Income-tagged transactions on credit accounts (join accounts for truth)
-        rows = c.execute(
-            """SELECT t.id FROM transactions t
-               JOIN accounts a ON t.account_id = a.id
-               WHERE a.account_type IN ('credit', 'loan')
-                 AND t.amount > 0
-                 AND t.category = 'Income'
-                 AND COALESCE(t.category_pinned, 0) = 0
-                 AND COALESCE(t.categorization_source, '') NOT IN ('user', 'user-rule')"""
-        ).fetchall()
-
-        if not rows:
-            return 0
-
-        ids = [r[0] for r in rows]
-        ph = ",".join("?" * len(ids))
-        c.execute(
-            f"""UPDATE transactions
-                SET category = 'Credit Card Payment',
-                    categorization_source = 'rule-high',
-                    updated_at = datetime('now')
-                WHERE id IN ({ph})""",
-            ids,
-        )
-        logger.info(
-            "repair_cc_income_misclassifications: fixed %d CC inflows miscategorized as Income.",
-            len(ids),
-        )
-        return len(ids)
+        return 0
 
     if conn is not None:
         return _repair(conn)

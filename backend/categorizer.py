@@ -16,6 +16,10 @@ from log_config import get_logger
 from privacy import mask_amount, mask_counterparty
 from database import _extract_merchant_pattern
 from merchant_identity import canonicalize_merchant_key
+from cashflow_classifier import (
+    build_batch_pair_evidence,
+    classify_cashflow_category,
+)
 import llm_client
 
 load_dotenv()
@@ -30,15 +34,34 @@ _DEFAULT_CATEGORIES = [
     "Food & Dining",
     "Groceries",
     "Transportation",
+    "Gas & Fuel",
+    "Parking & Tolls",
+    "Auto Maintenance",
+    "Vehicle Registration",
     "Entertainment",
     "Shopping",
+    "Household Supplies",
+    "Personal Care",
     "Healthcare",
     "Utilities",
+    "Internet & Phone",
     "Housing",
+    "Rent & Mortgage",
+    "Home Maintenance",
+    "Education",
+    "Childcare",
+    "Pets",
+    "Gifts & Donations",
+    "Auto Payment",
+    "Debt & Loan Payment",
     "Savings Transfer",
     "Credit Card Payment",
     "Income",
+    "Credits & Refunds",
     "Personal Transfer",
+    "Cash Withdrawal",
+    "Cash Deposit",
+    "Investment Transfer",
     "Subscriptions",
     "Fees & Charges",
     "Travel",
@@ -126,6 +149,63 @@ TAX_PATTERNS = [
     r"usataxpymt",
 ]
 
+VEHICLE_REGISTRATION_PATTERNS = [
+    r"\bdmv\b",
+    r"department\s+of\s+motor\s+vehicles",
+    r"motor\s+vehicle",
+    r"vehicle\s+registration",
+    r"registration\s+renewal",
+    r"license\s+plate",
+    r"\btags?\s+renewal\b",
+]
+
+PARKING_TOLL_PATTERNS = [
+    r"\bparking\b",
+    r"\btoll\b",
+    r"\bfastrak\b",
+    r"\bez\s*pass\b",
+    r"\bpaybyphone\b",
+    r"\bparkmobile\b",
+]
+
+FUEL_PATTERNS = [
+    r"\bshell\b",
+    r"\bchevron\b",
+    r"\bexxon\b",
+    r"\bmobil\b",
+    r"\bvalero\b",
+    r"\barco\b",
+    r"\bgas\s+station\b",
+    r"\bev\s*charging\b",
+]
+
+AUTO_MAINTENANCE_PATTERNS = [
+    r"\boil\s+change\b",
+    r"\bauto\s+repair\b",
+    r"\bcar\s+wash\b",
+    r"\btires?\b",
+    r"\bmechanic\b",
+    r"\bservice\s+center\b",
+]
+
+RENT_MORTGAGE_PATTERNS = [
+    r"\brent\b",
+    r"\bmortgage\b",
+    r"property\s+management",
+    r"apartment",
+]
+
+INTERNET_PHONE_PATTERNS = [
+    r"\bverizon\b",
+    r"\bat&t\b",
+    r"\bt-mobile\b",
+    r"\bcomcast\b",
+    r"\bxfinity\b",
+    r"\bspectrum\b",
+    r"\binternet\b",
+    r"\bmobile\s+phone\b",
+]
+
 def _matches_any(text: str, patterns: list[str]) -> bool:
     """Check if text matches any regex pattern (case-insensitive)."""
     text_lower = text.lower()
@@ -173,7 +253,11 @@ def _get_teller_category_map() -> dict[str, tuple[str | None, str]]:
     _teller_map_cache = mapping
     return _teller_map_cache
 
-def _rule_based_categorize(tx: dict) -> tuple[str | None, str]:
+def _rule_based_categorize(
+    tx: dict,
+    account_pair_evidence: dict | None = None,
+    active_categories: list[str] | None = None,
+) -> tuple[str | None, str]:
     """
     Apply deterministic rules to categorize a transaction.
 
@@ -190,6 +274,15 @@ def _rule_based_categorize(tx: dict) -> tuple[str | None, str]:
     teller_cat = (tx.get("teller_category") or "").lower()
     description = (tx.get("description") or "")
     is_credit = account_type in ("credit_card", "credit")
+
+    cashflow = classify_cashflow_category(
+        tx,
+        account_pair_evidence=account_pair_evidence,
+        active_categories=active_categories or get_active_categories(),
+    )
+    if cashflow["source"] in {"pairing", "provider", "user", "user-rule"} and cashflow["category"] != "Other":
+        confidence = "rule-high" if cashflow["confidence"] == "high" else "rule-medium"
+        return cashflow["category"], confidence
 
     # ── HIGH confidence rules (skip LLM) ──
 
@@ -229,10 +322,6 @@ def _rule_based_categorize(tx: dict) -> tuple[str | None, str]:
 
     # ── MEDIUM confidence rules (send to LLM with suggestion) ──
 
-    # Rule: Deposits into bank accounts → probably Income
-    if tx_type == "deposit" and amount > 0 and not is_credit:
-        return "Income", "rule-medium"
-
     # Rule: Tax payments
     if _matches_any(description, TAX_PATTERNS) or teller_cat == "tax":
         return "Taxes", "rule-medium"
@@ -245,12 +334,28 @@ def _rule_based_categorize(tx: dict) -> tuple[str | None, str]:
     if _matches_any(description, P2P_PATTERNS) and cp_type == "organization":
         return None, ""  # Let LLM decide
 
+    # Rule: common broad spending categories.
+    if _matches_any(description, VEHICLE_REGISTRATION_PATTERNS):
+        return "Vehicle Registration", "rule-medium"
+    if _matches_any(description, PARKING_TOLL_PATTERNS):
+        return "Parking & Tolls", "rule-medium"
+    if _matches_any(description, FUEL_PATTERNS):
+        return "Gas & Fuel", "rule-medium"
+    if _matches_any(description, AUTO_MAINTENANCE_PATTERNS):
+        return "Auto Maintenance", "rule-medium"
+    if _matches_any(description, RENT_MORTGAGE_PATTERNS):
+        return "Rent & Mortgage", "rule-medium"
+    if _matches_any(description, INTERNET_PHONE_PATTERNS):
+        return "Internet & Phone", "rule-medium"
+
     # Rule: ATM withdrawals
     if tx_type == "withdrawal":
-        return "Other", "rule-medium"
+        return "Cash Withdrawal", "rule-high"
 
     # Rule: Teller's own category hints (DB-backed mapping)
     if teller_cat:
+        if teller_cat == "income" and amount > 0 and not is_credit:
+            return None, ""
         teller_map = _get_teller_category_map()
         if teller_cat in teller_map:
             folio_cat, confidence = teller_map[teller_cat]
@@ -323,16 +428,41 @@ Important rules:
 - "Groceries" = supermarkets, grocery stores, ethnic/specialty food stores
 - "Shopping" = retail, Amazon, online shopping, general merchandise
 - "Subscriptions" = recurring services (Netflix, Spotify, cloud services, premium features)
-- "Transportation" = gas stations, parking, rideshare (Uber/Lyft), public transit, tolls
+- "Transportation" = rideshare (Uber/Lyft), public transit, taxis, general transportation when fuel/parking/auto-specific categories do not fit
+- "Gas & Fuel" = gas stations, EV charging, vehicle fuel
+- "Parking & Tolls" = parking lots/meters, toll roads, bridge tolls
+- "Auto Maintenance" = auto repairs, oil changes, tires, car washes, vehicle service
+- "Vehicle Registration" = DMV registration, tags, title, inspection, vehicle licensing
+- "Auto Payment" = car loan or lease payments
+- "Debt & Loan Payment" = student loans, personal loans, non-card debt payments
 - "Travel" = airlines, hotels, car rental, travel bookings, in-flight purchases
 - "Healthcare" = doctors, pharmacy, dental, vision, medical
 - "Insurance" = auto insurance, health insurance, home/renters insurance
-- "Utilities" = electric, water, gas, internet, phone bills
-- "Housing" = rent, mortgage, home maintenance, home improvement
+- "Utilities" = electric, water, gas, trash, sewer, other home utilities
+- "Internet & Phone" = phone, mobile, internet, cable, telecom bills
+- "Housing" = general housing costs when a more specific housing category does not fit
+- "Rent & Mortgage" = rent, mortgage, property management, housing loan payments
+- "Home Maintenance" = home repair, hardware stores, contractors, home improvement
+- "Education" = tuition, school fees, courses, books, certifications
+- "Childcare" = daycare, babysitting, child care programs
+- "Pets" = pet food, veterinary care, grooming, pet supplies
+- "Gifts & Donations" = gifts, charity, donations, religious giving
+- "Household Supplies" = household essentials, cleaning supplies, home consumables
+- "Personal Care" = haircuts, salons, grooming, wellness, fitness
 - "Entertainment" = movies, games, events, concerts, streaming (if not subscription)
 - "Fees & Charges" = bank fees, interest charges, annual fees, late fees, ATM fees
 - "Taxes" = IRS, state tax, property tax, tax payments
+- "Credits & Refunds" = statement credits, card perks, tax refunds, reimbursements, reversals, merchant refunds, one-off credits
+- "Income" = payroll, wages, salary, recurring paycheck, direct deposit with employer/payroll evidence
+- "Credit Card Payment" = negative depository outflow paying a card/credit account; positive credit-card rows are only card payments when paired to a depository outflow
 - "Personal Transfer" = person-to-person payments (Zelle, Venmo to individuals)
+- "Cash Withdrawal" = ATM or branch cash withdrawn from a bank account; not merchant spending
+- "Cash Deposit" = ATM or branch cash deposited into a bank account; not paycheck income
+- "Investment Transfer" = brokerage/crypto transfers such as Coinbase, Gemini, Robinhood, Fidelity, Schwab, Vanguard; positive bank inflows are investment inflows, not paycheck income
+- User-created categories are valid, but use them only when the transaction clearly matches the custom category. Prefer a broader system category when evidence is weak.
+- Positive transactions on credit-card accounts are usually "Credits & Refunds" unless same-amount account-pair evidence proves they are card payments
+- Tax refunds, reimbursements, statement credits, merchant refunds, and one-off credits are "Credits & Refunds", not paycheck income
+- Positive bank inflows are "Income" only with payroll/direct-deposit/employer/wage/salary evidence. If unsure, use "Other" instead of forcing a special category
 - Be specific — prefer the most accurate category over "Other"
 
 Transactions:
@@ -451,6 +581,7 @@ def categorize_transactions(
 
     # Phase 1.5: Enrich via Trove (adds merchant_name, industry, etc.)
     sanitized = enrich_transactions(sanitized)
+    pair_evidence_by_index = build_batch_pair_evidence(sanitized)
 
     # Phase 1.6: Apply DB-backed rules (user overrides first, then editable system defaults)
     db_rule_count = 0
@@ -489,6 +620,8 @@ def categorize_transactions(
         tx_profile = tx.get("profile") or tx.get("profile_id") or ""
         for rule in db_rules:
             pattern, match_type, category, source, rule_profile_id = rule[0], rule[1], rule[2], rule[3], rule[4]
+            if source != "user":
+                continue
             if rule_profile_id and rule_profile_id != tx_profile:
                 continue
             if match_type == "contains":
@@ -527,7 +660,11 @@ def categorize_transactions(
         if (tx.get("categorization_source") or "").endswith("-rule"):
             continue
 
-        category, confidence = _rule_based_categorize(tx)
+        category, confidence = _rule_based_categorize(
+            tx,
+            account_pair_evidence=pair_evidence_by_index.get(i),
+            active_categories=get_active_categories(),
+        )
         merchant_key = (tx.get("profile", ""), canonicalize_merchant_key(tx.get("merchant_key") or tx.get("merchant_name") or ""))
         memory = merchant_memory.get(merchant_key)
 
@@ -680,15 +817,5 @@ def categorize_transactions(
             orig_id = tx.get("original_id", "")
             if orig_id in _source_profiles:
                 tx["profile"] = _source_profiles[orig_id]
-
-        # Guard: credit card accounts never receive income — any positive inflow
-        # categorized as Income is a CC bill payment, not real income.
-        # Merchant refunds land in their original expense category (e.g. Shopping),
-        # not Income, so they are unaffected by this override.
-        acct_type = (tx.get("account_type") or "")
-        if acct_type in ("credit_card", "credit") and tx.get("category") == "Income":
-            tx["category"] = "Credit Card Payment"
-            tx["confidence"] = "rule"
-            tx["categorization_source"] = "rule-high"
 
     return sanitized

@@ -71,7 +71,7 @@ def _top_categories_current_month(profile: str | None, conn) -> str:
               AND is_excluded = 0
               AND category IS NOT NULL
               AND category != ''
-              AND category NOT IN ('Savings Transfer','Credit Card Payment','Income','Personal Transfer')
+              AND category NOT IN ('Savings Transfer','Credit Card Payment','Income','Credits & Refunds','Personal Transfer')
               AND date LIKE ?
               AND (? IS NULL OR profile_id = ?)
             GROUP BY category
@@ -100,7 +100,7 @@ def _top_merchants_current_month(profile: str | None, conn) -> str:
             FROM transactions_visible
             WHERE amount < 0
               AND is_excluded = 0
-              AND category NOT IN ('Savings Transfer','Credit Card Payment','Income','Personal Transfer')
+              AND category NOT IN ('Savings Transfer','Credit Card Payment','Income','Credits & Refunds','Personal Transfer')
               AND date LIKE ?
               AND (? IS NULL OR profile_id = ?)
             GROUP BY COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, ''), description)

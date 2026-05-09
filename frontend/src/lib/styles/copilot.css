@@ -1122,6 +1122,59 @@
     margin-top: 14px;
 }
 
+.copilot-receipt-draft-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.copilot-receipt-draft-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    padding: 10px 12px;
+    text-align: left;
+    transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.copilot-receipt-draft-row:hover,
+.copilot-receipt-draft-row-active {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent) 34%, var(--card-border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--card-bg));
+}
+
+.copilot-receipt-draft-row strong,
+.copilot-receipt-draft-row small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.copilot-receipt-draft-row strong {
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.copilot-receipt-draft-row small {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.copilot-receipt-draft-row .material-symbols-outlined {
+    color: var(--text-muted);
+    font-size: 18px;
+}
+
 .copilot-receipt-error {
     margin-top: 12px;
     border: 1px solid color-mix(in srgb, #ef4444 45%, var(--card-border));

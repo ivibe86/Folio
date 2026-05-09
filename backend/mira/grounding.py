@@ -246,7 +246,7 @@ def _load_merchant_entities(profile: str | None = None) -> list[_Entity]:
         AND COALESCE(NULLIF(merchant_key, ''), NULLIF(merchant_name, '')) != ''
         AND amount < 0
         AND is_excluded = 0
-        AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income')
+        AND category NOT IN ('Savings Transfer','Personal Transfer','Credit Card Payment','Income','Credits & Refunds')
         AND (expense_type IS NULL OR expense_type NOT IN ('transfer_internal','transfer_household'))
         {p_clause}
     """

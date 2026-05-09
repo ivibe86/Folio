@@ -1,12 +1,12 @@
 <script>
     import '../app.css';
     import { page } from '$app/stores';
-    import { beforeNavigate, afterNavigate } from '$app/navigation';    
+    import { beforeNavigate, afterNavigate, goto } from '$app/navigation';    
     import { darkMode, syncing } from '$lib/stores.js';
     import { api } from '$lib/api.js';
     import { relativeTime } from '$lib/utils.js';
     import { onMount } from 'svelte';
-    import { loadProfiles } from '$lib/stores/profileStore.js';
+    import { activeProfile, loadProfiles } from '$lib/stores/profileStore.js';
 
     let lastSynced = null;
     let syncPollTimer = null;
@@ -14,6 +14,8 @@
     let currentSyncKey = null;
     let backendSyncSeen = false;
     let noBackendSyncSeenCount = 0;
+    let receiptToast = null;
+    let receiptToastTimer = null;
     let appConfig = {
         demoMode: false,
         manualSyncEnabled: true,
@@ -150,6 +152,29 @@
         setTimeout(pollSyncStatus, 250);
     }
 
+    function dismissReceiptToast() {
+        if (receiptToastTimer) {
+            clearTimeout(receiptToastTimer);
+            receiptToastTimer = null;
+        }
+        receiptToast = null;
+    }
+
+    function showReceiptToast(event) {
+        receiptToast = event.detail || null;
+        if (!receiptToast?.receiptId) return;
+        if (receiptToastTimer) clearTimeout(receiptToastTimer);
+        receiptToastTimer = setTimeout(dismissReceiptToast, 12000);
+    }
+
+    function reviewReceiptToast() {
+        if (!receiptToast?.receiptId) return;
+        const profile = receiptToast.profile || 'household';
+        activeProfile.set(profile);
+        goto(`/copilot?receipt=${encodeURIComponent(receiptToast.receiptId)}&receiptProfile=${encodeURIComponent(profile)}`);
+        dismissReceiptToast();
+    }
+
     /* —— Mouse tracking —— */
     let mouseX = '50%';
     let mouseY = '50%';
@@ -211,9 +236,12 @@
             } catch (_) {}
         }, 100);
         window.addEventListener('mousemove', handleCardMouseMove, { passive: true });
+        window.addEventListener('folio:receipt-parse-done', showReceiptToast);
         return () => {
             stopSyncStatusPolling();
             window.removeEventListener('mousemove', handleCardMouseMove);
+            window.removeEventListener('folio:receipt-parse-done', showReceiptToast);
+            if (receiptToastTimer) clearTimeout(receiptToastTimer);
         };
     });
 
@@ -588,7 +616,115 @@
     </div>
 </main>
 
+{#if receiptToast}
+    <aside class="receipt-ready-toast fade-in" aria-live="polite">
+        <span class="receipt-ready-toast-icon material-symbols-outlined">receipt_long</span>
+        <div class="receipt-ready-toast-copy">
+            <strong>Receipt parsing is done</strong>
+            <span>{receiptToast.storeName || receiptToast.fileName || 'Receipt'} is ready to validate.</span>
+        </div>
+        <button type="button" class="receipt-ready-toast-review" on:click={reviewReceiptToast}>Review</button>
+        <button type="button" class="receipt-ready-toast-close" on:click={dismissReceiptToast} aria-label="Dismiss receipt notification">
+            <span class="material-symbols-outlined">close</span>
+        </button>
+    </aside>
+{/if}
+
 <style>
+
+    .receipt-ready-toast {
+        position: fixed;
+        right: 1.25rem;
+        top: 5.25rem;
+        z-index: 70;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        align-items: center;
+        gap: 0.6rem;
+        width: min(400px, calc(100vw - 2rem));
+        padding: 0.65rem;
+        border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--card-border));
+        border-radius: 0.85rem;
+        background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+        box-shadow: var(--card-shadow-hover);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+    }
+
+    .receipt-ready-toast-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        border-radius: 0.65rem;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        color: var(--accent);
+        font-size: 1rem;
+    }
+
+    .receipt-ready-toast-copy {
+        min-width: 0;
+    }
+
+    .receipt-ready-toast-copy strong,
+    .receipt-ready-toast-copy span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .receipt-ready-toast-copy strong {
+        color: var(--text-primary);
+        font-size: 0.82rem;
+        font-weight: 800;
+    }
+
+    .receipt-ready-toast-copy span {
+        color: var(--text-muted);
+        font-size: 0.68rem;
+        font-weight: 650;
+    }
+
+    .receipt-ready-toast-review,
+    .receipt-ready-toast-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--card-border);
+        border-radius: 0.6rem;
+        min-height: 1.9rem;
+        background: var(--card-bg);
+        color: var(--text-secondary);
+        font-size: 0.68rem;
+        font-weight: 800;
+    }
+
+    .receipt-ready-toast-review {
+        padding: 0 0.65rem;
+        border-color: color-mix(in srgb, var(--accent) 34%, var(--card-border));
+        background: var(--accent);
+        color: white;
+    }
+
+    .receipt-ready-toast-close {
+        width: 1.9rem;
+        color: var(--text-muted);
+    }
+
+    .receipt-ready-toast-close .material-symbols-outlined {
+        font-size: 1rem;
+    }
+
+    @media (max-width: 760px) {
+        .receipt-ready-toast {
+            right: 1rem;
+            left: 1rem;
+            top: 4.25rem;
+            width: auto;
+        }
+    }
 
     /* ———————————————————————————————————————————
        GLASS RAIL v3 — Unified Glass Navigation

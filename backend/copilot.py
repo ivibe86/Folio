@@ -315,7 +315,7 @@ def _validate_read_semantics(question: str, sql: str) -> tuple[bool, str]:
             return (
                 False,
                 "Spending queries must exclude non-spending categories: "
-                "'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', and 'Income'.",
+                "'Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income', and 'Credits & Refunds'.",
             )
 
     merchant_report = (

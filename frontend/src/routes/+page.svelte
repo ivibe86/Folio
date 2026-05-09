@@ -64,6 +64,10 @@
     let periodExternalTransfers = 0;
     let periodIncomingTransfers = 0;
     let periodCreditsRefunds = 0;
+    let periodCashDeposits = 0;
+    let periodCashWithdrawals = 0;
+    let periodInvestmentInflows = 0;
+    let periodInvestmentOutflows = 0;
 
     // Sankey: separated flows
     let sankeySavingsTotal = 0;
@@ -122,7 +126,7 @@
     let accountDeltas = {};
 
     // Categories to exclude from expenses (flow directly from income)
-    const DIRECT_FLOW_CATEGORIES = ['Savings Transfer', 'Personal Transfer'];
+    const DIRECT_FLOW_CATEGORIES = ['Savings Transfer', 'Personal Transfer', 'Cash Withdrawal', 'Investment Transfer'];
 
 
     // Transfer sub-types for Sankey filtering
@@ -131,7 +135,7 @@
     const TRANSFER_EXTERNAL = 'transfer_external';
 
     // Fixed vs Variable spending
-    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const NON_SPENDING_CATEGORIES_SET = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Cash Withdrawal', 'Cash Deposit', 'Investment Transfer', 'Income', 'Credits & Refunds']);
     const CREDIT_DRILLDOWN_CATEGORY = 'Credits & Refunds';
     const CREDIT_DRILLDOWN_COLOR = '#059669';
     let editingExpenseType = null;
@@ -154,15 +158,17 @@
         sankeyCategoryList.some((cat) => !cat.isDirectFlow && (cat.total || 0) > 0) ||
         sankeySavingsTotal > 0 ||
         sankeyPersonalTransferTotal > 0 ||
-        (periodSummary?.credits_refunds || 0) > 0 ||
-        (periodSummary?.incoming_transfers || 0) > 0 ||
-        (periodSummary?.cc_repaid || 0) > 0;
+        (periodSummary?.cash_deposits || 0) > 0 ||
+        (periodSummary?.cash_withdrawals || 0) > 0 ||
+        (periodSummary?.investment_inflows || 0) > 0 ||
+        (periodSummary?.investment_outflows || 0) > 0;
     $: heroLoading = isRefreshing || enrollmentLoadingActive || forceHeroLoading;
     $: metricLoading = periodLoading || isRefreshing || enrollmentLoadingActive || forceMetricLoading;
     $: sankeyLoading = periodLoading || isRefreshing || sankeySyncActive || forceSankeyLiveLoading || forceSankeyEmptyLoading;
     $: showSankeyLoadingStage = forceSankeyEmptyLoading || (sankeyLoading && !hasRenderableSankeyData);
     $: showLiveSankeySyncState = sankeyLoading && hasRenderableSankeyData && !showSankeyLoadingStage;
-    $: showSankeyChart = Boolean(periodSummary) && !showSankeyLoadingStage && !showLiveSankeySyncState;
+    $: showSankeyEmptyState = Boolean(periodSummary) && !sankeyLoading && !hasRenderableSankeyData;
+    $: showSankeyChart = Boolean(periodSummary) && hasRenderableSankeyData && !showSankeyLoadingStage && !showLiveSankeySyncState;
     function handleTheaterMouseMove(e) {
         if (!sankeyTheaterEl) return;
         const rect = sankeyTheaterEl.getBoundingClientRect();
@@ -234,6 +240,10 @@
     let bundleCcRepaid = data.ccRepaid || 0;
     let bundleExternalTransfers = data.externalTransfers || 0;
     let bundleIncomingTransfers = data.incomingTransfers || 0;
+    let bundleCashDeposits = data.cashDeposits || summary?.cash_deposits || 0;
+    let bundleCashWithdrawals = data.cashWithdrawals || summary?.cash_withdrawals || 0;
+    let bundleInvestmentInflows = data.investmentInflows || summary?.investment_inflows || 0;
+    let bundleInvestmentOutflows = data.investmentOutflows || summary?.investment_outflows || 0;
     let bundleCreditsRefunds = data.creditsRefunds || summary?.credits_refunds || summary?.refunds || 0;
     let monthlyCategoryBreakdown = data.monthlyCategoryBreakdown || [];
     let planSnapshot = data.planSnapshot || null;
@@ -304,6 +314,10 @@
             bundleCcRepaid = bundle.ccRepaid || 0;
             bundleExternalTransfers = bundle.externalTransfers || 0;
             bundleIncomingTransfers = bundle.incomingTransfers || 0;
+            bundleCashDeposits = bundle.cashDeposits || bundle.summary?.cash_deposits || 0;
+            bundleCashWithdrawals = bundle.cashWithdrawals || bundle.summary?.cash_withdrawals || 0;
+            bundleInvestmentInflows = bundle.investmentInflows || bundle.summary?.investment_inflows || 0;
+            bundleInvestmentOutflows = bundle.investmentOutflows || bundle.summary?.investment_outflows || 0;
             bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
             monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
             planSnapshot = bundle.planSnapshot || null;
@@ -405,6 +419,10 @@
                     bundleCcRepaid = bundle.ccRepaid || 0;
                     bundleExternalTransfers = bundle.externalTransfers || 0;
                     bundleIncomingTransfers = bundle.incomingTransfers || 0;
+                    bundleCashDeposits = bundle.cashDeposits || bundle.summary?.cash_deposits || 0;
+                    bundleCashWithdrawals = bundle.cashWithdrawals || bundle.summary?.cash_withdrawals || 0;
+                    bundleInvestmentInflows = bundle.investmentInflows || bundle.summary?.investment_inflows || 0;
+                    bundleInvestmentOutflows = bundle.investmentOutflows || bundle.summary?.investment_outflows || 0;
                     bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
                     monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
                     planSnapshot = bundle.planSnapshot || null;
@@ -877,11 +895,12 @@
             // this_month, last_month, custom â use monthly data from bundle
             const m = monthly.find(m => m.month === targetMonth);
             inc = m ? m.income : 0;
-            // For single-month, we don't have month-specific categories from
-            // the bundle (it's all-time). Fire a lightweight background refresh.
-            periodCategories = categories;
-            sankeySavingsTotal = bundleSavingsTransferTotal;
-            sankeyPersonalTransferTotal = bundlePersonalTransferTotal;
+            // The bundle categories are all-time, so do not use them for a
+            // single-month Sankey. Keep the flow empty until the exact month
+            // refresh below returns.
+            periodCategories = [];
+            sankeySavingsTotal = 0;
+            sankeyPersonalTransferTotal = 0;
 
             // Kick off the precise month-specific fetch in the background
             // so the Sankey updates within ~200ms without blocking first paint.
@@ -889,12 +908,29 @@
         }
 
         sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-        // Use bundle-level CC repaid and external transfers for initial period
-        periodCcRepaid = bundleCcRepaid;
-        periodExternalTransfers = bundleExternalTransfers;
-        periodIncomingTransfers = bundleIncomingTransfers;
-        periodCreditsRefunds = bundleCreditsRefunds;
-        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
+        if (selectedPeriod === 'this_month' || selectedPeriod === 'last_month' || selectedPeriod === 'custom') {
+            const monthData = monthly.find(m => m.month === targetMonth);
+            periodCcRepaid = monthData?.cc_repaid || 0;
+            periodExternalTransfers = monthData?.external_transfers || 0;
+            periodIncomingTransfers = monthData?.incoming_transfers || 0;
+            periodCreditsRefunds = monthData?.credits_refunds ?? monthData?.refunds ?? 0;
+            periodCashDeposits = monthData?.cash_deposits || 0;
+            periodCashWithdrawals = monthData?.cash_withdrawals || 0;
+            periodInvestmentInflows = monthData?.investment_inflows || 0;
+            periodInvestmentOutflows = monthData?.investment_outflows || 0;
+        } else {
+            // Use bundle-level totals for all-time/YTD bootstrap; exact YTD is
+            // refreshed by updatePeriod() after mount.
+            periodCcRepaid = bundleCcRepaid;
+            periodExternalTransfers = bundleExternalTransfers;
+            periodIncomingTransfers = bundleIncomingTransfers;
+            periodCreditsRefunds = bundleCreditsRefunds;
+            periodCashDeposits = bundleCashDeposits;
+            periodCashWithdrawals = bundleCashWithdrawals;
+            periodInvestmentInflows = bundleInvestmentInflows;
+            periodInvestmentOutflows = bundleInvestmentOutflows;
+        }
+        periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers, periodCashDeposits, periodCashWithdrawals, periodInvestmentInflows, periodInvestmentOutflows);
         periodLoading = false;
     }
 
@@ -909,6 +945,7 @@
                 savings_transfer_total: sankeySavingsTotal,
                 personal_transfer_total: sankeyPersonalTransferTotal
             }));
+            if (targetMonth !== getMonthForPeriod(selectedPeriod)) return;
             if (Array.isArray(catResult)) {
                 periodCategories = catResult;
             } else {
@@ -922,8 +959,12 @@
             periodExternalTransfers = monthData?.external_transfers || 0;
             periodIncomingTransfers = monthData?.incoming_transfers || 0;
             periodCreditsRefunds = monthData?.credits_refunds ?? monthData?.refunds ?? 0;
+            periodCashDeposits = monthData?.cash_deposits || 0;
+            periodCashWithdrawals = monthData?.cash_withdrawals || 0;
+            periodInvestmentInflows = monthData?.investment_inflows || 0;
+            periodInvestmentOutflows = monthData?.investment_outflows || 0;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
+            periodSummary = buildPeriodSummary(income, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers, periodCashDeposits, periodCashWithdrawals, periodInvestmentInflows, periodInvestmentOutflows);
         } catch (_) {}
     }
 
@@ -1060,7 +1101,17 @@
 
     $: sankeyPillList = (() => {
         const flows = [...sankeyCategoryList];
+        const directFlows = [
+            { category: 'Cash Deposit', total: periodSummary?.cash_deposits || 0, isDirectFlow: true },
+            { category: 'Cash Withdrawal', total: periodSummary?.cash_withdrawals || 0, isDirectFlow: true },
+            {
+                category: 'Investment Transfer',
+                total: (periodSummary?.investment_inflows || 0) + (periodSummary?.investment_outflows || 0),
+                isDirectFlow: true
+            },
+        ].filter((item) => item.total > 0);
         const creditsTotal = periodSummary?.credits_refunds || 0;
+        flows.unshift(...directFlows);
         if (creditsTotal > 0) {
             flows.unshift({
                 category: CREDIT_DRILLDOWN_CATEGORY,
@@ -1082,12 +1133,33 @@
         return CATEGORY_ICONS[category] || 'label';
     }
 
-    function buildPeriodSummary(income, cats, savingsTotal, personalTransferTotal, ccRepaid = 0, externalTransfers = 0, creditsRefunds = 0, incomingTransfers = 0) {
+    function buildPeriodSummary(
+        income,
+        cats,
+        savingsTotal,
+        personalTransferTotal,
+        ccRepaid = 0,
+        externalTransfers = 0,
+        creditsRefunds = 0,
+        incomingTransfers = 0,
+        cashDeposits = 0,
+        cashWithdrawals = 0,
+        investmentInflows = 0,
+        investmentOutflows = 0
+    ) {
         const expenseCats = (cats || []).filter(c => !DIRECT_FLOW_CATEGORIES.includes(c.category));
         const expenses = expenseCats.reduce((s, c) => s + (c.gross ?? c.total ?? 0), 0);
-        // Cash-flow Net Flow: Income + credits + incoming transfers - Spending - outgoing transfers
+        // Cash-flow Net Flow: Income + credits + incoming direct flows - Spending - outgoing direct flows
         // CC payments and internal transfers are excluded
-        const netFlow = income + creditsRefunds + incomingTransfers - expenses - externalTransfers;
+        const netFlow = income
+            + creditsRefunds
+            + incomingTransfers
+            + cashDeposits
+            + investmentInflows
+            - expenses
+            - externalTransfers
+            - cashWithdrawals
+            - investmentOutflows;
         const savings = Math.max(income - expenses, 0);
         return {
             income, expenses, savings,
@@ -1096,6 +1168,10 @@
             cc_repaid: ccRepaid,
             external_transfers: externalTransfers,
             incoming_transfers: incomingTransfers,
+            cash_deposits: cashDeposits,
+            cash_withdrawals: cashWithdrawals,
+            investment_inflows: investmentInflows,
+            investment_outflows: investmentOutflows,
             credits_refunds: creditsRefunds,
             net_flow: netFlow,
             savings_rate: sanitizeSavingsRate(income, expenses, savings)
@@ -1133,8 +1209,12 @@
             periodExternalTransfers = summary?.external_transfers || bundleExternalTransfers;
             periodIncomingTransfers = summary?.incoming_transfers || bundleIncomingTransfers;
             periodCreditsRefunds = summary?.credits_refunds ?? summary?.refunds ?? bundleCreditsRefunds;
+            periodCashDeposits = summary?.cash_deposits || bundleCashDeposits;
+            periodCashWithdrawals = summary?.cash_withdrawals || bundleCashWithdrawals;
+            periodInvestmentInflows = summary?.investment_inflows || bundleInvestmentInflows;
+            periodInvestmentOutflows = summary?.investment_outflows || bundleInvestmentOutflows;
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers, periodCashDeposits, periodCashWithdrawals, periodInvestmentInflows, periodInvestmentOutflows);
         } else if (selectedPeriod === 'ytd') {
             const year = new Date().getFullYear().toString();
             const ytdMonths = monthly.filter(m => m.month.startsWith(year));
@@ -1160,8 +1240,12 @@
             periodExternalTransfers = ytdMonths.reduce((s, m) => s + (m.external_transfers || 0), 0);
             periodIncomingTransfers = ytdMonths.reduce((s, m) => s + (m.incoming_transfers || 0), 0);
             periodCreditsRefunds = ytdMonths.reduce((s, m) => s + (m.credits_refunds ?? m.refunds ?? 0), 0);
+            periodCashDeposits = ytdMonths.reduce((s, m) => s + (m.cash_deposits || 0), 0);
+            periodCashWithdrawals = ytdMonths.reduce((s, m) => s + (m.cash_withdrawals || 0), 0);
+            periodInvestmentInflows = ytdMonths.reduce((s, m) => s + (m.investment_inflows || 0), 0);
+            periodInvestmentOutflows = ytdMonths.reduce((s, m) => s + (m.investment_outflows || 0), 0);
             sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
+            periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers, periodCashDeposits, periodCashWithdrawals, periodInvestmentInflows, periodInvestmentOutflows);
         } else {
             const targetMonth = getMonthForPeriod(selectedPeriod);
             if (targetMonth) {
@@ -1188,10 +1272,14 @@
                     periodExternalTransfers = monthData?.external_transfers || 0;
                     periodIncomingTransfers = monthData?.incoming_transfers || 0;
                     periodCreditsRefunds = monthData?.credits_refunds ?? monthData?.refunds ?? 0;
+                    periodCashDeposits = monthData?.cash_deposits || 0;
+                    periodCashWithdrawals = monthData?.cash_withdrawals || 0;
+                    periodInvestmentInflows = monthData?.investment_inflows || 0;
+                    periodInvestmentOutflows = monthData?.investment_outflows || 0;
                     sankeyCategoryList = buildSankeyCategoryList(periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal);
-                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers);
+                    periodSummary = buildPeriodSummary(inc, periodCategories, sankeySavingsTotal, sankeyPersonalTransferTotal, periodCcRepaid, periodExternalTransfers, periodCreditsRefunds, periodIncomingTransfers, periodCashDeposits, periodCashWithdrawals, periodInvestmentInflows, periodInvestmentOutflows);
             } else {
-                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, cc_repaid: 0, external_transfers: 0, incoming_transfers: 0, credits_refunds: 0, net_flow: 0, savings_rate: 0 };
+                periodSummary = { income: 0, expenses: 0, savings: 0, savingsTransfer: 0, personalTransfer: 0, cc_repaid: 0, external_transfers: 0, incoming_transfers: 0, cash_deposits: 0, cash_withdrawals: 0, investment_inflows: 0, investment_outflows: 0, credits_refunds: 0, net_flow: 0, savings_rate: 0 };
                 periodCategories = [];
                 sankeyCategoryList = [];
                 sankeySavingsTotal = 0;
@@ -1280,6 +1368,10 @@
             bundleCcRepaid = bundle.ccRepaid || 0;
             bundleExternalTransfers = bundle.externalTransfers || 0;
             bundleIncomingTransfers = bundle.incomingTransfers || 0;
+            bundleCashDeposits = bundle.cashDeposits || bundle.summary?.cash_deposits || 0;
+            bundleCashWithdrawals = bundle.cashWithdrawals || bundle.summary?.cash_withdrawals || 0;
+            bundleInvestmentInflows = bundle.investmentInflows || bundle.summary?.investment_inflows || 0;
+            bundleInvestmentOutflows = bundle.investmentOutflows || bundle.summary?.investment_outflows || 0;
             bundleCreditsRefunds = bundle.creditsRefunds || bundle.summary?.credits_refunds || bundle.summary?.refunds || 0;
             monthlyCategoryBreakdown = bundle.monthlyCategoryBreakdown || [];
             planSnapshot = bundle.planSnapshot || null;
@@ -1630,7 +1722,7 @@
     // Sankey drill-down
     function isCreditRefundTransaction(tx) {
         const amount = parseFloat(tx?.amount || 0);
-        return amount > 0 && tx?.category !== 'Income' && !NON_SPENDING_CATEGORIES_SET.has(tx?.category);
+        return amount > 0 && (tx?.category === 'Credits & Refunds' || (tx?.category !== 'Income' && !NON_SPENDING_CATEGORIES_SET.has(tx?.category)));
     }
 
     async function fetchSankeyPeriodTransactions(targetMonth) {
@@ -2998,9 +3090,9 @@
     <!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
          S2: COMPACT METRIC RIBBON
          ═══════════════════════════════════════════════════════ -->
-    <section class="mb-6 fade-in-up" style="animation-delay: 100ms">
-        <div class="flex flex-col gap-3 mb-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 class="folio-section-title">Income & Spending</h3>
+    <section class="dashboard-income-section mb-5 fade-in-up" style="animation-delay: 100ms">
+        <div class="flex flex-col gap-2 mb-2 sm:flex-row sm:items-center sm:justify-between">
+            <h3 class="folio-section-title dashboard-income-title">Income & Spending</h3>
             <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <div class="period-toggle-track" style="--seg-count: {periodOptions.length}; --active-idx: {activePeriodIdx};">
                     <div class="period-toggle-thumb"></div>
@@ -3134,8 +3226,8 @@
     <!-- ═══════════════════════════════════════════════════════
          S3: MONEY FLOW (SANKEY)
          ═══════════════════════════════════════════════════════ -->
-    <section class="mb-10 fade-in-up" style="animation-delay: 140ms">
-        <div class="flex items-center justify-between mb-4">
+    <section class="mb-8 fade-in-up" style="animation-delay: 140ms">
+        <div class="flex items-center justify-between mb-3">
             <div class="flex items-center gap-2">
                 <h3 class="folio-section-title">Money Flow</h3>
                 {#if debugLoadingMode}
@@ -3160,7 +3252,7 @@
             {/if}
         </div>
 
-        <div class="sankey-theater"
+        <div class="sankey-theater dashboard-sankey-theater"
              role="region"
              aria-label="Cash flow Sankey chart"
              class:sankey-loading={sankeyLoading}
@@ -3172,7 +3264,12 @@
             {/if}
             <div class="sankey-theater-glow" style="opacity: {sankeyGlowOpacity};"></div>
             {#if showSankeyLoadingStage}
-                <SankeyLoadingStage height={340} />
+                <SankeyLoadingStage height={320} />
+            {/if}
+            {#if showSankeyEmptyState}
+                <div class="sankey-empty-state" style="height: 320px;">
+                    No money flow for this period
+                </div>
             {/if}
             {#if showSankeyChart}
                 <div class="sankey-chart-shell">
@@ -3181,19 +3278,23 @@
                         expenses={periodSummary.expenses}
                         creditsRefunds={periodSummary.credits_refunds || 0}
                         incomingTransfers={periodSummary.incoming_transfers || 0}
+                        cashDeposits={periodSummary.cash_deposits || 0}
+                        cashWithdrawals={periodSummary.cash_withdrawals || 0}
+                        investmentInflows={periodSummary.investment_inflows || 0}
+                        investmentOutflows={periodSummary.investment_outflows || 0}
                         savingsTransfer={sankeySavingsTotal}
                         personalTransfer={sankeyPersonalTransferTotal}
                         ccRepaid={periodSummary.cc_repaid || 0}
                         categories={sankeyCategoryList.filter(c => !c.isDirectFlow)}
                         selectedCategory={selectedSankeyCategory}
-                        height={340}
+                        height={320}
                         autoHeight={true}
                         on:select={handleSankeySelect}
                     />
                 </div>
             {/if}
             {#if showLiveSankeySyncState}
-                <SankeyLoadingStage mode="sync" height={340} eyebrow="Syncing money flow" />
+                <SankeyLoadingStage mode="sync" height={320} eyebrow="Syncing money flow" />
             {/if}
         </div>
 

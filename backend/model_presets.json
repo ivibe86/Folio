@@ -45,7 +45,7 @@
     "32gb": {
       "preset": "balanced",
       "categorize_model": "gemma4:e4b",
-      "copilot_model": "gemma4:26b"
+      "copilot_model": "gemma4:e4b"
     }
   },
   "models": {

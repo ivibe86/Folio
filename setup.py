@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from setup_helpers import (
@@ -37,6 +38,8 @@ CERTS_DIR = ROOT_DIR / "certs"
 DATA_DIR = ROOT_DIR / "data"
 BACKEND_DIR = ROOT_DIR / "backend"
 FRONTEND_DIR = ROOT_DIR / "frontend"
+DEPENDENCY_COOLDOWN_DAYS = int(os.environ.get("FOLIO_DEPENDENCY_COOLDOWN_DAYS", "7"))
+PIP_VERSION = os.environ.get("FOLIO_PIP_VERSION", "26.0.1")
 
 OLLAMA_DOWNLOAD_URLS = {
     "macos": "https://ollama.com/download/mac",
@@ -53,6 +56,11 @@ NODE_DOWNLOAD_URLS = {
     "windows": "https://nodejs.org/en/download",
 }
 MODEL_PRESETS = load_model_presets(ROOT_DIR)
+
+
+def dependency_cutoff_iso(days: int = DEPENDENCY_COOLDOWN_DAYS) -> str:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return cutoff.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def ask(prompt: str, default: str | None = None, required: bool = False) -> str:
@@ -797,21 +805,43 @@ def start_local():
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
 
     if sys.platform.startswith("win"):
-        pip = str(venv_dir / "Scripts" / "pip")
         python = str(venv_dir / "Scripts" / "python")
     else:
-        pip = str(venv_dir / "bin" / "pip")
         python = str(venv_dir / "bin" / "python")
 
-    ui.info("Installing backend dependencies...")
-    subprocess.run([pip, "install", "-r", str(BACKEND_DIR / "requirements.txt")], check=True)
+    cutoff = dependency_cutoff_iso()
+
+    ui.info(f"Installing backend dependencies with a {DEPENDENCY_COOLDOWN_DAYS}-day PyPI cooldown...")
+    subprocess.run([python, "-m", "pip", "install", "--upgrade", f"pip=={PIP_VERSION}"], check=True)
+    subprocess.run(
+        [
+            python,
+            "-m",
+            "pip",
+            "install",
+            "--require-hashes",
+            f"--uploaded-prior-to={cutoff}",
+            "-r",
+            str(BACKEND_DIR / "requirements.lock"),
+        ],
+        check=True,
+    )
 
     if not (FRONTEND_DIR / "node_modules").exists():
-        ui.info("Installing frontend dependencies...")
+        ui.info(f"Installing frontend dependencies with a {DEPENDENCY_COOLDOWN_DAYS}-day npm cooldown...")
         lockfile = FRONTEND_DIR / "package-lock.json"
-        npm_cmd = ["npm", "ci"] if lockfile.exists() else ["npm", "install"]
         if not lockfile.exists():
-            ui.muted("No package-lock.json found, so using npm install instead of npm ci.")
+            raise SystemExit("Missing frontend/package-lock.json; refusing npm install without a lockfile.")
+        npm_before = subprocess.run(
+            ["npm", "config", "get", "before"],
+            cwd=str(FRONTEND_DIR),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if npm_before in {"", "null", "undefined"}:
+            raise SystemExit("npm did not apply frontend/.npmrc min-release-age; upgrade npm before installing.")
+        npm_cmd = ["npm", "ci"]
         subprocess.run(npm_cmd, cwd=str(FRONTEND_DIR), check=True)
 
     print()

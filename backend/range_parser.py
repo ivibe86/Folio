@@ -72,7 +72,10 @@ def _month_count_since(tokens: list[str], now: datetime) -> int | None:
                 year = maybe_year
         elif month > now.month:
             year -= 1
-        return max(1, min((now.year - year) * 12 + now.month - month + 1, 36))
+        end_year, end_month = (now.year, now.month)
+        if now.day == 1:
+            end_year, end_month = _shift_month(now.year, now.month, -1)
+        return max(1, min((end_year - year) * 12 + end_month - month + 1, 36))
     return None
 
 
@@ -171,11 +174,10 @@ def parse_range(question: str, *, default: str = "current_month", now: datetime 
 
     if contains(tokens, ("all", "time")) or {"alltime", "ever", "lifetime"} & token_set:
         return RangeParse("all", True)
-    if contains(tokens, ("till", "now")) or contains(tokens, ("until", "now")) or contains(tokens, ("to", "date")):
-        return RangeParse("all", True)
-
     if {"ytd"} & token_set or contains(tokens, ("year", "to", "date")) or contains(tokens, ("this", "year")):
         return RangeParse("ytd", True)
+    if contains(tokens, ("till", "now")) or contains(tokens, ("until", "now")) or contains(tokens, ("to", "date")):
+        return RangeParse("all", True)
 
     if contains(tokens, ("past", "year")):
         return RangeParse("last_12_months", True, chart_months=12)

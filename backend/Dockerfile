@@ -1,6 +1,9 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 
 WORKDIR /app
+
+ARG DEPENDENCY_COOLDOWN_DAYS=7
+ARG PIP_VERSION=26.0.1
 
 # Install system CA certificates
 RUN apt-get update && \
@@ -9,8 +12,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN python -m pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" && \
+    cutoff="$(DEPENDENCY_COOLDOWN_DAYS="${DEPENDENCY_COOLDOWN_DAYS}" python -c "from datetime import datetime, timezone, timedelta; import os; days = int(os.environ['DEPENDENCY_COOLDOWN_DAYS']); print((datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0).isoformat().replace('+00:00', 'Z'))")" && \
+    python -m pip install --no-cache-dir --require-hashes --uploaded-prior-to "$cutoff" -r requirements.lock
 
 # Copy application code
 COPY . .

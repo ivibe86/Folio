@@ -69,7 +69,119 @@ _REGISTRY: dict[str, MetricDefinition] = {
         grounding_behavior="Category must be resolver-grounded before normal Mira execution.",
         dashboard_parity_source="data_manager.get_category_analytics_data",
         default_provenance_text="Computed from the same category aggregation that powers the dashboard.",
-        related_tools=("get_category_spend", "get_category_breakdown", "analyze_subject", "compare_periods", "get_budget_status"),
+        related_tools=("get_category_spend", "analyze_subject", "compare_periods", "get_budget_status"),
+    ),
+    "period_expense_total": MetricDefinition(
+        metric_id="period_expense_total",
+        label="Period Expense Total",
+        definition="Aggregate spending total across all spending categories in the requested period.",
+        included_transaction_types=("negative spending transactions", "refund adjustments where exposed by dashboard category aggregation"),
+        excluded_transaction_types=("income", "credit card payments", "savings transfers", "personal transfers", "cash/investment transfers", "hidden transactions", "configured non-expense categories"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Sums dashboard category spend totals; non-expense categories are not treated as spending.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="No merchant/category grounding applies because this is a period-level aggregate.",
+        dashboard_parity_source="data_manager.get_category_analytics_data",
+        default_provenance_text="Computed from dashboard category aggregation for the requested period.",
+        related_tools=("get_category_breakdown", "get_period_summary", "get_month_summary"),
+    ),
+    "category_breakdown": MetricDefinition(
+        metric_id="category_breakdown",
+        label="Category Breakdown",
+        definition="Ranked per-spending-category breakdown for the requested period, including category totals and percentages.",
+        included_transaction_types=("dashboard spending transactions grouped by category",),
+        excluded_transaction_types=("income", "credit card payments", "savings transfers", "personal transfers", "cash/investment transfers", "hidden transactions", "configured non-expense categories"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Uses dashboard gross/refund/net category aggregation; it is not a request for one category.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="No category entity is required; categories are returned as grouped output rows.",
+        dashboard_parity_source="data_manager.get_category_analytics_data",
+        default_provenance_text="Computed from the same category breakdown that powers dashboard category analytics.",
+        related_tools=("get_category_breakdown", "get_top_categories"),
+    ),
+    "top_merchant_spend": MetricDefinition(
+        metric_id="top_merchant_spend",
+        label="Top Merchant Spend",
+        definition="Ranked merchants by spending total for the requested period.",
+        included_transaction_types=("negative spending transactions grouped by merchant",),
+        excluded_transaction_types=("income", "credit card payments", "internal transfers", "household transfers", "excluded transactions"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Merchant totals use spending semantics; non-expense cashflow components are not treated as merchant spend.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="No single merchant grounding is required because this is a ranked aggregate.",
+        dashboard_parity_source="data_manager.get_merchant_insights_data",
+        default_provenance_text="Computed from merchant spending aggregation for the requested period.",
+        related_tools=("get_top_merchants",),
+    ),
+    "period_income_total": MetricDefinition(
+        metric_id="period_income_total",
+        label="Period Income Total",
+        definition="Total positive income rows in the requested period.",
+        included_transaction_types=("positive transactions categorized as Income",),
+        excluded_transaction_types=("internal transfers", "household transfers in household scope", "refunds", "credit card payments", "savings transfers", "hidden transactions"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Income is reported separately from expenses and transfers; it is never treated as spending.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="No merchant/category grounding applies for a period income total.",
+        dashboard_parity_source="data_manager.get_monthly_analytics_data / get_period_summary",
+        default_provenance_text="Computed from dashboard income semantics for the requested period.",
+        related_tools=("get_month_summary", "get_period_summary"),
+    ),
+    "interest_income_total": MetricDefinition(
+        metric_id="interest_income_total",
+        label="Interest Earned Total",
+        definition="Total positive Income rows whose description or merchant fields match interest-earned semantics.",
+        included_transaction_types=("visible positive transactions categorized as Income and matching an interest search/subtype filter",),
+        excluded_transaction_types=("payroll", "salary", "generic Income rows without an interest-earned description", "hidden transactions"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Interest earned is a subtype of Income; it is not a period income total and is never treated as spend.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="Interest-earned subtype is a semantic transaction filter, not a spending category grounding request.",
+        dashboard_parity_source="data_manager.get_transactions_paginated with Income category and interest search filters",
+        default_provenance_text="Computed from matching interest-earned Income rows, with row counts and sample transaction IDs.",
+        related_tools=("find_transactions", "get_transactions"),
+    ),
+    "interest_income_transaction_list": MetricDefinition(
+        metric_id="interest_income_transaction_list",
+        label="Interest Earned Transaction List",
+        definition="Interest-earned Income transactions matching the requested period and filters.",
+        included_transaction_types=("visible transactions categorized as Income and matching an interest search/subtype filter",),
+        excluded_transaction_types=("payroll", "salary", "generic Income rows without an interest-earned description", "hidden transactions"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Rows are listed as interest-earned income timing/details, not as spend or generic income.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="Interest-earned subtype is a semantic transaction filter, not a spending category grounding request.",
+        dashboard_parity_source="data_manager.get_transactions_paginated with Income category and interest search filters",
+        default_provenance_text="Computed from matching interest-earned Income rows, with row counts and sample transaction IDs.",
+        related_tools=("find_transactions", "get_transactions"),
+    ),
+    "income_transaction_list": MetricDefinition(
+        metric_id="income_transaction_list",
+        label="Income Transaction List",
+        definition="Transactions categorized as Income matching the requested filters, preserving dates, amounts, descriptions, and accounts.",
+        included_transaction_types=("visible transactions categorized as Income",),
+        excluded_transaction_types=("transactions hidden from transactions_visible",),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="Rows keep their original signs and are listed as income timing/details, not as spend.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="Income category is a semantic filter, not a spending category grounding request.",
+        dashboard_parity_source="data_manager.get_transactions_paginated",
+        default_provenance_text="Computed from matching income transaction rows, with row counts and sample transaction IDs.",
+        related_tools=("find_transactions", "get_transactions"),
+    ),
+    "cashflow_component_summary": MetricDefinition(
+        metric_id="cashflow_component_summary",
+        label="Cashflow Component Summary",
+        definition="Period total or transaction list for non-spending cashflow components such as savings transfers, credit card payments, personal transfers, refunds, cash movements, and investment transfers.",
+        included_transaction_types=("visible transactions matching the named cashflow component",),
+        excluded_transaction_types=("hidden transactions", "unrelated spending categories"),
+        date_basis="transaction posted date (`transactions_visible.date`)",
+        treatment="These are reported as transfers, payments, refunds, or cashflow components; they are not spend totals.",
+        account_profile_filter_behavior="Household omits a profile filter; named profiles filter by `profile_id`.",
+        grounding_behavior="Known non-expense category names are semantic filters, not spending-category subjects.",
+        dashboard_parity_source="data_manager.get_summary_data / get_monthly_analytics_data cashflow component semantics",
+        default_provenance_text="Computed from deterministic period summary or transaction-list filters for non-spending cashflow categories.",
+        related_tools=("get_period_summary", "find_transactions", "get_transactions"),
     ),
     "transaction_search_list": MetricDefinition(
         metric_id="transaction_search_list",
@@ -141,6 +253,34 @@ _REGISTRY: dict[str, MetricDefinition] = {
         default_provenance_text="Computed from stored category budget settings and the matching category spend total.",
         related_tools=("get_budget_status",),
     ),
+    "budget_plan_summary": MetricDefinition(
+        metric_id="budget_plan_summary",
+        label="Budget Plan Summary",
+        definition="Profile-level budget plan health from configured category budgets, current spending pace, and plan snapshot data.",
+        included_transaction_types=("category budget settings", "current-month dashboard spending rows", "plan snapshot fields"),
+        excluded_transaction_types=("non-expense categories", "hidden transactions", "LLM-estimated budget facts"),
+        date_basis="current budget settings plus current-month transaction posted dates where spend pace is included",
+        treatment="Reports configured plan capacity and missing-plan caveats; it is not a single category spend total.",
+        account_profile_filter_behavior="Budget settings and plan snapshot are profile-scoped.",
+        grounding_behavior="No merchant/category grounding applies for broad plan capacity questions.",
+        dashboard_parity_source="data_manager.get_plan_snapshot_data and category budget settings",
+        default_provenance_text="Computed from Folio budget settings and plan snapshot data.",
+        related_tools=("get_budget_plan_summary",),
+    ),
+    "savings_capacity": MetricDefinition(
+        metric_id="savings_capacity",
+        label="Savings Capacity",
+        definition="Conservative monthly savings guidance from Folio planning data, income history depth, income stability, budgets, recurring obligations, goals, and cash-flow caveats.",
+        included_transaction_types=("visible income transactions", "visible current-month spending transactions", "budget settings", "recurring obligations", "goals", "cash account sync metadata"),
+        excluded_transaction_types=("hidden transactions", "memory-only finance facts", "LLM-estimated finance facts"),
+        date_basis="completed-month income history, last 90 days of income events, current plan snapshot month, and current account sync timestamps",
+        treatment="Returns a point estimate only when income history is deep and stable; otherwise returns limited or insufficient status with caveats or a range.",
+        account_profile_filter_behavior="Profile filters transactions, budgets, goals, recurring obligations, and account freshness where supplied.",
+        grounding_behavior="No merchant/category grounding applies; this is a profile-level savings capacity contract.",
+        dashboard_parity_source="data_manager.get_plan_snapshot_data plus Mira cash-flow forecast and configured budget/goal/recurring sources",
+        default_provenance_text="Computed from Folio plan snapshot, income-history checks, recurring/budget/goal presence, and cash-flow caveats.",
+        related_tools=("get_savings_capacity", "get_budget_plan_summary", "get_cashflow_forecast"),
+    ),
     "dashboard_snapshot": MetricDefinition(
         metric_id="dashboard_snapshot",
         label="Dashboard Snapshot",
@@ -154,6 +294,34 @@ _REGISTRY: dict[str, MetricDefinition] = {
         dashboard_parity_source="data_manager.get_dashboard_bundle_data",
         default_provenance_text="Computed from Folio's dashboard bundle source.",
         related_tools=("get_dashboard_snapshot", "get_dashboard_bundle"),
+    ),
+    "account_balance_snapshot": MetricDefinition(
+        metric_id="account_balance_snapshot",
+        label="Account Balance Snapshot",
+        definition="Current visible account balances across connected and manual accounts.",
+        included_transaction_types=("account balance rows", "manual account snapshots where applicable"),
+        excluded_transaction_types=("transaction spending rows", "LLM-estimated balances"),
+        date_basis="latest stored account balance timestamp or manual update timestamp",
+        treatment="Balances are reported as account state, not income, spend, or cash-flow transactions.",
+        account_profile_filter_behavior="Household includes household-visible accounts; named profiles filter account rows by `profile_id`.",
+        grounding_behavior="No merchant/category grounding applies.",
+        dashboard_parity_source="data_manager account/balance dashboard sources",
+        default_provenance_text="Computed from Folio account balance rows.",
+        related_tools=("get_account_balances",),
+    ),
+    "finance_priorities": MetricDefinition(
+        metric_id="finance_priorities",
+        label="Finance Priorities",
+        definition="Ranked current finance watch/fix suggestions from scoped top categories, active recurring charges, and budget-plan state.",
+        included_transaction_types=("current-period category spending rows", "recurring obligation records", "budget plan settings"),
+        excluded_transaction_types=("memory-only finance facts", "LLM-estimated finance facts", "hidden transactions"),
+        date_basis="requested range for category spending plus current recurring and budget-plan state",
+        treatment="Advice is bounded to deterministic Folio signals and caveats; it does not invent rule-of-thumb numbers.",
+        account_profile_filter_behavior="Profile filters category spending, recurring obligations, and budget plan inputs where supplied.",
+        grounding_behavior="No single merchant/category grounding applies for broad watch/fix advice.",
+        dashboard_parity_source="Mira finance-priority tool over category analytics, recurring summary, and budget plan summary",
+        default_provenance_text="Computed from deterministic priority signals returned by Folio tools.",
+        related_tools=("get_finance_priorities",),
     ),
     "income_vs_expense_summary": MetricDefinition(
         metric_id="income_vs_expense_summary",
@@ -245,8 +413,20 @@ _REGISTRY: dict[str, MetricDefinition] = {
 _TOOL_METRICS: dict[str, tuple[str, ...]] = {
     "get_merchant_spend": ("merchant_spend_total",),
     "get_category_spend": ("category_spend_total",),
-    "get_transactions": ("transaction_search_list",),
-    "find_transactions": ("transaction_search_list",),
+    "get_transactions": (
+        "transaction_search_list",
+        "income_transaction_list",
+        "interest_income_total",
+        "interest_income_transaction_list",
+        "cashflow_component_summary",
+    ),
+    "find_transactions": (
+        "transaction_search_list",
+        "income_transaction_list",
+        "interest_income_total",
+        "interest_income_transaction_list",
+        "cashflow_component_summary",
+    ),
     "get_transactions_for_merchant": ("transaction_search_list",),
     "get_monthly_spending_trend": ("monthly_spending_trend",),
     "get_net_worth_trend": ("net_worth_trend",),
@@ -254,10 +434,18 @@ _TOOL_METRICS: dict[str, tuple[str, ...]] = {
     "compare_periods": ("period_comparison",),
     "analyze_subject": ("merchant_spend_total", "category_spend_total", "monthly_spending_trend", "budget_status"),
     "get_budget_status": ("budget_status",),
+    "get_budget_plan_summary": ("budget_plan_summary",),
+    "get_savings_capacity": ("savings_capacity",),
+    "get_finance_priorities": ("finance_priorities",),
+    "get_top_categories": ("category_breakdown", "period_expense_total"),
+    "get_top_merchants": ("top_merchant_spend",),
+    "get_account_balances": ("account_balance_snapshot",),
     "get_dashboard_snapshot": ("dashboard_snapshot", "income_vs_expense_summary"),
     "get_dashboard_bundle": ("dashboard_snapshot",),
+    "get_category_breakdown": ("period_expense_total", "category_breakdown"),
     "get_summary": ("income_vs_expense_summary",),
-    "get_month_summary": ("income_vs_expense_summary",),
+    "get_month_summary": ("income_vs_expense_summary", "period_income_total", "period_expense_total"),
+    "get_period_summary": ("income_vs_expense_summary", "period_income_total", "period_expense_total", "cashflow_component_summary"),
     "explain_metric": ("dashboard_snapshot",),
     "get_recurring_changes": ("recurring_changes",),
     "get_recurring_summary": ("recurring_changes",),
@@ -281,11 +469,85 @@ def all_metrics() -> dict[str, dict[str, Any]]:
     return {metric_id: metric.as_dict() for metric_id, metric in sorted(_REGISTRY.items())}
 
 
+def tool_metric_map() -> dict[str, list[str]]:
+    return {tool: [metric_id for metric_id in metric_ids if metric_id in _REGISTRY] for tool, metric_ids in sorted(_TOOL_METRICS.items())}
+
+
+def explicit_non_tool_metric_routes() -> tuple[str, ...]:
+    return ()
+
+
+def _interest_subtype_args(args: dict[str, Any]) -> bool:
+    category = str(args.get("category") or "").lower()
+    search = str(args.get("search") or args.get("query") or "").lower()
+    subtype = str(args.get("subtype") or "").lower()
+    return category == "income" and (subtype == "interest_earned" or "interest" in search)
+
+
 def metric_ids_for_tool(tool_name: str | None, args: dict[str, Any] | None = None) -> list[str]:
     tool = str(tool_name or "")
     ids = list(_TOOL_METRICS.get(tool, ()))
     args = args if isinstance(args, dict) else {}
-    if tool == "analyze_subject":
+    if tool == "get_month_summary":
+        metric = str(args.get("metric") or "").lower()
+        if metric == "income":
+            ids = ["period_income_total"]
+        elif metric in {"expenses", "expense", "spending"}:
+            ids = ["period_expense_total"]
+    elif tool == "get_period_summary":
+        metric = str(args.get("metric") or "summary").lower()
+        if metric in {"income", "income_total"}:
+            ids = ["period_income_total"]
+        elif metric in {"expenses", "expense", "expense_total", "spending"}:
+            ids = ["period_expense_total"]
+        elif metric in {
+            "refunds",
+            "credits_refunds",
+            "savings",
+            "savings_transfer",
+            "credit_card_payments",
+            "credit_card_payment",
+            "personal_transfers",
+            "cash_deposits",
+            "cash_withdrawals",
+            "investment_transfers",
+        }:
+            ids = ["cashflow_component_summary"]
+        else:
+            ids = ["income_vs_expense_summary", "period_income_total", "period_expense_total"]
+    elif tool == "find_transactions":
+        category = str(args.get("category") or "").lower()
+        if _interest_subtype_args(args):
+            ids = ["interest_income_total"] if str(args.get("mode") or "").lower() == "total" else ["interest_income_transaction_list"]
+        elif category == "income":
+            ids = ["income_transaction_list"]
+        elif category in {
+            "savings transfer",
+            "personal transfer",
+            "credit card payment",
+            "credits & refunds",
+            "cash withdrawal",
+            "cash deposit",
+            "investment transfer",
+        }:
+            ids = ["cashflow_component_summary", "transaction_search_list"]
+    elif tool == "get_transactions":
+        category = str(args.get("category") or "").lower()
+        if _interest_subtype_args(args):
+            ids = ["interest_income_total"] if str(args.get("mode") or "").lower() == "total" else ["interest_income_transaction_list"]
+        elif category == "income":
+            ids = ["income_transaction_list"]
+        elif category in {
+            "savings transfer",
+            "personal transfer",
+            "credit card payment",
+            "credits & refunds",
+            "cash withdrawal",
+            "cash deposit",
+            "investment transfer",
+        }:
+            ids = ["cashflow_component_summary", "transaction_search_list"]
+    elif tool == "analyze_subject":
         subject_type = str(args.get("subject_type") or "").lower()
         if subject_type == "merchant":
             ids = ["merchant_spend_total"]

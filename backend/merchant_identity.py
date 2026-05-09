@@ -16,6 +16,7 @@ from typing import Any
 NON_MERCHANT_KINDS = {
     "personal_transfer",
     "credit_card_payment",
+    "credit_refund",
     "income",
     "tax",
     "bank_fee",
@@ -24,7 +25,7 @@ NON_MERCHANT_KINDS = {
 MERCHANT_PURCHASE = "merchant_purchase"
 UNKNOWN_KIND = "unknown"
 
-_TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment", "Income", "Taxes", "Fees & Charges"}
+_TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment", "Income", "Credits & Refunds", "Taxes", "Fees & Charges"}
 
 
 def canonicalize_merchant_key(value: str | None) -> str:
@@ -59,9 +60,11 @@ def infer_non_merchant_kind(tx: dict[str, Any]) -> str:
 
     if category == "Personal Transfer" or any(token in description for token in ("zelle", "venmo", "cash app", "cashapp", "apple cash")):
         return "personal_transfer"
-    if category == "Credit Card Payment" or "credit crd" in description or "des:epay" in description or expense_type == "transfer_cc_payment":
+    if category == "Credit Card Payment" or expense_type == "transfer_cc_payment":
         return "credit_card_payment"
-    if category == "Income" or "payroll" in description or "direct dep" in description:
+    if category == "Credits & Refunds":
+        return "credit_refund"
+    if category == "Income":
         return "income"
     if category == "Taxes" or "tax" in description or "irs" in description:
         return "tax"

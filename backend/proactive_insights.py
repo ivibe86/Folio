@@ -18,6 +18,7 @@ from mira import cashflow_forecast
 
 NON_SPENDING_CATEGORIES = {
     "Income",
+    "Credits & Refunds",
     "Savings Transfer",
     "Personal Transfer",
     "Credit Card Payment",

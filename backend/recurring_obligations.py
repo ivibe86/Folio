@@ -41,6 +41,7 @@ FREQUENCY_DAYS = {
 
 HARD_EXCLUDED_CATEGORIES = {
     "Income",
+    "Credits & Refunds",
     "Credit Card Payment",
     "Internal Transfer",
     "Savings Transfer",
@@ -688,7 +689,9 @@ def sync_detection_results(
         if key:
             seen.add(key)
 
-    sweep = _orphan_sweep(conn, profile_id=profile_id, run_id=run_id, seen=seen)
+    sweep = {"deleted": 0, "transitioned": 0, "preserved": 0}
+    if mode != "incremental":
+        sweep = _orphan_sweep(conn, profile_id=profile_id, run_id=run_id, seen=seen)
 
     conn.execute(
         """UPDATE recurring_detection_runs
@@ -1436,6 +1439,30 @@ def _dedupe_obligation_rows(
     return list(best.values())
 
 
+def _state_with_recency_sanity(
+    state: str,
+    *,
+    source: str | None,
+    confidence_score: int,
+    frequency: str | None,
+    last_seen: date | None,
+    last_user_action_at: str | None,
+    today: date | None = None,
+) -> str:
+    if state not in {"inactive", "stale"}:
+        return state
+    if last_user_action_at:
+        return state
+    if source not in {"seed", "algorithm", "category", "user_confirmed"}:
+        return state
+    if not last_seen:
+        return state
+    nominal, grace, _, _ = _frequency_nominal_and_grace(frequency)
+    if ((today or date.today()) - last_seen).days <= nominal + grace:
+        return "active" if confidence_score >= 55 else "candidate"
+    return state
+
+
 def _spend_history_by_merchant(conn, profile: str | None = None) -> dict[tuple[str, str], dict[str, Any]]:
     """Return historical paid totals keyed by (profile_id, canonical merchant key)."""
     clause = ""
@@ -1846,6 +1873,14 @@ def get_recurring_bundle(conn, profile: str | None = None) -> dict[str, Any]:
         profile_id, obligation_key, stored_merchant_key = row[0], row[1], row[2]
         merchant_key = canonical_key(stored_merchant_key) or stored_merchant_key
         effective_state = row[8] or "candidate"
+        effective_state = _state_with_recency_sanity(
+            effective_state,
+            source=row[9],
+            confidence_score=int(row[10] or 0),
+            frequency=row[6],
+            last_seen=parse_date(row[14]),
+            last_user_action_at=row[15],
+        )
         fb = feedback.get((profile_id, stored_merchant_key)) or feedback.get((profile_id, merchant_key))
         if fb and fb["feedback_type"] in {"dismissed", "cancelled"}:
             effective_state = "cancelled" if fb["feedback_type"] == "cancelled" else "dismissed"
@@ -2059,7 +2094,7 @@ def get_scheduled_bundle(
         f"""SELECT profile_id, obligation_key, merchant_key, display_name, category,
                    amount_cents, frequency, anchor_day, anchor_month, anchor_mode,
                    next_expected_date, state, source, confidence_score, confidence_label,
-                   evidence_json, last_seen_date, service_tag, seed_name
+                   evidence_json, last_seen_date, service_tag, seed_name, last_user_action_at
             FROM recurring_obligations
             {clause}""",
         params,
@@ -2077,6 +2112,15 @@ def get_scheduled_bundle(
         profile_id, obligation_key, stored_merchant_key = row[0], row[1], row[2]
         merchant_key = canonical_key(stored_merchant_key) or stored_merchant_key
         state = row[11] or "candidate"
+        state = _state_with_recency_sanity(
+            state,
+            source=row[12],
+            confidence_score=int(row[13] or 0),
+            frequency=row[6],
+            last_seen=parse_date(row[16]),
+            last_user_action_at=row[19],
+            today=today,
+        )
         fb = feedback.get((profile_id, stored_merchant_key)) or feedback.get((profile_id, merchant_key))
         if fb and fb["feedback_type"] in {"dismissed", "cancelled"}:
             continue

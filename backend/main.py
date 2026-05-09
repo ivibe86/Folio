@@ -4,12 +4,13 @@ FastAPI backend for Folio personal finance tracker.
 """
 
 from pathlib import Path as FilePath
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import csv
 import io
 import json
 
 from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -39,7 +40,7 @@ from data_manager import (
     get_data, fetch_fresh_data, fetch_simplefin_data,
     update_transaction_category,
     bulk_mark_transactions_reviewed,
-    add_category, get_categories, get_categories_meta, get_category_rules,
+    add_category, deactivate_category, get_categories, get_categories_meta, get_category_rules,
     get_accounts_filtered, get_transactions_paginated,
     get_summary_data, get_monthly_analytics_data,
     get_category_analytics_data, get_merchant_insights_data,
@@ -79,6 +80,11 @@ from local_llm import (
     install_model as install_local_llm_model,
     schedule_prewarm_selected_model,
 )
+from experimental_import_review import router as experimental_import_review_router
+
+
+def schedule_prewarm_chat_prompt(*args, **kwargs) -> bool:
+    return False
 
 # CORS origins from env, with dev defaults
 _cors_origins = os.getenv(
@@ -109,6 +115,11 @@ app = FastAPI(
 
 # Mount health as a sub-application — bypasses all main app middleware and deps
 app.mount("/healthz", _health_app)
+app.include_router(experimental_import_review_router)
+
+if os.getenv("MERCURY_MIRA_EXPERIMENT", "").strip().lower() in {"1", "true", "yes", "on"}:
+    from mira.mercury_adapter import router as mercury_mira_router
+    app.include_router(mercury_mira_router)
 
 
 # Also keep a convenience redirect so /health works too
@@ -147,6 +158,7 @@ def startup():
     reclassify_transfers()
     schedule_prewarm_selected_model("controller")
     schedule_prewarm_selected_model("copilot")
+    schedule_prewarm_chat_prompt()
 
 
 @app.on_event("shutdown")
@@ -179,7 +191,8 @@ app.add_middleware(
 
 # Categories excluded from spending calculations
 TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment"}
-NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income"}
+DIRECT_CASHFLOW_CATEGORIES = {"Cash Withdrawal", "Cash Deposit", "Investment Transfer"}
+NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | DIRECT_CASHFLOW_CATEGORIES | {"Income", "Credits & Refunds"}
 
 # ── Profile helpers ──────────────────────────────────────────────
 def _normalize_profile_whitespace(value: str | None) -> str:
@@ -327,6 +340,13 @@ def _require_receipts_enabled() -> None:
         raise HTTPException(status_code=404, detail="Receipt intelligence is disabled.")
 
 
+def _mira_agentic_runtime_payload() -> dict:
+    return {
+        "miraAgenticEnabled": True,
+        "miraAgenticRuntime": "vnext",
+    }
+
+
 def _app_config_payload(db=None) -> dict:
     payload = {
         "demoMode": DEMO_MODE,
@@ -334,6 +354,7 @@ def _app_config_payload(db=None) -> dict:
         "manualSyncEnabled": not DEMO_MODE,
         "demoPersistence": "ephemeral" if DEMO_MODE else "persistent",
         "receiptIntelligenceEnabled": RECEIPT_INTELLIGENCE_ENABLED,
+        **_mira_agentic_runtime_payload(),
     }
     try:
         payload.update(get_frontend_flags(db))
@@ -445,7 +466,7 @@ def _is_refund(tx: dict) -> bool:
     """
     amount = float(tx.get("amount", 0))
     cat = tx.get("category", "Other")
-    return amount > 0 and cat not in NON_SPENDING_CATEGORIES
+    return amount > 0 and (cat == "Credits & Refunds" or cat not in NON_SPENDING_CATEGORIES)
 
 
 def _is_savings(tx: dict) -> bool:
@@ -477,6 +498,7 @@ def local_llm_catalog(db=Depends(get_db_session)):
 def local_llm_status(db=Depends(get_db_session)):
     schedule_prewarm_selected_model("controller", db)
     schedule_prewarm_selected_model("copilot", db)
+    schedule_prewarm_chat_prompt()
     return get_status_response(db)
 
 
@@ -511,6 +533,7 @@ def patch_local_llm_settings(body: LocalLlmSettingsUpdate, db=Depends(get_db_ses
         schedule_prewarm_selected_model("controller", db, force=True)
     if body.copilot_model is not None or body.llm_provider is not None:
         schedule_prewarm_selected_model("copilot", db, force=True)
+        schedule_prewarm_chat_prompt(force=True)
 
     return {
         "status": get_status_response(db),
@@ -666,13 +689,29 @@ async def parse_receipt(
 
     try:
         from receipts import create_draft_receipt, parse_receipt_image
-        parsed, parser_model = parse_receipt_image(image_bytes, mime_type=file.content_type)
+        parsed, parser_model = await run_in_threadpool(parse_receipt_image, image_bytes, file.content_type)
         return create_draft_receipt(db, validated_profile, parsed, parser_model)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         logger.exception("Receipt parsing failed")
         raise HTTPException(status_code=502, detail=f"Receipt parsing failed: {exc}")
+
+
+@app.get("/api/receipts")
+def receipt_list(
+    status: str | None = Query(None),
+    limit: int = Query(12, ge=1, le=50),
+    profile: str | None = Depends(validate_profile),
+    db=Depends(get_db_session),
+):
+    _require_receipts_enabled()
+    from receipts import list_receipts
+    statuses = [part.strip().lower() for part in (status or "").split(",") if part.strip()]
+    invalid = [part for part in statuses if part not in {"draft", "approved", "discarded"}]
+    if invalid:
+        raise HTTPException(status_code=400, detail="Receipt status must be draft, approved, or discarded.")
+    return list_receipts(db, profile, statuses or None, limit)
 
 
 @app.get("/api/receipts/comparisons")
@@ -785,6 +824,10 @@ class NewCategory(BaseModel):
     name: str
 
 
+class CategoryDeactivateBody(BaseModel):
+    replacement_category: str | None = None
+
+
 @app.post("/api/categories")
 def create_category(body: NewCategory):
     """Add a new user-defined category."""
@@ -795,6 +838,24 @@ def create_category(body: NewCategory):
         raise HTTPException(status_code=409, detail="Category already exists.")
     _invalidate_copilot_cache()
     return {"status": "created", "category": body.name.strip()}
+
+
+@app.delete("/api/categories/{category_name}")
+def delete_category(category_name: str, body: CategoryDeactivateBody | None = None, db=Depends(get_db_session)):
+    """Soft-delete a user-defined category, optionally moving references first."""
+    try:
+        result = deactivate_category(
+            category_name,
+            replacement_category=body.replacement_category if body else None,
+            conn=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Category not found.")
+    _invalidate_copilot_cache()
+    return {"status": "deleted", **result}
 
 
 class ExpenseTypeUpdate(BaseModel):
@@ -1354,9 +1415,14 @@ class CopilotConfirm(BaseModel):
 
 @app.post("/api/copilot/ask")
 async def copilot_ask(body: CopilotRequest, profile: str | None = Query(None)):
-    """NLP copilot — translates questions to SQL and returns answers."""
+    """Compatibility wrapper for non-streaming clients.
+
+    The product UI uses /api/copilot/ask/stream. Keep this path aligned with
+    the same dispatcher/runtime so old callers do not hit retired routers.
+    """
     from copilot import ask_copilot
-    result = ask_copilot(question=body.question, profile=profile, history=body.history)
+    validated_profile = validate_profile(profile)
+    result = ask_copilot(question=body.question, profile=validated_profile, history=body.history)
     return result
 
 
@@ -2374,6 +2440,7 @@ def update_merchant_directory_endpoint(
 @app.get("/api/dashboard-bundle")
 def dashboard_bundle(
     nw_interval: str = Query("biweekly", description="weekly or biweekly"),
+    as_of: str | None = Query(None, description="Local YYYY-MM-DD date used for dashboard planning metrics"),
     profile: str | None = Depends(validate_profile),
     db=Depends(get_db_session),
 ):
@@ -2384,7 +2451,7 @@ def dashboard_bundle(
     Replaces 5 separate API calls.
     """
     def _load_bundle():
-        bundle = get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db)
+        bundle = get_dashboard_bundle_data(nw_interval=nw_interval, profile=profile, conn=db, as_of=as_of)
         return {**bundle, "config": _app_config_payload(db)}
 
     try:
@@ -2393,7 +2460,7 @@ def dashboard_bundle(
         fingerprint = copilot_cache.db_fingerprint(db, profile)
         return copilot_cache.get_or_set(
             "dashboard_bundle",
-            copilot_cache.make_key(nw_interval, profile or "household", fingerprint),
+            copilot_cache.make_key(nw_interval, profile or "household", as_of or date.today().isoformat(), fingerprint),
             _load_bundle,
         )
     except Exception:

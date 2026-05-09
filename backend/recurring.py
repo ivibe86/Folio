@@ -47,7 +47,7 @@ FREQUENCY_DEFS = {
 FREQ_RANGES = {k: (v[2], v[3]) for k, v in FREQUENCY_DEFS.items()}
 
 TRANSFER_CATEGORIES = {"Savings Transfer", "Personal Transfer", "Credit Card Payment", "Internal Transfer"}
-NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income", "Tax Refund", "Refund"}
+NON_SPENDING_CATEGORIES = TRANSFER_CATEGORIES | {"Income", "Credits & Refunds", "Tax Refund", "Refund"}
 
 # Seed categories that are ALLOWED through the category exclusion filter.
 # If a seed's own category is in this set, it bypasses ALGO_EXCLUDED_CATEGORIES.
@@ -1076,7 +1076,7 @@ class RecurringDetector:
     ALGO_EXCLUDED_CATEGORIES = {
         # Non-spending
         "Savings Transfer", "Credit Card Payment",
-        "Income", "Personal Transfer", "Internal Transfer",
+        "Income", "Credits & Refunds", "Personal Transfer", "Internal Transfer",
         "Tax Payment", "Tax Refund", "Refund",
         # Groceries & dining
         "Groceries", "Food & Dining",
@@ -1734,6 +1734,7 @@ def write_detection_results_to_db(
     items: list[dict],
     events: list[dict],
     profile: str | None = None,
+    mode: str = "shadow",
 ):
     """
     Persist recurring detection results to the merchants table and
@@ -1838,5 +1839,5 @@ def write_detection_results_to_db(
                 scoped_items,
                 profile_id=scoped_profile,
                 txn_count=0,
-                mode="shadow",
+                mode=mode,
             )

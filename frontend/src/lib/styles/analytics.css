@@ -170,6 +170,18 @@
     overflow: visible;
 }
 
+.analytics-waterfall-empty {
+    min-height: 320px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(226, 232, 240, 0.72);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
 /* Light mode dark island: SVG text uses light colors */
 :root:not(.dark) .analytics-waterfall-theater .analytics-waterfall-container svg text {
     fill: var(--island-text-muted);

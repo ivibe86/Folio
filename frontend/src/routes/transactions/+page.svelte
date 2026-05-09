@@ -25,11 +25,15 @@
     let filterAccount = '';
     let reviewFilter = 'all';
     let editingTxId = null;
+    let editingMerchantTxId = null;
+    let merchantDraftName = '';
+    let merchantEditError = '';
     let selectedTxId = null;
     let metadataDrafts = {};
     let splitDrafts = {};
     let savingMetadataFor = null;
     let savingSplitsFor = null;
+    let savingMerchantFor = null;
     let exportingCsv = false;
     let bulkReviewing = false;
     let months = [];
@@ -110,6 +114,9 @@
         if (catDropdownOpenForTx) {
             catDropdownOpenForTx = null;
             catDropdownSearch = '';
+        }
+        if (editingMerchantTxId && !savingMerchantFor) {
+            cancelMerchantEditing();
         }
     }
 
@@ -417,6 +424,33 @@
         return all;
     }
 
+    function buildVisibleParams(limit = pageLimit, offset = pageOffset) {
+        const params = { limit, offset };
+        if (filterMonth === '__ytd__') {
+            params.limit = 1000;
+            params.offset = 0;
+        } else if (filterMonth) {
+            params.month = filterMonth;
+        }
+        if (filterCategory) params.category = filterCategory;
+        if (filterAccount) params.account = filterAccount;
+        if (reviewFilter !== 'all') params.reviewed = reviewFilter === 'reviewed';
+        if (search) params.search = search;
+        return params;
+    }
+
+    async function refreshTransactionMetadata() {
+        const allTxns = await fetchTransactionHistory();
+        const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
+        months = [...monthSet].sort().reverse();
+        if (months.length > 0 && selectedCustomMonth === getCurrentMonth()) {
+            selectedCustomMonth = months[0];
+        }
+        const accSet = new Set(allTxns.map(t => t.account_name).filter(Boolean));
+        accountNames = [...accSet].sort();
+        return allTxns;
+    }
+
     onMount(async () => {
         const requestedReview = new URLSearchParams(window.location.search).get('review');
         if (requestedReview === 'reviewed' || requestedReview === 'unreviewed') {
@@ -444,8 +478,9 @@
 
         window.addEventListener('folio:sync-complete', handleSyncComplete);
         try {
+            const initialParams = buildVisibleParams(pageLimit, 0);
             const [result, cats] = await Promise.all([
-                api.getTransactions({ limit: pageLimit, offset: 0 }),
+                api.getTransactions(initialParams),
                 api.getCategories()
             ]);
             transactions = result.data;
@@ -453,20 +488,16 @@
             pageOffset = 0;
             allCategories = cats;
             summaryTransactions = result.data || [];
+            _prevFilterKey = filterKey;
+            _prevSearch = search;
+            loading = false;
 
-            // Fetch all months and accounts for filter dropdowns (lightweight metadata query)
-            const allTxns = await fetchTransactionHistory();
-            const monthSet = new Set(allTxns.map(t => t.date?.substring(0, 7)).filter(Boolean));
-            months = [...monthSet].sort().reverse();
-            if (months.length > 0 && selectedCustomMonth === getCurrentMonth()) {
-                selectedCustomMonth = months[0];
-            }
-            const accSet = new Set(allTxns.map(t => t.account_name).filter(Boolean));
-            accountNames = [...accSet].sort();
-            await fetchSummaryTransactions();
+            refreshTransactionMetadata().catch(e => {
+                console.error('Failed to load transaction metadata:', e);
+            });
+            fetchSummaryTransactions();
         } catch (e) {
             console.error('Failed to load transactions:', e);
-        } finally {
             loading = false;
         }
 
@@ -477,21 +508,7 @@
 
     async function fetchTransactions() {
         try {
-            const params = { limit: pageLimit, offset: pageOffset };
-            if (filterMonth === '__ytd__') {
-                // YTD: no month filter, handled client-side below
-                // Actually, for pagination to work with YTD, we need server-side.
-                // Approximate: fetch current year with high limit
-                params.limit = 1000;
-                params.offset = 0;
-            } else if (filterMonth) {
-                params.month = filterMonth;
-            }
-            if (filterCategory) params.category = filterCategory;
-            if (filterAccount) params.account = filterAccount;
-            if (reviewFilter !== 'all') params.reviewed = reviewFilter === 'reviewed';
-            if (search) params.search = search;
-
+            const params = buildVisibleParams(pageLimit, pageOffset);
             const result = await api.getTransactions(params);
             transactions = result.data;
             totalCount = result.total_count;
@@ -573,12 +590,11 @@
 
     // Server-side filtering: re-fetch when filters change
     let _prevFilterKey = '';
+    let _prevSearch = '';
     let _searchDebounce = null;
+    $: filterKey = `${filterMonth}|${filterCategory}|${filterAccount}|${reviewFilter}`;
 
     $: {
-        // Build a key from all filter values to detect changes
-        const filterKey = `${filterMonth}|${filterCategory}|${filterAccount}|${reviewFilter}`;
-
         if (!loading && filterKey !== _prevFilterKey) {
             _prevFilterKey = filterKey;
             pageOffset = 0;
@@ -588,7 +604,8 @@
     }
 
     // Debounced search (separate from other filters since it changes per keystroke)
-    $: if (!loading && search !== undefined) {
+    $: if (!loading && search !== _prevSearch) {
+        _prevSearch = search;
         if (_searchDebounce) clearTimeout(_searchDebounce);
         _searchDebounce = setTimeout(() => {
             pageOffset = 0;
@@ -603,16 +620,9 @@
 
     // Transfer types excluded from accrual-basis totals (same model as dashboard)
     const EXCLUDED_EXPENSE_TYPES = new Set(['transfer_internal', 'transfer_cc_payment', 'transfer_household']);
-    const NON_SPENDING_CATEGORIES = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Income']);
+    const NON_SPENDING_CATEGORIES = new Set(['Savings Transfer', 'Personal Transfer', 'Credit Card Payment', 'Cash Withdrawal', 'Cash Deposit', 'Investment Transfer', 'Income', 'Credits & Refunds']);
+    const NON_MERCHANT_KINDS = new Set(['personal_transfer', 'credit_card_payment', 'income', 'tax', 'bank_fee']);
     const TITLE_CASE_SMALL_WORDS = new Set(['and', 'of', 'the', 'to', 'for', 'by', 'at', 'in']);
-    const MERCHANT_LOCATION_PATTERNS = [
-        { pattern: /\bSAN JOSE\b/i, label: 'San Jose' },
-        { pattern: /\bSUNNYVALE\b/i, label: 'Sunnyvale' },
-        { pattern: /\bMILPITAS\b/i, label: 'Milpitas' },
-        { pattern: /\bPALO ALTO\b/i, label: 'Palo Alto' },
-        { pattern: /\bLOS ALTOS\b/i, label: 'Los Altos' },
-        { pattern: /\bCASTRO ST\b/i, label: 'Castro St.' }
-    ];
 
     $: groupedTxns = groupTransactionsByDate(filteredTxns);
     $: totalSpending = summaryTxns
@@ -643,17 +653,33 @@
     $: txExternalTransfers = summaryTxns
         .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) < 0)
         .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    $: txIncomingTransfers = summaryTxns
+        .filter(t => t.expense_type === 'transfer_external' && parseFloat(t.amount) > 0)
+        .reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: txCashDeposits = summaryTxns
+        .filter(t => t.category === 'Cash Deposit' && parseFloat(t.amount) > 0)
+        .reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: txCashWithdrawals = summaryTxns
+        .filter(t => t.category === 'Cash Withdrawal' && parseFloat(t.amount) < 0)
+        .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
+    $: txInvestmentInflows = summaryTxns
+        .filter(t => t.category === 'Investment Transfer' && parseFloat(t.amount) > 0)
+        .reduce((s, t) => s + parseFloat(t.amount), 0);
+    $: txInvestmentOutflows = summaryTxns
+        .filter(t => t.category === 'Investment Transfer' && parseFloat(t.amount) < 0)
+        .reduce((s, t) => s + Math.abs(parseFloat(t.amount)), 0);
     $: txCreditsRefunds = summaryTxns
         .filter(t => {
             const amount = parseFloat(t.amount);
             if (amount <= 0) return false;
             if (t.category === 'Income') return false;
+            if (t.category === 'Credits & Refunds') return true;
             if (NON_SPENDING_CATEGORIES.has(t.category)) return false;
             if (t.expense_type && EXCLUDED_EXPENSE_TYPES.has(t.expense_type)) return false;
             return true;
         })
         .reduce((s, t) => s + parseFloat(t.amount), 0);
-    $: txNetFlow = totalIncome + txCreditsRefunds - totalSpending - txExternalTransfers;
+    $: txNetFlow = totalIncome + txCreditsRefunds + txIncomingTransfers + txCashDeposits + txInvestmentInflows - totalSpending - txExternalTransfers - txCashWithdrawals - txInvestmentOutflows;
     $: largestSpendTx = summaryTxns
         .filter(t => parseFloat(t.amount) < 0)
         .filter(t => !NON_SPENDING_CATEGORIES.has(t.category))
@@ -791,6 +817,65 @@
         categoryApplyMode = 'always';
     }
 
+    function startMerchantEditing(tx) {
+        const cell = getMerchantCell(tx);
+        if (!cell.editable) return;
+        editingMerchantTxId = tx.original_id;
+        merchantDraftName = cell.label || '';
+        merchantEditError = '';
+    }
+
+    function cancelMerchantEditing() {
+        editingMerchantTxId = null;
+        merchantDraftName = '';
+        merchantEditError = '';
+        savingMerchantFor = null;
+    }
+
+    async function saveMerchantAlias(tx) {
+        const merchantKey = getEditableMerchantKey(tx);
+        const profileId = getMerchantProfile(tx);
+        const nextName = merchantDraftName.trim();
+        if (!merchantKey || !profileId) {
+            merchantEditError = 'Merchant key missing';
+            return;
+        }
+        if (!nextName) {
+            merchantEditError = 'Merchant name required';
+            return;
+        }
+
+        savingMerchantFor = tx.original_id;
+        try {
+            const result = await api.updateMerchantDirectory(merchantKey, {
+                profile_id: profileId,
+                clean_name: nextName
+            });
+            invalidateCache();
+            const updatedName = result?.merchant?.clean_name || nextName;
+            const normalizedKey = merchantKey.toUpperCase().trim();
+            const matchesMerchant = (item) =>
+                getMerchantProfile(item) === profileId &&
+                getEditableMerchantKey(item).toUpperCase().trim() === normalizedKey;
+            const applyAlias = (item) => matchesMerchant(item)
+                ? { ...item, merchant_display_name: updatedName, merchant_display_source: 'user' }
+                : item;
+
+            transactions = transactions.map(applyAlias);
+            summaryTransactions = summaryTransactions.map(applyAlias);
+            historyTransactions = historyTransactions.map(applyAlias);
+            updateFeedback = `Merchant saved: ${updatedName}`;
+            recentlyUpdatedTxId = tx.original_id;
+            setTimeout(() => { updateFeedback = ''; recentlyUpdatedTxId = null; }, 2500);
+            cancelMerchantEditing();
+        } catch (e) {
+            console.error('Failed to save merchant alias:', e);
+            merchantEditError = 'Failed to save merchant';
+        } finally {
+            savingMerchantFor = null;
+        }
+    }
+
     // Filtered category list for the re-tag dropdown search
     $: filteredEditCategories = catDropdownSearch
         ? allCategories.filter(c => c.toLowerCase().includes(catDropdownSearch.toLowerCase()))
@@ -910,7 +995,6 @@
     function getMerchantDisplay(tx) {
         const preferred = tx.merchant_display_name || tx.merchant_name || tx.counterparty_name || '';
         const raw = tx.description || '';
-        if (!preferred && raw) return splitRawMerchant(raw).name;
         let label = preferred || raw;
         label = label
             .replace(/\s+(INC|LLC|CORP|CO)\.?$/i, '')
@@ -919,50 +1003,70 @@
         return titleCaseMerchant(label || 'Transaction');
     }
 
-    function splitRawMerchant(rawValue) {
-        const raw = (rawValue || '').replace(/[·]/g, ' ').replace(/\s{2,}/g, ' ').trim();
-        for (const entry of MERCHANT_LOCATION_PATTERNS) {
-            const match = raw.match(entry.pattern);
-            if (match && match.index > 0) {
-                const name = raw
-                    .slice(0, match.index)
-                    .replace(/\b(EL|CA)\b/gi, '')
-                    .replace(/\s{2,}/g, ' ')
-                    .trim();
-                return {
-                    name: titleCaseMerchant(name || raw),
-                    location: entry.label
-                };
-            }
-        }
-        return { name: titleCaseMerchant(raw), location: '' };
-    }
-
     function getRawDescriptor(tx) {
         return (tx.description || tx.raw_description || tx.merchant_name || '').trim();
     }
 
-    function getMerchantLocation(tx) {
-        if (!(tx.merchant_display_name || tx.merchant_name || tx.counterparty_name)) {
-            return splitRawMerchant(tx.description || '').location;
-        }
-        const display = getMerchantDisplay(tx);
-        const raw = getRawDescriptor(tx);
-        const upperRaw = raw.toUpperCase();
-        const upperDisplay = display.toUpperCase();
-        const leftover = upperRaw.replace(upperDisplay, '').replace(/[^\w\s#]/g, ' ').trim();
-        const locationWords = leftover
-            .split(/\s+/)
-            .filter(w => /^[A-Z]{3,}$/.test(w) && !['DES', 'WEB', 'ID', 'COM', 'BILL', 'PAYMENT'].includes(w));
-        const location = locationWords.slice(-2).join(' ');
-        return titleCaseMerchant(location);
+    function getTransactionTitle(tx) {
+        return titleCaseMerchant(getRawDescriptor(tx) || 'Transaction');
     }
 
-    function getMerchantTitle(tx) {
-        const name = getMerchantDisplay(tx);
-        const location = getMerchantLocation(tx);
-        if (location && !name.toLowerCase().includes(location.toLowerCase())) return `${name} · ${location}`;
-        return name;
+    function getMerchantProfile(tx) {
+        return (tx.profile || tx.profile_id || '').trim();
+    }
+
+    function getEditableMerchantKey(tx) {
+        const kind = (tx.merchant_kind || '').trim().toLowerCase();
+        if (NON_MERCHANT_KINDS.has(kind)) return '';
+        return (tx.merchant_key || tx.merchant_name || tx.merchant_display_key || getRawDescriptor(tx)).trim();
+    }
+
+    function getMerchantKindLabel(tx) {
+        const kind = (tx.merchant_kind || '').trim().toLowerCase();
+        if (kind === 'personal_transfer') return 'Transfer';
+        if (kind === 'credit_card_payment') return 'Payment';
+        if (kind === 'income') return 'Income';
+        if (kind === 'tax') return 'Tax';
+        if (kind === 'bank_fee') return 'Fee';
+        return '';
+    }
+
+    function getMerchantSourceLabel(tx, editable) {
+        if (!editable) return null;
+
+        const displaySource = (tx.merchant_display_source || '').trim().toLowerCase();
+        const source = displaySource || (tx.merchant_source || '').trim().toLowerCase();
+        const confidence = (tx.merchant_confidence || '').trim().toLowerCase();
+        const kind = (tx.merchant_kind || '').trim().toLowerCase();
+
+        if (source === 'user') return { label: 'User', type: 'user' };
+        if (source === 'llm' || source === 'local_llm' || source === 'ai') return { label: 'AI', type: 'ai' };
+        if (kind === 'unknown' || confidence === 'low' || source === 'unknown') return { label: 'Review', type: 'review' };
+        if (source === 'raw' || source === 'fallback') return { label: 'Raw', type: 'raw' };
+        if (source) return { label: 'Auto', type: 'auto' };
+        return { label: 'Auto', type: 'auto' };
+    }
+
+    function getMerchantCell(tx) {
+        const editableKey = getEditableMerchantKey(tx);
+        if (editableKey) {
+            return {
+                label: getMerchantDisplay(tx),
+                sublabel: tx.merchant_display_industry || tx.merchant_source || tx.merchant_confidence || 'Merchant',
+                source: getMerchantSourceLabel(tx, true),
+                editable: true,
+                key: editableKey
+            };
+        }
+
+        const kindLabel = getMerchantKindLabel(tx);
+        return {
+            label: kindLabel || 'Unresolved',
+            sublabel: kindLabel ? 'Non-merchant' : 'Needs review',
+            source: null,
+            editable: false,
+            key: ''
+        };
     }
 
     function getMerchantKey(tx) {
@@ -1428,6 +1532,14 @@
                 <p class="text-[11px] mt-1">Try adjusting the month, category, or search term</p>
             </div>
         {:else}
+            <div class="tx-column-headers">
+                <span>Date</span>
+                <span>Transaction</span>
+                <span>Merchant</span>
+                <span>Category</span>
+                <span></span>
+                <span class="tx-col-header-amount">Amount</span>
+            </div>
             {#each groupedTxns as [date, txns], gi}
                 {@const dayNet = txns.reduce((s, t) => s + parseFloat(t.amount || 0), 0)}
                 {@const dayInfo = formatLedgerDay(date)}
@@ -1460,7 +1572,8 @@
                     {@const sourceInfo = getSourceLabel(tx)}
                     {@const isRecentlyUpdated = recentlyUpdatedTxId === tx.original_id}
                     {@const isSelected = selectedTxId === tx.original_id}
-                    {@const merchantTitle = getMerchantTitle(tx)}
+                    {@const transactionTitle = getTransactionTitle(tx)}
+                    {@const merchantCell = getMerchantCell(tx)}
                     {@const rawDescriptor = getRawDescriptor(tx)}
                     {@const rowSignal = getRowSignal(tx)}
                     {@const merchantStats = getMerchantStats(tx)}
@@ -1482,29 +1595,82 @@
                         }}>
 
                         <!-- Zone 1: Icon + Description + Account -->
-                        <div class="tx-zone-desc">
-                            <div class="tx-merchant-avatar"
-                                style="--tx-cat-color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
-                                <i></i>
-                                <span>{merchantTitle.charAt(0)}</span>
-                            </div>
-                            <div class="min-w-0 flex-1">
-                                <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
-                                    {merchantTitle}
-                                </p>
-                                <span class="tx-row-subline">
-                                    <span class="tx-account-dot" style="background: {getAccountHue(tx)}"></span>
-                                    {tx.account_name || 'Account'}{#if getAccountSuffix(tx)} · ••{getAccountSuffix(tx)}{/if}
-                                    {#if rawDescriptor && rawDescriptor.toUpperCase() !== merchantTitle.toUpperCase()}
-                                        <span class="tx-row-dot"></span>
-                                        <span class="tx-raw-preview">{rawDescriptor}</span>
-                                    {/if}
-                                </span>
-                            </div>
-                        </div>
+	                        <div class="tx-zone-desc">
+	                            <div class="tx-merchant-avatar"
+	                                style="--tx-cat-color: {CATEGORY_COLORS[tx.category] || '#627d98'}">
+	                                <i></i>
+	                                <span>{merchantCell.label.charAt(0)}</span>
+	                            </div>
+	                            <div class="min-w-0 flex-1">
+	                                <p class="text-[13px] font-medium truncate" style="color: var(--text-primary)">
+	                                    {transactionTitle}
+	                                </p>
+	                                <span class="tx-row-subline">
+	                                    <span class="tx-account-dot" style="background: {getAccountHue(tx)}"></span>
+	                                    {tx.account_name || 'Account'}{#if getAccountSuffix(tx)} · ••{getAccountSuffix(tx)}{/if}
+	                                    {#if tx.raw_description && tx.raw_description.toUpperCase() !== rawDescriptor.toUpperCase()}
+	                                        <span class="tx-row-dot"></span>
+	                                        <span class="tx-raw-preview">{tx.raw_description}</span>
+	                                    {/if}
+	                                </span>
+	                            </div>
+	                        </div>
 
-                        <!-- Zone 2: Category pill + source badge -->
-                        <div class="tx-zone-category">
+	                        <!-- Zone 2: Merchant identity -->
+	                        <!-- svelte-ignore a11y-click-events-have-key-events -->
+	                        <!-- svelte-ignore a11y-no-static-element-interactions -->
+	                        <div class="tx-zone-merchant" on:click|stopPropagation>
+	                            {#if editingMerchantTxId === tx.original_id}
+	                                <div class="tx-merchant-editor">
+	                                    <input
+	                                        bind:value={merchantDraftName}
+	                                        class="tx-merchant-input"
+	                                        disabled={savingMerchantFor === tx.original_id}
+	                                        on:keydown={(event) => {
+	                                            event.stopPropagation();
+	                                            if (event.key === 'Enter') saveMerchantAlias(tx);
+	                                            if (event.key === 'Escape') cancelMerchantEditing();
+	                                        }}
+	                                    />
+	                                    <button
+	                                        class="tx-edit-btn tx-edit-btn-confirm"
+	                                        disabled={savingMerchantFor === tx.original_id || !merchantDraftName.trim()}
+	                                        on:click={() => saveMerchantAlias(tx)}>
+	                                        <span class="material-symbols-outlined text-[13px]">check</span>
+	                                    </button>
+	                                    <button
+	                                        class="tx-edit-btn"
+	                                        disabled={savingMerchantFor === tx.original_id}
+	                                        on:click={cancelMerchantEditing}>
+	                                        <span class="material-symbols-outlined text-[13px]">close</span>
+	                                    </button>
+	                                    {#if merchantEditError}
+	                                        <span class="tx-merchant-error">{merchantEditError}</span>
+	                                    {/if}
+	                                </div>
+	                            {:else}
+	                                <button
+	                                    class="tx-merchant-identity"
+	                                    class:tx-merchant-identity-muted={!merchantCell.editable}
+	                                    disabled={!merchantCell.editable}
+	                                    title={merchantCell.sublabel}
+	                                    style="--tx-cat-color: {CATEGORY_COLORS[tx.category] || '#627d98'}"
+	                                    on:click={() => startMerchantEditing(tx)}>
+	                                    <span class="tx-merchant-name">{merchantCell.label}</span>
+	                                    {#if merchantCell.source}
+	                                        <span class="tx-merchant-source-badge tx-merchant-source-{merchantCell.source.type}">
+	                                            {merchantCell.source.label}
+	                                        </span>
+	                                    {/if}
+	                                    {#if merchantCell.editable}
+	                                        <span class="material-symbols-outlined tx-merchant-edit-icon">edit</span>
+	                                    {/if}
+	                                </button>
+	                            {/if}
+	                        </div>
+
+	                        <!-- Zone 3: Category pill + source badge -->
+	                        <div class="tx-zone-category">
                             <div class="relative tx-cat-pill-wrapper">
                                 <button
                                     class="tx-cat-pill"
@@ -1669,6 +1835,18 @@
                                         <span>Category pattern</span>
                                         <strong>{merchantStats.dominantCategory} · {merchantStats.dominantCategoryCount}/{merchantStats.visits}</strong>
                                     </div>
+                                    {#if merchantCell.editable && merchantCell.sublabel}
+                                        <div>
+                                            <span>Industry</span>
+                                            <strong>{merchantCell.sublabel}</strong>
+                                        </div>
+                                    {/if}
+                                    {#if merchantCell.source}
+                                        <div>
+                                            <span>Merchant source</span>
+                                            <strong>{merchantCell.source.label}</strong>
+                                        </div>
+                                    {/if}
                                     {#if merchantStats.firstSeen}
                                         <div>
                                             <span>First seen</span>
@@ -1676,7 +1854,7 @@
                                         </div>
                                     {/if}
                                 </div>
-                                {#if rawDescriptor && rawDescriptor.toUpperCase() !== merchantTitle.toUpperCase()}
+                                {#if rawDescriptor && rawDescriptor.toUpperCase() !== merchantCell.label.toUpperCase()}
                                     <details class="tx-raw-disclosure">
                                         <summary>Bank statement text</summary>
                                         <p>{rawDescriptor}</p>

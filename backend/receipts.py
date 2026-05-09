@@ -281,6 +281,41 @@ def get_receipt(conn, receipt_id: int, profile: str | None) -> dict:
     return receipt
 
 
+def list_receipts(conn, profile: str | None, statuses: list[str] | None = None, limit: int = 12) -> dict:
+    profile_id = _normalize_profile(profile)
+    limit = max(1, min(int(limit or 12), 50))
+    statuses = [status for status in (statuses or []) if status in {"draft", "approved", "discarded"}]
+    params: list = [profile_id]
+    status_clause = ""
+    if statuses:
+        status_clause = f" AND r.status IN ({','.join('?' for _ in statuses)})"
+        params.extend(statuses)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT r.*,
+               COUNT(i.id) AS item_count
+          FROM receipt_imports r
+          LEFT JOIN receipt_items i ON i.receipt_import_id = r.id
+         WHERE r.profile_id = ?
+               {status_clause}
+         GROUP BY r.id
+         ORDER BY datetime(r.updated_at) DESC, r.id DESC
+         LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return {
+        "items": [
+            {
+                **_row_to_receipt(row),
+                "item_count": row["item_count"],
+            }
+            for row in rows
+        ]
+    }
+
+
 def update_receipt_items(
     conn,
     receipt_id: int,
