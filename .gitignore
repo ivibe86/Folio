@@ -6,6 +6,8 @@
 data/*.db
 data/*.db-wal
 data/*.db-shm
+**/PRIVATE_wrong_predictions_review.csv
+models/
 backend/Folio-demo.db
 backend/Folio-demo.db-wal
 backend/Folio-demo.db-shm

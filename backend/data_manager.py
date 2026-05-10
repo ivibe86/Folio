@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 import bank
 from bank import get_all_accounts_by_profile, get_transactions, get_balances
 from categorizer import categorize_transactions, _rule_based_categorize
-from cashflow_classifier import CREDITS_REFUNDS_CATEGORY
+from cashflow_classifier import CREDITS_REFUNDS_CATEGORY, build_batch_pair_evidence
 from database import DB_PATH, get_db, dicts_from_rows, _extract_merchant_pattern
 from merchant_identity import (
     build_merchant_identity,
@@ -226,6 +226,26 @@ def _classify_transfer_type(
 
     # No account fragment matched → external
     return TRANSFER_EXTERNAL
+
+
+def _apply_linked_account_pair_overrides(transactions: list[dict]) -> None:
+    """Force linked depository account pairs into transfer categories before insert."""
+    pair_evidence_by_index = build_batch_pair_evidence(transactions)
+    for idx, tx in enumerate(transactions):
+        pair = pair_evidence_by_index.get(idx)
+        if not pair or pair.get("kind") != "linked_account_transfer":
+            continue
+        if (tx.get("categorization_source") or "") in {"user", "user-rule"}:
+            continue
+
+        category = pair.get("category") or "Savings Transfer"
+        if category not in TRANSFER_CATEGORIES:
+            continue
+
+        tx["category"] = category
+        tx["confidence"] = "rule"
+        tx["categorization_source"] = "rule-high"
+        tx["expense_type"] = pair.get("expense_type")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # READ OPERATIONS — TARGETED QUERIES (preferred)
@@ -4031,13 +4051,15 @@ def _post_sync(all_new_transactions: list[dict], conn, now: str):
     Shared post-sync steps: transfer classification, insertion,
     net-worth snapshot, recurring detection, transfer reclassification.
     """
+    _apply_linked_account_pair_overrides(all_new_transactions)
+
     # Build account lookup once for transfer classification
     account_lookup = _build_account_lookup(conn)
 
     # Classify transfer sub-types before insertion
     for tx in all_new_transactions:
         category = tx.get("category", "Other")
-        if category in TRANSFER_CATEGORIES:
+        if category in TRANSFER_CATEGORIES and not tx.get("expense_type"):
             tx["expense_type"] = _classify_transfer_type(tx, account_lookup)
 
     # Insert new transactions
@@ -4543,11 +4565,13 @@ def _apply_category_rule_to_transactions(
     category: str,
     profile_id: str | None = None,
     exclude_tx_id: str | None = None,
+    key_pattern: str | None = None,
 ) -> int:
     """Apply a merchant-pattern category to matching transactions immediately."""
     normalized_pattern = (pattern or "").upper().strip()
     normalized_category = (category or "").strip()
     normalized_profile = (profile_id or "").strip() or None
+    normalized_key_pattern = (key_pattern or normalized_pattern).upper().strip()
     if not normalized_pattern or not normalized_category:
         return 0
 
@@ -4556,7 +4580,7 @@ def _apply_category_rule_to_transactions(
         "categorization_source != 'user'",
         "category_pinned = 0",
     ]
-    params: list = [normalized_category, normalized_pattern, normalized_pattern, normalized_pattern]
+    params: list = [normalized_pattern, normalized_key_pattern, normalized_pattern]
 
     if normalized_profile:
         where.append("profile_id = ?")
@@ -4570,7 +4594,7 @@ def _apply_category_rule_to_transactions(
                    transaction_type, counterparty_type, teller_category
               FROM transactions
              WHERE {' AND '.join(where)}""",
-        params[1:],
+        params,
     ).fetchall()
     if not rows:
         return 0
@@ -6613,9 +6637,11 @@ def preview_rule_creation(
         existing_rule = c.execute(
             """SELECT id, pattern, category, priority, source, is_active
                FROM category_rules
-               WHERE pattern = ? AND is_active = 1
+               WHERE pattern = ?
+                 AND is_active = 1
+                 AND COALESCE(profile_id, '') = COALESCE(?, '')
                ORDER BY priority DESC LIMIT 1""",
-            (pattern,),
+            (pattern, scoped),
         ).fetchone()
 
         # Count + sample matching transactions (same logic as get_category_rule_impact contains branch)
@@ -6623,6 +6649,8 @@ def preview_rule_creation(
         count_sql = """
             SELECT COUNT(*) FROM transactions_visible
             WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+              AND categorization_source != 'user'
+              AND COALESCE(category_pinned, 0) = 0
         """
         if scoped:
             count_sql += " AND profile_id = ?"
@@ -6636,6 +6664,8 @@ def preview_rule_creation(
                    categorization_source, merchant_name, merchant_key
             FROM transactions_visible
             WHERE (description_normalized = ? OR UPPER(COALESCE(merchant_key,'')) = ? OR UPPER(COALESCE(merchant_name,'')) = ?)
+              AND categorization_source != 'user'
+              AND COALESCE(category_pinned, 0) = 0
         """
         if scoped:
             sample_sql += " AND profile_id = ?"
@@ -7081,35 +7111,47 @@ def execute_pending_write_operation(
             if not raw_pattern or not category:
                 raise ValueError("pattern and category are required")
             preview = preview_rule_creation(raw_pattern, category, profile, c)
+            count = int(preview.get("count") or 0)
+            if count > max_rows:
+                raise ValueError(f"This operation would affect {count} rows, above the limit of {max_rows}.")
             c.execute("INSERT OR IGNORE INTO categories (name, is_system) VALUES (?, 0)", (category,))
-            existing = preview.get("existing_rule") or {}
-            if existing.get("id"):
-                cursor = c.execute(
-                    """
-                    UPDATE category_rules
+            scoped = _write_scoped_profile(profile)
+            rule_id = _upsert_user_category_rule(
+                c,
+                pattern=preview["pattern"],
+                category=category,
+                profile_id=scoped,
+            )
+            if rule_id is not None:
+                c.execute(
+                    """UPDATE category_rules
                        SET match_type = 'contains',
-                           category = ?,
-                           priority = 1000,
                            source = 'user',
                            is_active = 1
-                     WHERE id = ?
-                    """,
-                    (category, existing["id"]),
+                       WHERE id = ?""",
+                    (rule_id,),
                 )
-            else:
-                cursor = c.execute(
-                    """
-                    INSERT INTO category_rules
-                        (pattern, match_type, category, priority, source, is_active)
-                    VALUES (?, 'contains', ?, 1000, 'user', 1)
-                    """,
-                    (preview["pattern"], category),
-                )
+            updated_count = _apply_category_rule_to_transactions(
+                c,
+                pattern=preview["pattern"],
+                key_pattern=preview.get("key_pattern"),
+                category=category,
+                profile_id=scoped,
+            )
+            _upsert_merchant_category_metadata(
+                c,
+                merchant_key=preview.get("key_pattern") or preview["pattern"],
+                profile_id=scoped,
+                category=category,
+            )
             return {
-                "answer": f"Done! Created rule {preview['pattern']} -> {category}.",
+                "answer": (
+                    f"Done! Created rule {preview['pattern']} -> {category} "
+                    f"and updated {updated_count} existing transaction(s)."
+                ),
                 "operation": "write_executed",
-                "rows_affected": max(0, cursor.rowcount),
-                "data": None,
+                "rows_affected": updated_count,
+                "data": {"rule_id": rule_id, "pattern": preview["pattern"], "category": category},
                 "needs_confirmation": False,
             }
 

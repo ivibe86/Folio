@@ -4,6 +4,7 @@ WORKDIR /app
 
 ARG DEPENDENCY_COOLDOWN_DAYS=7
 ARG PIP_VERSION=26.0.1
+ARG INSTALL_DISTILBERT=false
 
 # Install system CA certificates
 RUN apt-get update && \
@@ -13,9 +14,13 @@ RUN apt-get update && \
 
 # Install dependencies first (layer caching)
 COPY requirements.lock .
+COPY requirements-distilbert.lock .
 RUN python -m pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" && \
     cutoff="$(DEPENDENCY_COOLDOWN_DAYS="${DEPENDENCY_COOLDOWN_DAYS}" python -c "from datetime import datetime, timezone, timedelta; import os; days = int(os.environ['DEPENDENCY_COOLDOWN_DAYS']); print((datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0).isoformat().replace('+00:00', 'Z'))")" && \
-    python -m pip install --no-cache-dir --require-hashes --uploaded-prior-to "$cutoff" -r requirements.lock
+    python -m pip install --no-cache-dir --require-hashes --uploaded-prior-to "$cutoff" -r requirements.lock && \
+    if [ "$INSTALL_DISTILBERT" = "true" ] || [ "$INSTALL_DISTILBERT" = "1" ] || [ "$INSTALL_DISTILBERT" = "yes" ]; then \
+        python -m pip install --no-cache-dir --require-hashes -r requirements-distilbert.lock; \
+    fi
 
 # Copy application code
 COPY . .

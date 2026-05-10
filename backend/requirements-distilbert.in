@@ -1,0 +1,8 @@
+# Optional dependencies for CATEGORIZATION_BACKEND=distilbert.
+# The default backend image does not install these.
+hf-xet==1.4.3
+huggingface-hub==1.13.0
+httpx==0.27.0
+numpy>=1.26
+onnxruntime>=1.18
+transformers>=4.41

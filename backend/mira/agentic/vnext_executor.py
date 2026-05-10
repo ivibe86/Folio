@@ -368,6 +368,41 @@ def _labels_values(result: Any) -> tuple[list[str], list[float]]:
                 labels.append(str(label))
                 values.append(float(value))
         return labels, values
+    if result.get("range_a") and result.get("range_b") and result.get("total_a") is not None and result.get("total_b") is not None:
+        return [str(result.get("range_a")), str(result.get("range_b"))], [
+            float(result.get("total_a") or 0),
+            float(result.get("total_b") or 0),
+        ]
+    if result.get("budget") is not None and result.get("actual") is not None:
+        return ["Actual", "Budget"], [float(result.get("actual") or 0), float(result.get("budget") or 0)]
+    budgets = result.get("budgets") if isinstance(result.get("budgets"), list) else []
+    if budgets:
+        labels = []
+        values = []
+        for row in budgets:
+            if not isinstance(row, dict):
+                continue
+            label = row.get("category") or row.get("name")
+            value = _first_number(row, ("amount", "budget", "limit", "value"))
+            if label is not None and value is not None:
+                labels.append(str(label))
+                values.append(float(value))
+        return labels, values
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    if items:
+        labels = []
+        values = []
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            label = row.get("display_name") or row.get("merchant") or row.get("merchant_name") or row.get("name")
+            value = _first_number(row, ("amount", "monthly_amount", "total_monthly", "value"))
+            if value is None and row.get("amount_cents") is not None:
+                value = float(row.get("amount_cents") or 0) / 100
+            if label is not None and value is not None:
+                labels.append(str(label))
+                values.append(float(value))
+        return labels, values
     categories = result.get("categories") if isinstance(result.get("categories"), list) else []
     if categories:
         labels = []

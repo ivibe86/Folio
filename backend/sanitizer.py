@@ -14,7 +14,7 @@ def sanitize_transaction(tx: dict) -> dict | None:
     """
     description = tx.get("description", "")
     tx_type = tx.get("type", "")
-    raw_description = description  # preserve for enrichment
+    raw_description = tx.get("raw_description") or description  # preserve for enrichment/model input
     amount = float(tx.get("amount", 0))
     account_type = tx.get("account_type", "")
 
@@ -69,6 +69,19 @@ def sanitize_transaction(tx: dict) -> dict | None:
         "account_name": tx.get("account_name", ""),
         "account_type": account_type,
     }
+    for key in (
+        "merchant_name",
+        "merchant_domain",
+        "merchant_industry",
+        "merchant_city",
+        "merchant_state",
+        "merchant_key",
+        "merchant_source",
+        "merchant_confidence",
+        "merchant_kind",
+    ):
+        if tx.get(key):
+            sanitized[key] = tx[key]
     # Preserve profile tag if present (household multi-profile support)
     if "profile" in tx:
         sanitized["profile"] = tx["profile"]

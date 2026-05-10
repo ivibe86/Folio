@@ -2,13 +2,12 @@
 categorizer.py
 Two-phase categorization:
   Phase 1 — Deterministic rules using Teller API fields (works for any bank)
-  Phase 2 — LLM categorization for uncategorized + validation of rule-based
+  Phase 2 — Selected model backend for uncategorized + validation of rule-based
 """
 
 import json
 import re
 import time
-import os
 from dotenv import load_dotenv
 from sanitizer import sanitize_transactions
 from enricher import enrich_transactions
@@ -21,13 +20,13 @@ from cashflow_classifier import (
     classify_cashflow_category,
 )
 import llm_client
+from categorization_backends import resolve_categorization_backend
 
 load_dotenv()
 
 logger = get_logger(__name__)
 
-# Feature toggle: set ENABLE_LLM_CATEGORIZATION=false in .env to skip LLM categorization
-ENABLE_LLM = os.getenv("ENABLE_LLM_CATEGORIZATION", "true").lower() in ("true", "1", "yes")
+# Legacy toggle is resolved dynamically by categorization_backends.py.
 
 # Default categories — used as fallback if DB is unavailable
 _DEFAULT_CATEGORIES = [
@@ -118,6 +117,8 @@ SAVINGS_TRANSFER_PATTERNS = [
     r"transfer\s+from\s+chk",
     r"transfer\s+from\s+sav",
     r"transfer\s+to\s+chk",
+    r"transfer\s+from\s+acct",
+    r"transfer\s+to\s+acct",
     r"savings\s+transfer",
     r"\bdes:transfer\b",
 ]
@@ -281,13 +282,17 @@ def _rule_based_categorize(
         active_categories=active_categories or get_active_categories(),
     )
     if cashflow["source"] in {"pairing", "provider", "user", "user-rule"} and cashflow["category"] != "Other":
+        expense_type = (cashflow.get("evidence") or {}).get("expense_type")
+        if expense_type:
+            tx["expense_type"] = expense_type
         confidence = "rule-high" if cashflow["confidence"] == "high" else "rule-medium"
         return cashflow["category"], confidence
 
     # ── HIGH confidence rules (skip LLM) ──
 
     # Rule: Interest earned → Income
-    if tx_type == "interest" and amount > 0:
+    transfer_like = _matches_any(description, SAVINGS_TRANSFER_PATTERNS) or _matches_any(description, INTERNAL_TRANSFER_PATTERNS)
+    if tx_type == "interest" and amount > 0 and not transfer_like:
         return "Income", "rule-high"
 
     # Rule: CC payments from bank side
@@ -481,6 +486,108 @@ Respond ONLY with a JSON array, no markdown, no explanation:
     return json.loads(raw.strip())
 
 
+def _entry_suggestion_fallback(entry: dict) -> tuple[str, str, str]:
+    suggestion = entry.get("suggestion")
+    if suggestion:
+        return (
+            suggestion,
+            "rule-medium",
+            entry.get("suggestion_source") or "rule-medium",
+        )
+    return "Other", "fallback", "fallback"
+
+
+def _apply_rule_suggestions_or_other(sanitized: list[dict], queued_entries: list[dict]) -> None:
+    for entry in queued_entries:
+        idx = entry["original_idx"]
+        category, confidence, source = _entry_suggestion_fallback(entry)
+        sanitized[idx]["category"] = category
+        sanitized[idx]["confidence"] = confidence
+        sanitized[idx]["categorization_source"] = source
+
+
+def _copy_model_metadata(tx: dict, cat_result: dict) -> None:
+    metadata_keys = {
+        "model_id": "categorization_model_id",
+        "model_score": "categorization_model_score",
+        "external_label": "categorization_model_label",
+        "mapping_status": "categorization_mapping_status",
+        "fallback_reason": "categorization_fallback_reason",
+    }
+    for source_key, target_key in metadata_keys.items():
+        if source_key in cat_result:
+            tx[target_key] = cat_result[source_key]
+
+
+def _apply_model_results(
+    sanitized: list[dict],
+    queued_entries: list[dict],
+    model_results: list[dict],
+    *,
+    active_categories: list[str],
+    model_source: str,
+) -> None:
+    applied: set[int] = set()
+    active = set(active_categories)
+
+    for cat_result in model_results:
+        try:
+            model_idx = int(cat_result.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if model_idx >= len(queued_entries) or model_idx < 0:
+            continue
+
+        entry = queued_entries[model_idx]
+        original_idx = entry["original_idx"]
+        suggestion = entry.get("suggestion")
+        category = cat_result.get("category") or ""
+        confidence = cat_result.get("confidence", "medium")
+        source = cat_result.get("categorization_source")
+
+        if category not in active:
+            category = suggestion or "Other"
+            confidence = "fallback"
+            source = "fallback"
+        elif not source:
+            if confidence == "fallback":
+                source = "fallback"
+            elif confidence == "rule-medium":
+                source = entry.get("suggestion_source") or "rule-medium"
+            else:
+                source = model_source
+
+        sanitized[original_idx]["category"] = category
+        sanitized[original_idx]["confidence"] = confidence
+        sanitized[original_idx]["categorization_source"] = source
+        _copy_model_metadata(sanitized[original_idx], cat_result)
+        applied.add(model_idx)
+
+        if (
+            source in {"llm", "distilbert"}
+            and confidence != "fallback"
+            and suggestion
+            and category != suggestion
+        ):
+            override = {
+                "original": suggestion,
+                "model_source": source,
+                "model_corrected_to": category,
+            }
+            if source == "llm":
+                override["llm_corrected_to"] = category
+            sanitized[original_idx]["rule_override"] = override
+
+    for model_idx, entry in enumerate(queued_entries):
+        if model_idx in applied:
+            continue
+        original_idx = entry["original_idx"]
+        category, confidence, source = _entry_suggestion_fallback(entry)
+        sanitized[original_idx]["category"] = category
+        sanitized[original_idx]["confidence"] = confidence
+        sanitized[original_idx]["categorization_source"] = source
+
+
 def _load_merchant_category_memory(conn, transactions: list[dict]) -> dict[tuple[str, str], dict]:
     """
     Build a lightweight merchant -> category memory from historical transactions.
@@ -561,20 +668,31 @@ def categorize_transactions(
     """
     Two-phase categorization:
     1. Apply deterministic rules to all transactions
-    2. Send to LLM:
-       - rule-high: skip LLM entirely (certain categories)
-       - rule-medium: send with suggestion for LLM to validate/override
-       - no rule: send for full LLM categorization
+    2. Send remaining transactions to the selected model backend:
+       - rule-high: skip model entirely (certain categories)
+       - rule-medium: send with suggestion for validation/override
+       - no rule: send for full model categorization
     """
+    categorization_backend = resolve_categorization_backend()
     inter_batch_delay_s = 1.0
     if batch_size is None:
-        try:
-            policy = llm_client.local_llm.get_categorization_policy()
-            batch_size = policy.get("batch_size") or 25
-            inter_batch_delay_s = max((policy.get("inter_batch_delay_ms") or 600) / 1000.0, 0.0)
-        except Exception:
-            batch_size = 25
-            inter_batch_delay_s = 1.0
+        if categorization_backend == "distilbert":
+            try:
+                from distilbert_categorizer import get_config
+
+                batch_size = get_config().batch_size
+                inter_batch_delay_s = 0.0
+            except Exception:
+                batch_size = 64
+                inter_batch_delay_s = 0.0
+        else:
+            try:
+                policy = llm_client.local_llm.get_categorization_policy()
+                batch_size = policy.get("batch_size") or 25
+                inter_batch_delay_s = max((policy.get("inter_batch_delay_ms") or 600) / 1000.0, 0.0)
+            except Exception:
+                batch_size = 25
+                inter_batch_delay_s = 1.0
 
     # Phase 1: Sanitize (normalize signs, light cleanup)
     sanitized = sanitize_transactions(transactions)
@@ -647,7 +765,7 @@ def categorize_transactions(
     logger.info("    DB rules matched:        %d", db_rule_count)
 
     # Phase 1b: Apply rule-based categorization (skip those already matched by user rules)
-    high_confidence = []     # indices — skip LLM
+    high_confidence = []     # indices — skip model
     needs_llm = []           # list of {"tx": tx, "suggestion": str|None, "original_idx": int}
     rule_high_count = 0
     rule_medium_count = 0
@@ -681,6 +799,7 @@ def categorize_transactions(
             needs_llm.append({
                 "tx": tx,
                 "suggestion": category,
+                "suggestion_source": "rule-medium",
                 "original_idx": i,
             })
             rule_medium_count += 1
@@ -697,6 +816,7 @@ def categorize_transactions(
             needs_llm.append({
                 "tx": tx,
                 "suggestion": memory["category"],
+                "suggestion_source": "merchant-memory",
                 "original_idx": i,
             })
             memory_medium_count += 1
@@ -706,20 +826,23 @@ def categorize_transactions(
             needs_llm.append({
                 "tx": tx,
                 "suggestion": None,
+                "suggestion_source": None,
                 "original_idx": i,
             })
             no_rule_count += 1
 
     logger.info("    User rules (skip all):   %d", user_rule_count)
-    logger.info("    Rule-high (skip LLM):    %d", rule_high_count)
+    logger.info("    Categorizer backend:     %s", categorization_backend)
+    logger.info("    Rule-high (skip model):  %d", rule_high_count)
     logger.info("    Rule-medium (validate):  %d", rule_medium_count)
     logger.info("    Merchant memory (skip):  %d", memory_high_count)
     logger.info("    Merchant memory (hint):  %d", memory_medium_count)
-    logger.info("    No rule (full LLM):      %d", no_rule_count)
-    logger.info("    Total for LLM:           %d", len(needs_llm))
+    logger.info("    No rule (full model):    %d", no_rule_count)
+    logger.info("    Total for model:         %d", len(needs_llm))
 
-    # Phase 2: LLM categorization + validation
-    if needs_llm and ENABLE_LLM and llm_client.is_available():
+    # Phase 2: model categorization + validation
+    active_categories = get_active_categories()
+    if needs_llm and categorization_backend == "local_llm" and llm_client.is_available():
         total_batches = -(-len(needs_llm) // batch_size)
 
         all_llm_results = []
@@ -736,67 +859,86 @@ def categorize_transactions(
                 all_llm_results.extend(batch_cats)
             except Exception as e:
                 logger.warning("    LLM batch %d failed: %s", batch_num, e)
-                # For failed batches: keep rule suggestion if available, else "Other"
                 for j in range(len(batch)):
-                    entry = batch[j]
-                    fallback_cat = entry.get("suggestion") or "Other"
+                    fallback_category = batch[j].get("suggestion") or "Other"
                     all_llm_results.append({
                         "index": batch_start + j,
-                        "category": fallback_cat,
+                        "category": fallback_category,
                         "confidence": "fallback",
+                        "categorization_source": "fallback",
                     })
 
             if batch_num < total_batches and inter_batch_delay_s > 0:
                 time.sleep(inter_batch_delay_s)
 
-        # Apply LLM results back
-        for cat_result in all_llm_results:
-            llm_idx = cat_result["index"]
-            if llm_idx < len(needs_llm):
-                original_idx = needs_llm[llm_idx]["original_idx"]
-                suggestion = needs_llm[llm_idx].get("suggestion")
-                llm_category = cat_result["category"]
-                llm_confidence = cat_result.get("confidence", "medium")
+        _apply_model_results(
+            sanitized,
+            needs_llm,
+            all_llm_results,
+            active_categories=active_categories,
+            model_source="llm",
+        )
 
-                # Validate: if LLM returned a category not in our list, fall back
-                active_categories = get_active_categories()
-                if llm_category not in active_categories:
-                    llm_category = suggestion or "Other"
-                    llm_confidence = "fallback"
+    elif needs_llm and categorization_backend == "distilbert":
+        all_distilbert_results = []
+        total_batches = -(-len(needs_llm) // batch_size)
+        try:
+            from distilbert_categorizer import categorize_batch as categorize_distilbert_batch
 
-                sanitized[original_idx]["category"] = llm_category
-                sanitized[original_idx]["confidence"] = llm_confidence
+            for batch_start in range(0, len(needs_llm), batch_size):
+                batch = needs_llm[batch_start : batch_start + batch_size]
+                batch_num = batch_start // batch_size + 1
+                logger.info(
+                    "    DistilBERT batch %d/%d (%d transactions)...",
+                    batch_num, total_batches, len(batch),
+                )
+                batch_results = categorize_distilbert_batch(
+                    batch,
+                    active_categories=active_categories,
+                )
+                for result in batch_results:
+                    try:
+                        relative_idx = int(result.get("index", 0))
+                    except (TypeError, ValueError):
+                        relative_idx = 0
+                    result["index"] = batch_start + relative_idx
+                all_distilbert_results.extend(batch_results)
 
-                # Track if LLM overrode the rule suggestion
-                if suggestion and llm_category != suggestion:
-                    sanitized[original_idx]["rule_override"] = {
-                        "original": suggestion,
-                        "llm_corrected_to": llm_category,
-                    }
+            _apply_model_results(
+                sanitized,
+                needs_llm,
+                all_distilbert_results,
+                active_categories=active_categories,
+                model_source="distilbert",
+            )
+        except Exception as e:
+            try:
+                from distilbert_categorizer import get_config
+
+                required = get_config().required
+            except Exception:
+                required = False
+            if required:
+                raise
+            logger.warning(
+                "    DistilBERT categorization failed; using rule suggestions where available, 'Other' for rest: %s",
+                e,
+            )
+            _apply_rule_suggestions_or_other(sanitized, needs_llm)
 
     elif needs_llm:
-        # LLM disabled via toggle or no API key — fall back to rule suggestions + Teller hints
-        if not ENABLE_LLM:
+        if categorization_backend == "rules_only":
             logger.info(
-                "    LLM categorization disabled (ENABLE_LLM_CATEGORIZATION=false) — "
+                "    Model categorization disabled (rules_only) — "
                 "using rule/Teller suggestions for %d transactions, 'Other' for unmatched",
                 len(needs_llm),
             )
         else:
             logger.warning(
-                "    LLM not available — using rule suggestions where available, 'Other' for rest"
+                "    Categorization backend %s not available — using rule suggestions where available, 'Other' for rest",
+                categorization_backend,
             )
-        for entry in needs_llm:
-            idx = entry["original_idx"]
-            suggestion = entry.get("suggestion")
-            if suggestion:
-                sanitized[idx]["category"] = suggestion
-                sanitized[idx]["confidence"] = "rule-medium"
-                sanitized[idx]["categorization_source"] = "rule-medium"
-            else:
-                sanitized[idx]["category"] = "Other"
-                sanitized[idx]["confidence"] = "fallback"
-                sanitized[idx]["categorization_source"] = "fallback"
+        _apply_rule_suggestions_or_other(sanitized, needs_llm)
 
     # Final validation: ensure every transaction has a category
     # Build source profile map for defensive backfill

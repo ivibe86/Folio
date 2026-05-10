@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -40,6 +42,11 @@ StreamAnswerCompleter = Callable[[str, int, str], Iterable[str]]
 
 VNEXT_EVIDENCE_MAX_TOKENS = int(os.getenv("MIRA_VNEXT_EVIDENCE_MAX_TOKENS", "900"))
 VNEXT_GENERAL_MAX_TOKENS = int(os.getenv("MIRA_VNEXT_GENERAL_MAX_TOKENS", "1800"))
+VNEXT_INLINE_CHAT_MAX_CHARS = int(os.getenv("MIRA_VNEXT_INLINE_CHAT_MAX_CHARS", "700"))
+VNEXT_EVIDENCE_ANSWER_CACHE_SIZE = int(os.getenv("MIRA_VNEXT_EVIDENCE_ANSWER_CACHE_SIZE", "128"))
+
+_EVIDENCE_ANSWER_CACHE_VERSION = "v1"
+_EVIDENCE_ANSWER_CACHE: OrderedDict[str, str] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,7 @@ class VNextAnswerResult:
     used_fallback: bool = False
     error: str = ""
     max_tokens: int = 0
+    cache_hit: bool = False
 
 
 def answer_vnext(
@@ -66,18 +74,24 @@ def answer_vnext(
 ) -> VNextAnswerResult:
     if validation.status == "clarify":
         return VNextAnswerResult(
-            answer=validation.clarification_question or "I need one more detail to answer that cleanly.",
+            answer=safe_validation_answer(validation),
             path="clarify",
         )
     if validation.status == "blocked":
         return VNextAnswerResult(
-            answer=validation.blocked_reason or "I could not safely run that request.",
+            answer=safe_validation_answer(validation),
             path="blocked",
             error=validation.blocked_reason,
         )
 
     operation = str(route.get("operation") or "")
     if operation == "general_answer":
+        chat_history_answer = answer_chat_history_meta_question(question=question, history=history)
+        if chat_history_answer:
+            return VNextAnswerResult(answer=chat_history_answer, path="general_answer")
+        inline = _selector_inline_answer(route)
+        if inline and not is_explain_last_answer_question(question):
+            return VNextAnswerResult(answer=inline, path="selector_inline")
         return answer_general_question(question=question, history=history, completer=completer, max_tokens=max_tokens)
 
     direct = try_direct_scalar_answer(question, evidence)
@@ -95,18 +109,25 @@ def answer_from_evidence(
     max_tokens: int | None = None,
 ) -> VNextAnswerResult:
     resolved_max_tokens = _resolve_answer_max_tokens("evidence_llm", max_tokens)
+    cache_key = _evidence_answer_cache_key(question=question, evidence=evidence, max_tokens=resolved_max_tokens)
+    cached = _get_cached_evidence_answer(cache_key, max_tokens=resolved_max_tokens)
+    if cached:
+        return cached
+
     prompt = build_evidence_answer_prompt(question=question, evidence=evidence)
     complete = completer or _default_completer
     raw = ""
     try:
         raw = complete(prompt, resolved_max_tokens, "copilot")
-        return _evidence_result_from_raw(
+        result = _evidence_result_from_raw(
             question=question,
             evidence=evidence,
             raw=raw,
             prompt=prompt,
             max_tokens=resolved_max_tokens,
         )
+        _put_cached_evidence_answer(cache_key, result)
+        return result
     except Exception as exc:
         return VNextAnswerResult(
             answer=deterministic_answer(evidence),
@@ -153,6 +174,45 @@ def answer_general_question(
         )
 
 
+def answer_chat_history_meta_question(*, question: str, history: list[dict] | None) -> str:
+    if not is_last_user_message_question(question):
+        return ""
+    previous = _last_user_message_before_current(history, question)
+    if not previous:
+        return "I do not have a previous user message in this chat yet."
+    return f'The last thing you said before this was: "{previous}"'
+
+
+def is_last_user_message_question(question: str) -> bool:
+    text = " ".join(str(question or "").lower().split())
+    if not text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "last thing i said",
+            "last thing i asked",
+            "what did i just say",
+            "what was my last message",
+            "what did i say last",
+        )
+    )
+
+
+def _last_user_message_before_current(history: list[dict] | None, question: str) -> str:
+    current = " ".join(str(question or "").split()).strip().lower()
+    for turn in reversed(history or []):
+        if not isinstance(turn, dict) or str(turn.get("role") or "").lower() != "user":
+            continue
+        content = " ".join(str(turn.get("content") or "").split()).strip()
+        if not content:
+            continue
+        if current and content.lower() == current:
+            continue
+        return content
+    return ""
+
+
 def iter_answer_vnext_events(
     *,
     question: str,
@@ -168,7 +228,7 @@ def iter_answer_vnext_events(
         yield {
             "type": "_answer_result",
             "answer_result": VNextAnswerResult(
-                answer=validation.clarification_question or "I need one more detail to answer that cleanly.",
+                answer=safe_validation_answer(validation),
                 path="clarify",
             ),
         }
@@ -177,7 +237,7 @@ def iter_answer_vnext_events(
         yield {
             "type": "_answer_result",
             "answer_result": VNextAnswerResult(
-                answer=validation.blocked_reason or "I could not safely run that request.",
+                answer=safe_validation_answer(validation),
                 path="blocked",
                 error=validation.blocked_reason,
             ),
@@ -193,6 +253,22 @@ def iter_answer_vnext_events(
                     answer=explain_last_answer_from_history(history),
                     path="explain_last_answer",
                 ),
+            }
+            return
+
+        chat_history_answer = answer_chat_history_meta_question(question=question, history=history)
+        if chat_history_answer:
+            yield {
+                "type": "_answer_result",
+                "answer_result": VNextAnswerResult(answer=chat_history_answer, path="general_answer"),
+            }
+            return
+
+        inline = _selector_inline_answer(route)
+        if inline:
+            yield {
+                "type": "_answer_result",
+                "answer_result": VNextAnswerResult(answer=inline, path="selector_inline"),
             }
             return
 
@@ -222,6 +298,13 @@ def iter_answer_vnext_events(
         return
 
     resolved_max_tokens = _resolve_answer_max_tokens("evidence_llm", max_tokens)
+    cache_key = _evidence_answer_cache_key(question=question, evidence=evidence, max_tokens=resolved_max_tokens)
+    cached = _get_cached_evidence_answer(cache_key, max_tokens=resolved_max_tokens)
+    if cached:
+        yield {"type": "token", "text": cached.answer}
+        yield {"type": "_answer_result", "answer_result": cached}
+        return
+
     prompt = build_evidence_answer_prompt(question=question, evidence=evidence)
     yield from _iter_streamed_answer_result(
         prompt=prompt,
@@ -244,7 +327,32 @@ def iter_answer_vnext_events(
         ),
         stream_completer=stream_completer,
         max_tokens=resolved_max_tokens,
+        required_prefix=_why_disclaimer_prefix(question),
+        prefix_markers=_WHY_DISCLAIMER_MARKERS,
+        cache_key=cache_key,
     )
+
+
+def _selector_inline_answer(route: dict) -> str:
+    selector = route.get("selector") if isinstance(route.get("selector"), dict) else {}
+    decision = selector.get("decision") if isinstance(selector.get("decision"), dict) else {}
+    intent_frame = decision.get("intent_frame") if isinstance(decision.get("intent_frame"), dict) else {}
+    details = decision.get("details") if isinstance(decision.get("details"), dict) else {}
+    inline_allowed = str(details.get("answer_mode") or decision.get("answer_mode") or "").strip().lower() == "inline"
+    if not inline_allowed:
+        return ""
+    answer = str(
+        decision.get("answer")
+        or decision.get("direct_answer")
+        or intent_frame.get("answer")
+        or route.get("selector_answer")
+        or ""
+    ).strip()
+    if not answer:
+        return ""
+    # Inline selector answers are for short chat turns. Longer answers should use
+    # the normal answer model so persona and formatting stay high quality.
+    return answer if len(answer) <= VNEXT_INLINE_CHAT_MAX_CHARS else ""
 
 
 def _iter_streamed_answer_result(
@@ -254,26 +362,67 @@ def _iter_streamed_answer_result(
     fallback: Callable[[str, Exception], VNextAnswerResult],
     stream_completer: StreamAnswerCompleter | None,
     max_tokens: int,
+    required_prefix: str = "",
+    prefix_markers: tuple[str, ...] = (),
+    cache_key: str = "",
 ):
     stream = stream_completer or _default_stream_completer
     raw_parts: list[str] = []
     emitted = False
+    prefix = str(required_prefix or "")
+    pending_parts: list[str] = []
+    prefix_decided = not prefix
+
+    def emit_text(text: str):
+        nonlocal emitted
+        raw_parts.append(text)
+        emitted = True
+        return {"type": "token", "text": text}
+
+    def pending_text() -> str:
+        return "".join(pending_parts)
+
+    def pending_has_marker() -> bool:
+        lowered = pending_text().lower()
+        return any(marker in lowered for marker in prefix_markers)
+
+    def should_decide_pending() -> bool:
+        text = pending_text()
+        return len(text) >= 96 or any(char in text for char in ".!?\n")
+
+    def release_pending(*, with_prefix: bool):
+        if with_prefix:
+            yield emit_text(prefix)
+        for item in pending_parts:
+            yield emit_text(item)
+        pending_parts.clear()
+
     try:
         for chunk in stream(prompt, max_tokens, "copilot"):
             text = str(chunk or "")
             if not text:
                 continue
-            raw_parts.append(text)
-            emitted = True
-            yield {"type": "token", "text": text}
+            if not prefix_decided:
+                pending_parts.append(text)
+                if pending_has_marker():
+                    prefix_decided = True
+                    yield from release_pending(with_prefix=False)
+                elif should_decide_pending():
+                    prefix_decided = True
+                    yield from release_pending(with_prefix=True)
+                continue
+            yield emit_text(text)
+        if pending_parts:
+            yield from release_pending(with_prefix=not pending_has_marker())
         raw = "".join(raw_parts)
         result = finalize(raw)
+        _put_cached_evidence_answer(cache_key, result)
     except Exception as exc:
         raw = "".join(raw_parts)
         result = fallback(raw, exc)
 
     displayed_answer = raw.strip()
-    if emitted and result.answer and result.answer.strip() != displayed_answer:
+    if emitted and result.answer and not _same_display_answer(result.answer, displayed_answer):
         yield {"type": "reset_text"}
         yield {"type": "token", "text": result.answer}
     yield {"type": "_answer_result", "answer_result": result}
@@ -322,6 +471,139 @@ def _general_result_from_raw(*, raw: str, prompt: str, max_tokens: int) -> VNext
     if not answer:
         raise ValueError("empty answer")
     return VNextAnswerResult(answer=answer, path="general_answer", raw=raw, prompt=prompt, llm_calls=1, max_tokens=max_tokens)
+
+
+def clear_evidence_answer_cache() -> None:
+    _EVIDENCE_ANSWER_CACHE.clear()
+
+
+def _evidence_answer_cache_key(*, question: str, evidence: EvidencePacket, max_tokens: int) -> str:
+    if VNEXT_EVIDENCE_ANSWER_CACHE_SIZE <= 0:
+        return ""
+    payload = {
+        "version": _EVIDENCE_ANSWER_CACHE_VERSION,
+        "question": " ".join(str(question or "").lower().split()),
+        "max_tokens": int(max_tokens or 0),
+        "evidence": _cacheable_evidence_payload(evidence),
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _get_cached_evidence_answer(cache_key: str, *, max_tokens: int) -> VNextAnswerResult | None:
+    if not cache_key:
+        return None
+    answer = _EVIDENCE_ANSWER_CACHE.get(cache_key)
+    if answer is None:
+        return None
+    _EVIDENCE_ANSWER_CACHE.move_to_end(cache_key)
+    return VNextAnswerResult(
+        answer=answer,
+        path="evidence_llm",
+        raw=answer,
+        llm_calls=0,
+        max_tokens=max_tokens,
+        cache_hit=True,
+    )
+
+
+def _put_cached_evidence_answer(cache_key: str, result: VNextAnswerResult) -> None:
+    if not cache_key or VNEXT_EVIDENCE_ANSWER_CACHE_SIZE <= 0:
+        return
+    if result.path != "evidence_llm" or result.used_fallback or result.error or not result.answer:
+        return
+    _EVIDENCE_ANSWER_CACHE[cache_key] = result.answer
+    _EVIDENCE_ANSWER_CACHE.move_to_end(cache_key)
+    while len(_EVIDENCE_ANSWER_CACHE) > VNEXT_EVIDENCE_ANSWER_CACHE_SIZE:
+        _EVIDENCE_ANSWER_CACHE.popitem(last=False)
+
+
+def _cacheable_evidence_payload(evidence: EvidencePacket) -> dict:
+    return {
+        "tool_results": _strip_volatile_evidence_fields(evidence.tool_results),
+        "facts": _strip_volatile_evidence_fields(evidence.facts),
+        "rows": _strip_volatile_evidence_fields(evidence.rows),
+        "charts": _strip_volatile_evidence_fields(evidence.charts),
+        "caveats": list(evidence.caveats or []),
+    }
+
+
+def _strip_volatile_evidence_fields(value):
+    if isinstance(value, list):
+        return [_strip_volatile_evidence_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _strip_volatile_evidence_fields(item)
+            for key, item in value.items()
+            if key not in {"ms", "elapsed_ms", "duration_ms", "timing_ms"}
+        }
+    return value
+
+
+def safe_validation_answer(validation: ValidationResult) -> str:
+    """Map internal validation/compiler wording to product-safe copy."""
+    if validation.status == "clarify":
+        raw = str(validation.clarification_question or "").strip()
+        fallback = "I need one more detail to answer that cleanly."
+    elif validation.status == "blocked":
+        raw = str(validation.blocked_reason or "").strip()
+        fallback = "I could not safely run that request."
+    else:
+        return ""
+
+    if not raw:
+        return fallback
+    if not _looks_internal_validation_message(raw):
+        return raw
+    return _productized_validation_message(raw, status=validation.status)
+
+
+def _looks_internal_validation_message(message: str) -> bool:
+    lowered = str(message or "").lower()
+    markers = (
+        "unsupported arg",
+        "unsupported key",
+        "unsupported field",
+        "has unsupported",
+        "source_step_id",
+        "make_chart",
+        "plot_chart",
+        "payload",
+        "schema",
+        "validator",
+        "selector",
+        "semantic",
+        "normalized",
+        "tool plan",
+        "unknown tool",
+        "internal tool",
+        "run_sql",
+        "labels",
+        "values",
+        "series",
+        "prior tool evidence",
+        "filters",
+        "filters must",
+        "arg(s)",
+        "range_a",
+        "range_b",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _productized_validation_message(message: str, *, status: str) -> str:
+    lowered = str(message or "").lower()
+    if any(marker in lowered for marker in ("chart", "make_chart", "plot_chart", "source_step_id", "labels", "values", "series", "prior tool evidence")):
+        return "I can chart that, but I need a clear Folio result to chart from first."
+    if any(marker in lowered for marker in ("apply", "confirm", "commit", "execute changes", "write")):
+        return "I can prepare a preview, but I will not apply finance changes until you confirm them."
+    if any(marker in lowered for marker in ("run_sql", "internal tool", "unknown tool", "disallowed")):
+        return "I cannot use that internal Folio tool from chat."
+    if "transaction sort" in lowered or "sort" in lowered:
+        return "I can show matching transactions, but I need to use a supported transaction view."
+    if status == "clarify":
+        return "I need one more detail to choose the right Folio view."
+    return "I could not turn that into a safe Folio action yet."
 
 
 def build_evidence_answer_prompt(*, question: str, evidence: EvidencePacket) -> str:
@@ -520,9 +802,26 @@ def ensure_why_disclaimer(question: str, answer: str) -> str:
     if "why" not in text:
         return answer
     lowered = str(answer or "").lower()
-    if any(phrase in lowered for phrase in ("cannot know why", "can't know why", "data alone", "cannot prove intent", "can't prove intent")):
+    if any(phrase in lowered for phrase in _WHY_DISCLAIMER_MARKERS):
         return answer
     return "I can't know why from the data alone. " + str(answer or "").lstrip()
+
+
+_WHY_DISCLAIMER_MARKERS = (
+    "cannot know why",
+    "can't know why",
+    "data alone",
+    "cannot prove intent",
+    "can't prove intent",
+)
+
+
+def _why_disclaimer_prefix(question: str) -> str:
+    return "I can't know why from the data alone. " if "why" in str(question or "").lower() else ""
+
+
+def _same_display_answer(left: str, right: str) -> bool:
+    return " ".join(str(left or "").split()) == " ".join(str(right or "").split())
 
 
 def _unsupported_vnext_entity_terms(answer: str, evidence: EvidencePacket) -> list[str]:
@@ -538,9 +837,12 @@ def _unsupported_vnext_entity_terms(answer: str, evidence: EvidencePacket) -> li
 
 __all__ = [
     "VNEXT_EVIDENCE_MAX_TOKENS",
+    "VNEXT_EVIDENCE_ANSWER_CACHE_SIZE",
     "VNEXT_GENERAL_MAX_TOKENS",
+    "VNEXT_INLINE_CHAT_MAX_CHARS",
     "VNextAnswerResult",
     "answer_from_evidence",
+    "answer_chat_history_meta_question",
     "answer_general_question",
     "answer_vnext",
     "build_answer_system_prompt",
@@ -548,8 +850,11 @@ __all__ = [
     "build_general_answer_prompt",
     "build_general_answer_system_prompt",
     "build_recent_conversation_context",
+    "clear_evidence_answer_cache",
     "explain_last_answer_from_history",
     "ensure_why_disclaimer",
+    "is_last_user_message_question",
     "is_explain_last_answer_question",
     "iter_answer_vnext_events",
+    "safe_validation_answer",
 ]

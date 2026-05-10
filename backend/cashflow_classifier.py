@@ -85,6 +85,8 @@ _SAVINGS_TRANSFER_PATTERNS = (
     r"transfer\s+from\s+chk",
     r"transfer\s+from\s+sav",
     r"transfer\s+to\s+chk",
+    r"transfer\s+from\s+acct",
+    r"transfer\s+to\s+acct",
     r"savings\s+transfer",
     r"\bdes:transfer\b",
     r"online\s+(?:scheduled\s+)?transfer",
@@ -196,6 +198,81 @@ def _locked_user_category(tx: dict[str, Any]) -> bool:
     return source in USER_AUTHORITY_SOURCES or pinned in {1, True, "1", "true", "True"}
 
 
+def _profile_id(tx: dict[str, Any]) -> str:
+    return str(tx.get("profile") or tx.get("profile_id") or "").strip()
+
+
+def _normalized_account_id(tx: dict[str, Any]) -> str:
+    return str(tx.get("account_id") or "").strip().lower()
+
+
+def _normalized_account_name(tx: dict[str, Any]) -> str:
+    return re.sub(r"\s+", " ", str(tx.get("account_name") or "").strip().lower())
+
+
+def _different_known_accounts(tx: dict[str, Any], other: dict[str, Any]) -> bool:
+    tx_account_id = _normalized_account_id(tx)
+    other_account_id = _normalized_account_id(other)
+    if tx_account_id and other_account_id:
+        return tx_account_id != other_account_id
+
+    tx_account_name = _normalized_account_name(tx)
+    other_account_name = _normalized_account_name(other)
+    if tx_account_name and other_account_name:
+        return tx_account_name != other_account_name
+
+    return False
+
+
+def _looks_like_account_movement(tx: dict[str, Any], other: dict[str, Any]) -> bool:
+    movement_patterns = _SAVINGS_TRANSFER_PATTERNS + _P2P_PATTERNS
+    return _matches(_text(tx), movement_patterns) or _matches(_text(other), movement_patterns)
+
+
+def _paired_account_evidence(tx: dict[str, Any], other: dict[str, Any]) -> dict[str, Any] | None:
+    amount = _amount(tx)
+    other_amount = _amount(other)
+    if abs(abs(other_amount) - abs(amount)) >= 0.01 or other_amount * amount >= 0:
+        return None
+
+    tx_is_credit = _is_credit_card_account(tx)
+    other_is_credit = _is_credit_card_account(other)
+    if tx_is_credit != other_is_credit and (
+        (_is_depository_account(tx) and amount < 0 and other_is_credit and other_amount > 0)
+        or (tx_is_credit and amount > 0 and _is_depository_account(other) and other_amount < 0)
+    ):
+        return {
+            "kind": "credit_card_payment",
+            "paired_transaction_id": other.get("id") or other.get("original_id"),
+            "signals": ["same_amount_opposite_sign", "credit_card_account_pair"],
+        }
+
+    if not (_is_depository_account(tx) and _is_depository_account(other)):
+        return None
+    if not _different_known_accounts(tx, other):
+        return None
+    if not _looks_like_account_movement(tx, other):
+        return None
+
+    tx_profile = _profile_id(tx)
+    other_profile = _profile_id(other)
+    if not tx_profile or not other_profile:
+        return None
+
+    same_profile = tx_profile == other_profile
+    return {
+        "kind": "linked_account_transfer",
+        "paired_transaction_id": other.get("id") or other.get("original_id"),
+        "category": "Savings Transfer" if same_profile else "Personal Transfer",
+        "expense_type": "transfer_internal" if same_profile else "transfer_household",
+        "signals": [
+            "same_amount_opposite_sign",
+            "linked_depository_account_pair",
+            "same_profile" if same_profile else "cross_profile",
+        ],
+    }
+
+
 def find_account_pair_evidence(
     tx: dict[str, Any],
     *,
@@ -228,18 +305,9 @@ def find_account_pair_evidence(
 
     for row in rows:
         other = dict(row)
-        tx_is_credit = _is_credit_card_account(tx)
-        other_is_credit = _is_credit_card_account(other)
-        other_amount = _amount(other)
-        if tx_is_credit != other_is_credit and (
-            (_is_depository_account(tx) and amount < 0 and other_is_credit and other_amount > 0)
-            or (tx_is_credit and amount > 0 and _is_depository_account(other) and other_amount < 0)
-        ):
-            return {
-                "kind": "credit_card_payment",
-                "paired_transaction_id": other.get("id"),
-                "signals": ["same_amount_opposite_sign", "credit_card_account_pair"],
-            }
+        pair = _paired_account_evidence(tx, other)
+        if pair:
+            return pair
     return None
 
 
@@ -259,24 +327,12 @@ def build_batch_pair_evidence(transactions: list[dict[str, Any]], *, days: int =
                 continue
             if abs(abs(_amount(other)) - abs(amount)) >= 0.01 or _amount(other) * amount >= 0:
                 continue
-            tx_is_credit = _is_credit_card_account(tx)
-            other_is_credit = _is_credit_card_account(other)
-            other_amount = _amount(other)
-            if tx_is_credit != other_is_credit and (
-                (_is_depository_account(tx) and amount < 0 and other_is_credit and other_amount > 0)
-                or (tx_is_credit and amount > 0 and _is_depository_account(other) and other_amount < 0)
-            ):
-                pair = {
-                    "kind": "credit_card_payment",
-                    "paired_transaction_id": other.get("id") or other.get("original_id"),
-                    "signals": ["same_amount_opposite_sign", "credit_card_account_pair"],
-                }
-                reverse_pair = {
-                    **pair,
-                    "paired_transaction_id": tx.get("id") or tx.get("original_id"),
-                }
+            pair = _paired_account_evidence(tx, other)
+            if pair:
+                reverse_pair = _paired_account_evidence(other, tx)
                 evidence[i] = pair
-                evidence[j] = reverse_pair
+                if reverse_pair:
+                    evidence[j] = reverse_pair
                 break
     return evidence
 
@@ -301,6 +357,22 @@ def classify_cashflow_category(
             "confidence": "high",
             "source": "user-rule" if tx.get("categorization_source") == "user-rule" else "user",
             "evidence": {"signals": ["user_authority"], "paired_transaction_id": None},
+        }
+
+    pair = account_pair_evidence or find_account_pair_evidence(tx, conn=conn)
+    if pair and pair.get("kind") == "credit_card_payment":
+        return {
+            "category": _category_allowed("Credit Card Payment", active_categories),
+            "confidence": "high",
+            "source": "pairing",
+            "evidence": pair,
+        }
+    if pair and pair.get("kind") == "linked_account_transfer":
+        return {
+            "category": _category_allowed(pair.get("category") or "Savings Transfer", active_categories),
+            "confidence": "high",
+            "source": "pairing",
+            "evidence": pair,
         }
 
     if _matches(text, _P2P_PATTERNS):
@@ -345,14 +417,6 @@ def classify_cashflow_category(
             "evidence": {"signals": ["positive_credit_card_unpaired", "credit_refund_text"], "paired_transaction_id": None},
         }
 
-    pair = account_pair_evidence or find_account_pair_evidence(tx, conn=conn)
-    if pair and pair.get("kind") == "credit_card_payment":
-        return {
-            "category": _category_allowed("Credit Card Payment", active_categories),
-            "confidence": "high",
-            "source": "pairing",
-            "evidence": pair,
-        }
     if amount > 0 and is_credit:
         return {
             "category": _category_allowed(CREDITS_REFUNDS_CATEGORY, active_categories),
@@ -372,6 +436,14 @@ def classify_cashflow_category(
                     "paired_transaction_id": None,
                 },
             }
+
+    if amount != 0 and is_depository and _matches(text, _SAVINGS_TRANSFER_PATTERNS):
+        return {
+            "category": _category_allowed("Savings Transfer", active_categories),
+            "confidence": "medium",
+            "source": "provider",
+            "evidence": {"signals": ["transfer_rail", "savings_transfer_text"], "paired_transaction_id": None},
+        }
 
     if amount > 0 and is_depository and _matches(text, _TAX_REFUND_PATTERNS):
         return {
@@ -403,14 +475,6 @@ def classify_cashflow_category(
                 "source": "provider",
                 "evidence": {"signals": ["positive_depository_inflow", "credit_refund_text"], "paired_transaction_id": None},
             }
-
-    if tx_type in {"transfer", "ach"} and amount < 0 and _matches(text, _SAVINGS_TRANSFER_PATTERNS):
-        return {
-            "category": _category_allowed("Savings Transfer", active_categories),
-            "confidence": "medium",
-            "source": "provider",
-            "evidence": {"signals": ["transfer_rail", "savings_transfer_text"], "paired_transaction_id": None},
-        }
 
     return {
         "category": "Other",

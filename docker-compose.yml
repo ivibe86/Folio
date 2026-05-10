@@ -3,11 +3,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_DISTILBERT: ${INSTALL_DISTILBERT:-false}
     expose:
       - "8000"
     volumes:
       - ./data:/data
       - ./certs:/certs:ro
+      # Optional local Hugging Face model cache for CATEGORIZATION_BACKEND=distilbert.
+      - ./models:/models:ro
     env_file:
       - .env
     environment:

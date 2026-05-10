@@ -25,6 +25,7 @@ class RangeParse:
     token: str
     explicit: bool
     chart_months: int | None = None
+    unsupported_reason: str = ""
 
 
 def words(text: str) -> list[str]:
@@ -134,6 +135,41 @@ def _explicit_named_month(tokens: list[str], now: datetime) -> str | None:
     return None
 
 
+def _unsupported_bounded_range(tokens: list[str]) -> str:
+    if _has_between_months(tokens):
+        return "custom date ranges are not supported yet"
+    if _has_quarter_phrase(tokens):
+        return "quarter ranges are not supported yet"
+    return ""
+
+
+def _has_between_months(tokens: list[str]) -> bool:
+    connectors = {"and", "to", "through", "thru", "until"}
+    month_positions = [idx for idx, item in enumerate(tokens) if MONTH_LOOKUP.get(item)]
+    if len(month_positions) >= 2:
+        left, right = month_positions[0], month_positions[1]
+        if connectors & set(tokens[left + 1 : right]):
+            return True
+    for idx, token in enumerate(tokens):
+        if token not in {"between", "from"}:
+            continue
+        remaining = tokens[idx + 1 :]
+        remaining_month_positions = [pos for pos, item in enumerate(remaining) if MONTH_LOOKUP.get(item)]
+        if len(remaining_month_positions) < 2:
+            continue
+        left, right = remaining_month_positions[0], remaining_month_positions[1]
+        if connectors & set(remaining[left + 1 : right]):
+            return True
+    return False
+
+
+def _has_quarter_phrase(tokens: list[str]) -> bool:
+    token_set = set(tokens)
+    if {"quarter", "qtr"} & token_set:
+        return True
+    return any(token in {"q1", "q2", "q3", "q4"} for token in tokens)
+
+
 def _relative_month_delta(tokens: list[str]) -> int | None:
     if (
         contains(tokens, ("month", "before"))
@@ -159,6 +195,10 @@ def parse_range(question: str, *, default: str = "current_month", now: datetime 
     now = now or datetime.now()
     tokens = words(question)
     token_set = set(tokens)
+
+    unsupported = _unsupported_bounded_range(tokens)
+    if unsupported:
+        return RangeParse("", True, unsupported_reason=unsupported)
 
     explicit_month = _explicit_month(tokens)
     if explicit_month:
@@ -221,6 +261,9 @@ def parse_range(question: str, *, default: str = "current_month", now: datetime 
             return RangeParse(f"last_{months}_months", True, chart_months=months)
         if unit in {"day", "days"}:
             days = max(1, min(amount, 365))
+            return RangeParse(f"last_{days}d", True)
+        if unit in {"week", "weeks"}:
+            days = max(1, min(amount * 7, 365))
             return RangeParse(f"last_{days}d", True)
 
     if contains(tokens, ("so", "far")):

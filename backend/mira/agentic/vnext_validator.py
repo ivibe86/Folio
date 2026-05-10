@@ -42,6 +42,7 @@ _CANONICAL_RANGES = {
     "all",
 }
 _RANGE_KEYS = {"range", "range_a", "range_b"}
+_UNSUPPORTED_RANGE_TOKEN = "__unsupported_range__"
 _MEMORY_TOOL_NAMES = {"manage_memory", "remember_user_context", "retrieve_relevant_memories", "list_mira_memories"}
 _DIRECT_MEMORY_MUTATION_TOOLS = {"update_memory", "forget_memory"}
 _GROUND_KEYS = {
@@ -80,7 +81,14 @@ def validate_selector_calls(
         name = canonical_semantic_tool_name(raw_name)
         call_validation_error = str(call.get("validation_error") or "").strip()
         if call_validation_error:
-            return _clarify(decision, call_validation_error, grounded_entities)
+            call_entities = call.get("grounded_entities") if isinstance(call.get("grounded_entities"), list) else []
+            call_pending = call.get("pending_clarification") if isinstance(call.get("pending_clarification"), dict) else None
+            return _clarify(
+                decision,
+                call_validation_error,
+                grounded_entities + copy.deepcopy(call_entities),
+                pending_clarification=call_pending,
+            )
         if name == "run_sql":
             return _blocked(decision, "disallowed internal tool")
         if name not in by_name:
@@ -93,6 +101,9 @@ def validate_selector_calls(
             return _blocked(decision, "write requests cannot apply, confirm, commit, or execute changes in the selector path")
         args = _strip_apply_keys(args)
         args = _normalize_ranges(args, now=now)
+        range_issue = _range_validation_issue(args)
+        if range_issue:
+            return _clarify(decision, range_issue, grounded_entities)
         mention = _resolve_structured_mentions(name, args, profile=profile, grounder=grounder)
         if mention.status == "clarify":
             return _clarify(
@@ -116,7 +127,17 @@ def validate_selector_calls(
             if frame_result.issue.status == "blocked":
                 return _blocked(decision, frame_result.issue.message)
             if frame_result.issue.status == "clarify":
-                return _clarify(decision, frame_result.issue.message, grounded_entities)
+                return _clarify(
+                    decision,
+                    frame_result.issue.message,
+                    grounded_entities,
+                    pending_clarification=_pending_slot_from_semantic_issue(
+                        name,
+                        frame_result.args,
+                        frame_result.current_frame,
+                        frame_result.issue.message,
+                    ),
+                )
             name = frame_result.tool_name
             args = frame_result.args
             issue = semantic_validation_issue(name, args, prior_steps)
@@ -285,7 +306,16 @@ def _normalize_range(value: str, *, now: datetime | None) -> str:
     if re.match(r"^last_\d{1,2}_months$", token):
         return token
     parsed = parse_range(value, now=now)
+    if parsed.explicit and parsed.unsupported_reason:
+        return _UNSUPPORTED_RANGE_TOKEN
     return parsed.token
+
+
+def _range_validation_issue(args: dict[str, Any]) -> str:
+    for key in _RANGE_KEYS:
+        if args.get(key) == _UNSUPPORTED_RANGE_TOKEN:
+            return "I need a supported time range before I can answer that."
+    return ""
 
 
 def _transaction_scope_issue(tool_name: str, args: dict[str, Any]) -> str:
@@ -334,6 +364,26 @@ def _validate_plot_args(args: dict[str, Any], prior_steps: dict[str, str]) -> st
     if source_step_id not in prior_steps:
         return "plot_chart source_step_id must reference an existing earlier tool step"
     return ""
+
+
+def _pending_slot_from_semantic_issue(
+    tool_name: str,
+    args: dict[str, Any],
+    current_frame: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    lowered = str(message or "").lower()
+    if tool_name == "check_affordability" and "amount" in lowered:
+        payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
+        return {
+            "kind": "missing_slot",
+            "slot": "amount",
+            "tool": "check_affordability",
+            "args": copy.deepcopy(args or {}),
+            "frame": copy.deepcopy(current_frame or {}),
+            "purpose": payload.get("purpose"),
+        }
+    return {}
 
 
 def _fill_chart_source_from_prior_steps(args: dict[str, Any], prior_steps: dict[str, str]) -> dict[str, Any]:

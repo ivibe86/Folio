@@ -8,6 +8,16 @@ from typing import Any, Callable
 
 from range_parser import resolve_followup_range
 
+from mira.agentic.intent_frame import (
+    DISCOURSE_ACTION_VALUES,
+    INTENT_VALUES,
+    MiraIntentFrame,
+    OUTPUT_VALUES,
+    SUBJECT_KIND_VALUES,
+    TIME_ALIASES,
+    TIME_VALUES,
+    is_supported_time_token,
+)
 from mira.agentic.semantic_catalog import canonical_semantic_tool_name
 from mira.agentic.semantic_frames import latest_prior_frame
 from mira.agentic.vnext_args import UNIVERSAL_ARG_FIELDS, adapt_universal_args
@@ -22,6 +32,11 @@ from mira.agentic.vnext_manifest import (
 
 
 SelectorCompleter = Callable[[str, int, str], str]
+
+_RECENT_CONTEXT_MAX_CHARS = 600
+_COMPACT_FIELD_MAX_CHARS = 72
+_COMPACT_PENDING_OPTION_MAX_CHARS = 36
+_COMPACT_PENDING_RAW_MAX_CHARS = 56
 
 _SINGLE_RANGE_TOOLS = {
     "query_transactions",
@@ -61,6 +76,13 @@ _ROUTE_ALIASES = {
     "finance": "finance_tool",
     "finance_tool": "finance_tool",
     "finance_tools": "finance_tool",
+    "chart": "finance_tool",
+    "charts": "finance_tool",
+    "write_chart": "finance_tool",
+    "writes_chart": "finance_tool",
+    "write_charts": "finance_tool",
+    "writes_charts": "finance_tool",
+    "make_chart": "finance_tool",
     "memory": "memory",
     "write": "write_preview",
     "write_preview": "write_preview",
@@ -70,58 +92,48 @@ _ROUTE_ALIASES = {
 SELECTOR_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "calls": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    **{field: {"type": ["string", "number", "boolean", "object", "array", "null"]} for field in UNIVERSAL_ARG_FIELDS},
-                },
-                "required": ["tool", "view", "range", "filters", "payload", "context_action", "range_source"],
-                "additionalProperties": False,
-            },
-        },
-        "family": {"type": "string"},
-        "intent": {"type": "string"},
-        "need_detail": {"type": "boolean"},
-        "needs_folio_evidence": {"type": "boolean"},
-        "frame_patch": {
-            "type": ["object", "null"],
-            "properties": {
-                "frame_action": {"type": "string"},
-                "subject_action": {"type": "string"},
-                "subject": {
-                    "type": ["object", "string", "null"],
-                    "properties": {
-                        "raw": {"type": "string"},
-                        "type_hint": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-                "range_action": {"type": "string"},
-                "range": {"type": "string"},
-                "output_action": {"type": "string"},
-                "requested_output": {"type": "string"},
-                "clarification_choice": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-        "discourse_action": {"type": "string"},
-        "subject": {
-            "type": ["object", "string", "null"],
-            "properties": {
-                "raw": {"type": "string"},
-                "type_hint": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-        "range": {"type": "string"},
-        "requested_output": {"type": "string"},
-        "clarification_choice": {"type": "string"},
         "route": {"type": "string"},
         "answer": {"type": "string"},
+        "intent": {"type": "string"},
+        "subject": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "text": {"type": ["string", "null"]},
+            },
+            "additionalProperties": False,
+        },
+        "time": {"type": "string"},
+        "time_a": {"type": ["string", "null"]},
+        "time_b": {"type": ["string", "null"]},
+        "output": {"type": "string"},
+        "chart_type": {"type": ["string", "null"]},
+        "discourse_action": {"type": "string"},
+        "details": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "metric": {"type": ["string", "null"]},
+                "group_by": {"type": ["string", "null"]},
+                "amount": {"type": ["number", "string", "null"]},
+                "purpose": {"type": ["string", "null"]},
+                "change_type": {"type": ["string", "null"]},
+                "merchant": {"type": ["string", "null"]},
+                "category": {"type": ["string", "null"]},
+                "search": {"type": ["string", "null"]},
+                "transaction_id": {"type": ["string", "null"]},
+                "limit": {"type": ["integer", "null"]},
+                "answer_mode": {"type": ["string", "null"]},
+                "memory_action": {"type": ["string", "null"]},
+                "text": {"type": ["string", "null"]},
+                "question": {"type": ["string", "null"]},
+                "topic": {"type": ["string", "null"]},
+                "memory_id": {"type": ["integer", "string", "null"]},
+                "memory_type": {"type": ["string", "null"]},
+            },
+        },
     },
-    "required": ["route", "intent", "needs_folio_evidence", "calls"],
+    "required": ["route", "intent", "subject", "time", "output", "discourse_action"],
     "additionalProperties": False,
 }
 
@@ -140,41 +152,27 @@ class SelectorResult:
     family_detail_used: bool = False
     repair_used: bool = False
     trace: dict[str, Any] = field(default_factory=dict)
+    intent_frame: dict[str, Any] | None = None
 
 
 def build_selector_system_prompt() -> str:
-    return """You are Mira: companion first, Folio finance expert second. Return JSON only.
+    return """You are Mira: best-friend energy, Folio finance expert when needed. Return compact JSON only.
 
-Routes:
-- chat: greetings, reactions, general knowledge, writing/life help, or finance concepts without Folio data. calls=[].
-- finance_tool: user's Folio data: transactions, spending, budgets, cashflow, recurring, net worth, charts, data quality.
-- memory: explicit remember/recall/list/update/forget memory.
-- write_preview: finance data changes; preview only.
-- explain_last_answer: provenance for the prior answer; no fresh tools.
+Schema: {route,intent,subject:{kind,text},time,time_a,time_b,output,chart_type,discourse_action,answer,details}
+No tool names, views, filters, calls, SQL, or chart data. Python compiles tools.
 
-Top JSON: {"route":"chat|finance_tool|memory|write_preview|explain_last_answer","intent":"short_snake_case","needs_folio_evidence":false,"frame_patch":null,"calls":[]}
-Call envelope fields: tool, view, range, range_a, range_b, filters, payload, limit, offset, sort, context_action, range_source.
-Use filters for read selectors (merchant/category/account/search/transaction_id). Use payload for metrics, amounts, write details, chart source.
+route: chat|finance|memory|write_preview|explain_last
+intent: none|spending_total|spending_explain|spending_top|spending_breakdown|spending_trend|spending_compare|transaction_lookup|budget_status|budget_plan|savings_capacity|cashflow_forecast|cashflow_shortfall|affordability|recurring_summary|recurring_changes|net_worth_balance|net_worth_trend|net_worth_delta|finance_snapshot|finance_priorities|explain_metric|data_health|enrichment_quality|low_confidence_transactions|explain_transaction|memory_op|write_preview
+subject.kind: merchant|category|account|metric|transaction|net_worth|self|unknown|none
+time: this_month|last_month|ytd|all_time|last_Nd|last_N_months|last_year|custom|month_before_prior|next_month_after_prior|none
+output: scalar|table|list|chart|comparison|status|preview|none
+discourse_action: new|follow_up|correction|refine|clarification_reply|clear
 
-Tools/views:
-query_transactions(latest,list,search,detail); summarize_spending(period_total,entity_total,top,breakdown,trend,compare); finance_overview(snapshot,priorities,explain_metric); review_budget(plan,category_status,savings_capacity); review_cashflow(forecast,shortfall); check_affordability(purchase); review_recurring(summary,changes); review_net_worth(balances,trend,delta); review_data_quality(health,enrichment_summary,low_confidence,explain_transaction); manage_memory(remember,retrieve,list,update,forget); preview_finance_change(preview); make_chart(line,bar,donut).
-Use only these exact view names.
-
-Routing hints:
-- spend total at/on X -> summarize_spending entity_total with merchant/category; metric=expenses.
-- expenses/income/refunds total -> summarize_spending period_total with payload.metric.
-- top/biggest -> summarize_spending top with payload.group_by=merchant or category.
-- why/recent/latest transaction/deposit/income timing -> query_transactions.
-- budget/category budget -> review_budget. save monthly/savings capacity -> review_budget savings_capacity. cashflow/shortfall -> review_cashflow. afford -> check_affordability.
-- subscriptions/recurring -> review_recurring. balances/net worth -> review_net_worth.
-- chart/plot/graph -> evidence call first, then make_chart with payload.source_step_id.
-- recategorize/move/categorize/set/update finance data -> write_preview preview_finance_change.
-
-Ranges: current_month, last_month, ytd, all, YYYY-MM, last_6_months, last_30d, etc. Month names become YYYY-MM. Default unstated finance reads to current_month unless trend/all-time naturally fits.
-
-Follow-ups: if prior context exists and the user is changing subject/range/output, prefer frame_patch and calls=[].
-Patch fields: frame_action=patch_prior|clarification_reply; subject_action=inherit|replace|clear; subject.raw/type_hint; range_action=inherit|replace|previous_of_prior|next_of_prior|clear; range; output_action=inherit|replace; requested_output=scalar_total|rows|chart|comparison|status|preview; clarification_choice.
-Do not emit half-filled calls for patch_prior. Latest user words override prior context."""
+Default chat unless Folio data, memory, write preview, or explain-last is clearly requested. Chat: intent=none, subject.kind=none, time=none, output=none. Only greetings/thanks/ok/small-talk may include answer with details.answer_mode="inline"; help, explanations, knowledge, advice, and creative writing leave answer="". Finance/memory/write_preview/explain_last leave answer="".
+Finance: Folio lookup -> route finance. how much/total spent at/on merchant/category -> spending_total scalar. why/high/spike -> spending_explain table. top/biggest/list/show -> table intent. recent/latest/when income/deposit -> transaction_lookup; income/deposit/paycheck subject=category Income unless txn id. budget/savings/cashflow/afford/recurring/net worth -> matching intent. chart/plot/graph -> output=chart + chart_type. "expenses"/"spending" alone is metric, not subject. move/set/recategorize/change charges/category -> route write_preview intent write_preview output preview with details.change_type=bulk_recategorize, details.merchant, details.category; never memory_action/text.
+Memory only: route=memory intent=memory_op. save/remember -> output=status details.memory_action=remember details.text=<memory>. ask/list/forget/update saved memories -> details.memory_action=retrieve/list/forget/update plus question/topic/text/memory_id. Questions about this chat or last message are chat.
+Details allowed: metric, group_by, amount, purpose, change_type, merchant, category, search, transaction_id, limit, answer_mode, memory_action, text, question, topic, memory_id, memory_type.
+Month names become custom with time_a=YYYY-MM-01. "last month" is last_month. Only relative follow-ups like "the month before" use month_before_prior. Follow-ups inherit omitted prior slots. Latest user words override prior context."""
 
 
 def build_selector_repair_system_prompt() -> str:
@@ -202,8 +200,6 @@ def build_selector_prompt(*, question: str, manifest: str, recent_context: str =
     )
     return (
         build_selector_system_prompt()
-        + "\n\nManifest:\n"
-        + manifest
         + "\n\nToday:\n"
         + today
         + "\n\n"
@@ -246,11 +242,12 @@ def run_selector(
     history: list[dict[str, Any]] | None = None,
     base_tools: list[dict[str, Any]] | None = None,
     completer: SelectorCompleter | None = None,
-    max_tokens: int = 220,
+    max_tokens: int = 140,
+    allow_legacy_executable_calls: bool = False,
 ) -> SelectorResult:
     tools = base_tools or all_tool_schemas()
     started = time.perf_counter()
-    manifest = build_grouped_tool_manifest(tools)
+    manifest = ""
     recent_context = format_recent_context(history)
     complete = completer or _default_completer
     attempts = 0
@@ -262,42 +259,13 @@ def run_selector(
     raw = complete(prompt, max_tokens, "controller")
     attempts += 1
     llm_calls += 1
-    calls, decision = normalize_selector_decision(raw=raw, base_tools=tools)
-    calls, decision = apply_discourse_frames(calls=calls, decision=decision, history=history, tools=tools)
+    calls, decision = normalize_selector_decision(
+        raw=raw,
+        base_tools=tools,
+        allow_legacy_executable_calls=allow_legacy_executable_calls,
+    )
+    calls, decision = apply_discourse_frames(calls=calls, decision=decision, history=history, tools=tools, question=question)
     calls, decision = apply_context_semantics(calls=calls, decision=decision, history=history, question=question)
-
-    if decision_needs_family_detail(decision, calls):
-        family_detail_used = True
-        detail_manifest = build_family_detail_manifest(tools, selected_family(decision))
-        prompt = build_selector_prompt(question=question, manifest=detail_manifest, recent_context=recent_context)
-        raw = complete(prompt, max_tokens, "controller")
-        attempts += 1
-        llm_calls += 1
-        calls, decision = normalize_selector_decision(raw=raw, base_tools=tools)
-        calls, decision = apply_discourse_frames(calls=calls, decision=decision, history=history, tools=tools)
-        calls, decision = apply_context_semantics(calls=calls, decision=decision, history=history, question=question)
-        decision["family_detail_used"] = True
-
-    if selector_needs_repair(decision, calls):
-        repair_used = True
-        repair_prompt = build_repair_prompt(
-            question=question,
-            manifest=manifest,
-            recent_context=recent_context,
-            invalid_decision=decision,
-        )
-        raw = complete(repair_prompt, max_tokens, "controller")
-        attempts += 1
-        llm_calls += 1
-        calls, repaired = normalize_selector_decision(raw=raw, base_tools=tools)
-        calls, repaired = apply_discourse_frames(calls=calls, decision=repaired, history=history, tools=tools)
-        calls, repaired = apply_context_semantics(calls=calls, decision=repaired, history=history, question=question)
-        repaired["repair_of"] = {
-            "validation_errors": decision.get("validation_errors") or [],
-            "error": decision.get("error") or "",
-        }
-        decision = repaired
-        prompt = repair_prompt
 
     status = selector_status(decision, calls)
     error = selector_error(decision, calls) if status == "clarify" else ""
@@ -314,6 +282,7 @@ def run_selector(
         "manifest_tokens_est": estimate_tokens(manifest),
         "coverage": selector_manifest_coverage(tools),
     }
+    intent_frame = decision.get("intent_frame") if isinstance(decision.get("intent_frame"), dict) else None
     return SelectorResult(
         calls=calls,
         decision=decision,
@@ -327,6 +296,7 @@ def run_selector(
         family_detail_used=family_detail_used,
         repair_used=repair_used,
         trace=trace,
+        intent_frame=intent_frame,
     )
 
 
@@ -334,11 +304,13 @@ def normalize_selector_decision(
     *,
     raw: str,
     base_tools: list[dict[str, Any]],
+    allow_legacy_executable_calls: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         decision = parse_json_object(raw)
     except Exception as exc:
-        if str(raw or "").lstrip().startswith('{"answer"'):
+        raw_text = str(raw or "").lstrip()
+        if raw_text.startswith('{"answer"') or raw_text.startswith('{"route": "chat"') or raw_text.startswith('{"route":"chat"'):
             decision = {
                 "route": "general_answer",
                 "selector_answer_truncated": True,
@@ -353,7 +325,23 @@ def normalize_selector_decision(
 
     if not isinstance(decision, dict):
         decision = {"calls": [], "error": "selector response must be a JSON object"}
-    decision = normalize_frame_patch_decision(decision)
+
+    frame_source = decision
+    if not allow_legacy_executable_calls:
+        frame_source = {
+            key: value
+            for key, value in decision.items()
+            if key not in {"calls", "tool_calls", "frame_patch"}
+        }
+    normalized_frame_decision = normalize_intent_frame_decision(frame_source)
+    for key in ("intent_frame", "intent_frame_source", "intent_frame_error"):
+        if key in normalized_frame_decision:
+            decision[key] = normalized_frame_decision[key]
+    if allow_legacy_executable_calls:
+        decision = normalize_frame_patch_decision(decision)
+    elif "frame_patch" in decision:
+        decision["ignored_frame_patch"] = True
+        decision.pop("frame_patch", None)
 
     by_name = tools_by_name(base_tools)
     calls = []
@@ -362,7 +350,15 @@ def normalize_selector_decision(
     if raw_calls is None:
         raw_calls = decision.get("tool_calls") or []
     if raw_calls and not isinstance(raw_calls, list):
-        validation_errors.append("calls must be an array")
+        if allow_legacy_executable_calls:
+            validation_errors.append("calls must be an array")
+        else:
+            decision["ignored_selector_call_count"] = 1
+        raw_calls = []
+    if raw_calls and not allow_legacy_executable_calls:
+        decision["ignored_selector_call_count"] = len(raw_calls)
+        if not decision_has_tool_intent_frame(decision) and not decision_requests_general_answer(decision):
+            validation_errors.append("selector emitted executable calls; ignored")
         raw_calls = []
     if _frame_patch_action(decision) in {"patch_prior", "clarification_reply"}:
         route = _ROUTE_ALIASES.get(str(decision.get("route") or "").strip().lower(), str(decision.get("route") or "").strip().lower())
@@ -384,6 +380,7 @@ def normalize_selector_decision(
             continue
         nested_args = raw_call.get("args") if isinstance(raw_call.get("args"), dict) else {}
         normalized_call = {**nested_args, **{key: value for key, value in raw_call.items() if key != "args"}, "tool": name}
+        _normalize_structured_filter_values(normalized_call)
         _repair_structured_call_from_selector_intent(normalized_call, decision)
         args, validation_error = adapt_universal_args(name, normalized_call, by_name[name])
         if validation_error:
@@ -400,15 +397,16 @@ def normalize_selector_decision(
             "validation_error": validation_error,
         })
 
-    calls, validation_errors = append_chart_call_from_structured_intent(
-        calls=calls,
-        decision=decision,
-        by_name=by_name,
-        validation_errors=validation_errors,
-    )
+    if allow_legacy_executable_calls:
+        calls, validation_errors = append_chart_call_from_structured_intent(
+            calls=calls,
+            decision=decision,
+            by_name=by_name,
+            validation_errors=validation_errors,
+        )
 
     selector_answer = str(decision.get("answer") or decision.get("direct_answer") or "").strip()
-    if selector_answer and not calls:
+    if selector_answer and not calls and not decision_has_tool_intent_frame(decision):
         decision["route"] = "general_answer"
         decision["selector_answer_chars"] = len(selector_answer)
 
@@ -423,6 +421,7 @@ def normalize_selector_decision(
         and not selected_family(decision)
         and not decision_requests_general_answer(decision)
         and not decision_has_discourse_frame(decision)
+        and not decision_has_tool_intent_frame(decision)
     ):
         validation_errors.append("selector returned no calls, family, or route")
 
@@ -430,6 +429,296 @@ def normalize_selector_decision(
     decision["validation_errors"] = validation_errors
     decision["raw_response"] = raw
     return calls, decision
+
+
+def normalize_intent_frame_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    explicit = decision.get("intent_frame") if isinstance(decision.get("intent_frame"), dict) else None
+    payload = explicit or _intent_frame_payload_from_selector_decision(decision)
+    try:
+        frame = MiraIntentFrame.from_dict(payload)
+        return {
+            **decision,
+            "intent_frame": frame.to_dict(),
+            "intent_frame_source": "explicit" if explicit else "synthetic",
+        }
+    except ValueError as exc:
+        fallback = _intent_frame_payload_from_selector_decision({key: value for key, value in decision.items() if key != "intent_frame"})
+        try:
+            frame = MiraIntentFrame.from_dict(fallback)
+            return {
+                **decision,
+                "intent_frame": frame.to_dict(),
+                "intent_frame_source": "synthetic_after_error",
+                "intent_frame_error": str(exc),
+            }
+        except ValueError as fallback_exc:
+            return {
+                **decision,
+                "intent_frame_error": str(fallback_exc if not explicit else exc),
+            }
+
+
+def _intent_frame_payload_from_selector_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    route = _intent_frame_route_from_decision(decision)
+    intent = _intent_frame_intent_from_decision(decision, route=route)
+    output = _intent_frame_output_from_decision(decision, intent=intent)
+    subject = _intent_frame_subject_from_decision(decision)
+    time_value, time_a, time_b = _intent_frame_time_from_decision(decision)
+    return {
+        "route": route,
+        "answer": str(decision.get("answer") or decision.get("direct_answer") or ""),
+        "intent": intent,
+        "subject": subject,
+        "time": time_value,
+        "time_a": time_a,
+        "time_b": time_b,
+        "output": output,
+        "chart_type": _intent_frame_chart_type_from_decision(decision, output=output),
+        "discourse_action": _intent_frame_discourse_action(decision),
+    }
+
+
+def _intent_frame_route_from_decision(decision: dict[str, Any]) -> str:
+    raw_intent = str(decision.get("intent") or "").strip().lower()
+    details = decision.get("details") if isinstance(decision.get("details"), dict) else {}
+    requested_output = str(decision.get("output") or decision.get("requested_output") or "").strip().lower()
+    if requested_output == "preview" or str(details.get("change_type") or "").strip():
+        return "write_preview"
+    if raw_intent in INTENT_VALUES and raw_intent != "none":
+        if raw_intent == "memory_op":
+            return "memory"
+        if raw_intent == "write_preview":
+            return "write_preview"
+        return "finance"
+    route = canonical_controller_route(decision, [])
+    if route == "finance_tool":
+        return "finance"
+    if route == "explain_last_answer":
+        return "explain_last"
+    if route in {"chat", "memory", "write_preview"}:
+        return route
+    if str(decision.get("answer") or decision.get("direct_answer") or "").strip():
+        return "chat"
+    return "chat"
+
+
+def _intent_frame_intent_from_decision(decision: dict[str, Any], *, route: str) -> str:
+    if route == "memory":
+        return "memory_op"
+    if route == "write_preview":
+        return "write_preview"
+    if route in {"chat", "explain_last", "clarify_response"}:
+        return "none"
+
+    raw = str(decision.get("intent") or "").strip().lower()
+    if raw in INTENT_VALUES:
+        return raw
+    signal = " ".join([raw, _first_raw_tool_name(decision), _first_raw_view(decision)]).strip().lower()
+    if "transaction" in signal or "deposit" in signal or "paycheck" in signal or "income_timing" in signal:
+        return "transaction_lookup"
+    if "net_worth" in signal or "networth" in signal or "net worth" in signal:
+        if "delta" in signal or "change" in signal:
+            return "net_worth_delta"
+        if "balance" in signal:
+            return "net_worth_balance"
+        return "net_worth_trend"
+    if "budget" in signal:
+        return "budget_status" if "status" in signal or "category" in signal else "budget_plan"
+    if "saving" in signal or "save_capacity" in signal:
+        return "savings_capacity"
+    if "shortfall" in signal:
+        return "cashflow_shortfall"
+    if "cashflow" in signal or "cash_flow" in signal:
+        return "cashflow_forecast"
+    if "afford" in signal:
+        return "affordability"
+    if "recurring" in signal or "subscription" in signal:
+        return "recurring_changes" if "change" in signal else "recurring_summary"
+    if "data_health" in signal or "health" in signal:
+        return "data_health"
+    if "enrichment" in signal:
+        return "enrichment_quality"
+    if "low_confidence" in signal or "low confidence" in signal:
+        return "low_confidence_transactions"
+    if "priority" in signal:
+        return "finance_priorities"
+    if "dashboard" in signal or "snapshot" in signal or "overview" in signal:
+        return "finance_snapshot"
+    if "metric" in signal or "explain" in signal:
+        return "explain_metric"
+    if "top" in signal or "biggest" in signal:
+        return "spending_top"
+    if "breakdown" in signal:
+        return "spending_breakdown"
+    if "trend" in signal or "chart" in signal or "plot" in signal or "graph" in signal:
+        return "spending_trend"
+    if "compare" in signal:
+        return "spending_compare"
+    if "spend" in signal or "expense" in signal or "merchant" in signal or "categor" in signal:
+        return "spending_total"
+    return "none"
+
+
+def _intent_frame_subject_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    subject = _decision_subject(decision)
+    if subject.get("raw"):
+        return {
+            "kind": _intent_subject_kind(subject.get("type_hint")),
+            "text": subject.get("raw"),
+        }
+
+    raw_call = _first_raw_call(decision)
+    if raw_call:
+        nested_args = raw_call.get("args") if isinstance(raw_call.get("args"), dict) else {}
+        merged = {**nested_args, **{key: value for key, value in raw_call.items() if key != "args"}}
+        filters = merged.get("filters") if isinstance(merged.get("filters"), dict) else {}
+        for key in ("merchant", "category", "account", "transaction_id"):
+            value = _selector_scalar_text(filters.get(key) or merged.get(key))
+            if value:
+                return {"kind": "transaction" if key == "transaction_id" else key, "text": value}
+        payload = merged.get("payload") if isinstance(merged.get("payload"), dict) else {}
+        metric = str(payload.get("metric") or merged.get("metric") or "").strip()
+        if metric:
+            return {"kind": "metric", "text": metric}
+    return {"kind": "none", "text": None}
+
+
+def _intent_subject_kind(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in SUBJECT_KIND_VALUES:
+        return text
+    if text in {"transaction_id", "txn"}:
+        return "transaction"
+    return "unknown" if text else "none"
+
+
+def _intent_frame_time_from_decision(decision: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    explicit_time = str(decision.get("time") or "").strip().lower()
+    if explicit_time:
+        explicit_time = TIME_ALIASES.get(explicit_time, explicit_time)
+        time_a = str(decision.get("time_a") or "").strip() or None
+        time_b = str(decision.get("time_b") or "").strip() or None
+        if is_supported_time_token(explicit_time):
+            return explicit_time, time_a, time_b
+    range_value = str(decision.get("range") or "").strip()
+    if not range_value:
+        raw_call = _first_raw_call(decision)
+        if raw_call:
+            nested_args = raw_call.get("args") if isinstance(raw_call.get("args"), dict) else {}
+            merged = {**nested_args, **{key: value for key, value in raw_call.items() if key != "args"}}
+            range_value = str(merged.get("range") or merged.get("range_a") or "").strip()
+    token = range_value.strip().lower()
+    aliases = {
+        "": "none",
+        "all": "all_time",
+        "current": "this_month",
+        "current_month": "this_month",
+        "prior": "last_month",
+        "prior_month": "last_month",
+        "previous_month": "last_month",
+    }
+    token = aliases.get(token, token)
+    if token in TIME_VALUES:
+        return token, None, None
+    if token.startswith("last_") and (token.endswith("d") or token.endswith("_months")):
+        return token if is_supported_time_token(token) else "custom", None, None
+    if token and _is_month_token(token):
+        return "custom", f"{token}-01", None
+    return "none", None, None
+
+
+def _intent_frame_output_from_decision(decision: dict[str, Any], *, intent: str) -> str:
+    requested = str(decision.get("output") or decision.get("requested_output") or "").strip().lower()
+    output_aliases = {
+        "scalar_total": "scalar",
+        "rows": "table",
+        "summary": "status",
+    }
+    if requested in output_aliases:
+        return output_aliases[requested]
+    if requested in OUTPUT_VALUES:
+        return requested
+    if _decision_requests_chart(decision):
+        return "chart"
+    if intent in {"write_preview"}:
+        return "preview"
+    if intent in {"spending_explain", "transaction_lookup", "spending_top", "spending_breakdown", "low_confidence_transactions"}:
+        return "table"
+    if intent.endswith("_trend"):
+        return "chart" if _decision_requests_chart(decision) else "table"
+    if intent in {"budget_status", "budget_plan", "cashflow_forecast", "cashflow_shortfall", "affordability", "recurring_summary", "recurring_changes", "data_health", "enrichment_quality", "finance_snapshot", "finance_priorities", "explain_metric", "explain_transaction"}:
+        return "status"
+    if intent in {"spending_total", "net_worth_balance", "net_worth_delta", "savings_capacity"}:
+        return "scalar"
+    return "none"
+
+
+def _intent_frame_chart_type_from_decision(decision: dict[str, Any], *, output: str) -> str | None:
+    if output != "chart":
+        return None
+    explicit = str(decision.get("chart_type") or "").strip().lower()
+    if explicit in {"line", "bar", "pie", "donut"}:
+        return explicit
+    raw_call = _first_raw_call(decision)
+    sources: list[dict[str, Any]] = []
+    if raw_call:
+        nested_args = raw_call.get("args") if isinstance(raw_call.get("args"), dict) else {}
+        merged = {**nested_args, **{key: value for key, value in raw_call.items() if key != "args"}}
+        sources.append(merged)
+        payload = merged.get("payload") if isinstance(merged.get("payload"), dict) else {}
+        sources.append(payload)
+    for source in sources:
+        for key in ("chart_type", "type", "view"):
+            value = str(source.get(key) or "").strip().lower()
+            if value in {"line", "bar", "pie", "donut"}:
+                return value
+    return "line"
+
+
+def _intent_frame_discourse_action(decision: dict[str, Any]) -> str:
+    patch = decision.get("frame_patch") if isinstance(decision.get("frame_patch"), dict) else {}
+    frame_action = str(patch.get("frame_action") or "").strip().lower()
+    if frame_action == "clarification_reply":
+        return "clarification_reply"
+    if frame_action == "patch_prior":
+        return "follow_up"
+    action = str(decision.get("discourse_action") or "").strip().lower()
+    aliases = {
+        "followup": "follow_up",
+        "followup_same_subject": "follow_up",
+        "followup_replace_subject": "follow_up",
+        "patch_prior": "follow_up",
+    }
+    action = aliases.get(action, action)
+    return action if action in DISCOURSE_ACTION_VALUES else "new"
+
+
+def _first_raw_call(decision: dict[str, Any]) -> dict[str, Any]:
+    calls = decision.get("calls")
+    if not isinstance(calls, list):
+        calls = decision.get("tool_calls") if isinstance(decision.get("tool_calls"), list) else []
+    for call in calls:
+        if isinstance(call, dict):
+            return call
+    return {}
+
+
+def _first_raw_tool_name(decision: dict[str, Any]) -> str:
+    call = _first_raw_call(decision)
+    return canonical_semantic_tool_name(str(call.get("tool") or call.get("name") or ""))
+
+
+def _first_raw_view(decision: dict[str, Any]) -> str:
+    call = _first_raw_call(decision)
+    nested_args = call.get("args") if isinstance(call.get("args"), dict) else {}
+    return str(call.get("view") or nested_args.get("view") or "").strip()
+
+
+def _is_month_token(value: str) -> bool:
+    if len(value) != 7 or value[4] != "-":
+        return False
+    year, month = value.split("-", 1)
+    return year.isdigit() and month.isdigit() and 1 <= int(month) <= 12
 
 
 def _repair_structured_call_from_selector_intent(call: dict[str, Any], decision: dict[str, Any]) -> None:
@@ -443,8 +732,27 @@ def _repair_structured_call_from_selector_intent(call: dict[str, Any], decision:
             call.setdefault("sort", "date_desc")
         return
 
+    if tool_name == "preview_finance_change":
+        payload = call.get("payload") if isinstance(call.get("payload"), dict) else {}
+        filters = call.get("filters") if isinstance(call.get("filters"), dict) else {}
+        action = str(payload.get("action") or call.get("action") or "").strip().lower()
+        if not payload.get("change_type") and action in {"move_all", "move", "recategorize", "reclassify"}:
+            payload["change_type"] = "bulk_recategorize"
+        if payload.get("change_type") == "bulk_recategorize":
+            merchant = str(payload.get("merchant") or filters.get("merchant") or "").strip()
+            category = str(payload.get("category") or payload.get("target_category") or "").strip()
+            if merchant:
+                payload["merchant"] = merchant
+            if category:
+                payload["category"] = category
+            payload.pop("action", None)
+            payload.pop("target_category", None)
+            call["payload"] = payload
+        return
+
     if tool_name != "summarize_spending":
         return
+    _repair_summarize_spending_view(call, decision)
     if str(call.get("view") or "").strip().lower() != "top":
         return
     payload = call.get("payload") if isinstance(call.get("payload"), dict) else {}
@@ -458,6 +766,56 @@ def _repair_structured_call_from_selector_intent(call: dict[str, Any], decision:
         call["payload"] = payload
 
 
+def _repair_summarize_spending_view(call: dict[str, Any], decision: dict[str, Any]) -> None:
+    view = str(call.get("view") or "").strip().lower()
+    filters = call.get("filters") if isinstance(call.get("filters"), dict) else {}
+    payload = call.get("payload") if isinstance(call.get("payload"), dict) else {}
+    intent = str(decision.get("intent") or "").strip().lower()
+
+    group_by = str(payload.get("group_by") or filters.get("group_by") or "").strip().lower()
+    if group_by in {"category", "merchant"}:
+        payload["group_by"] = group_by
+        filters.pop("group_by", None)
+    if payload.get("top") is not None:
+        payload.pop("top", None)
+
+    metric = str(payload.get("metric") or filters.get("metric") or "").strip().lower()
+    type_hint = str(filters.get("type") or "").strip().lower()
+    if type_hint in {"income", "expenses", "expense"} and not metric:
+        metric = "expenses" if type_hint == "expense" else type_hint
+    if metric:
+        payload["metric"] = metric
+    filters.pop("type", None)
+    filters.pop("metric", None)
+
+    if view in {"", "summarize_spending", "spending", "summary"}:
+        if group_by or "top" in intent or "biggest" in intent:
+            call["view"] = "top"
+        elif filters.get("merchant") or filters.get("category"):
+            call["view"] = "entity_total"
+        else:
+            call["view"] = "period_total"
+    call["filters"] = {key: value for key, value in filters.items() if value not in (None, "", [], {})}
+    call["payload"] = {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _normalize_structured_filter_values(call: dict[str, Any]) -> None:
+    filters = call.get("filters")
+    if not isinstance(filters, dict):
+        return
+    out: dict[str, Any] = {}
+    changed = False
+    for key, value in filters.items():
+        scalar = _selector_scalar_text(value)
+        if scalar and isinstance(value, dict):
+            out[key] = scalar
+            changed = True
+        else:
+            out[key] = value
+    if changed:
+        call["filters"] = out
+
+
 def append_chart_call_from_structured_intent(
     *,
     calls: list[dict[str, Any]],
@@ -465,20 +823,34 @@ def append_chart_call_from_structured_intent(
     by_name: dict[str, dict[str, Any]],
     validation_errors: list[str],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    if not _decision_requests_chart(decision):
-        return calls, validation_errors
-    if any(str(call.get("name") or "") == "make_chart" for call in calls):
+    chart_calls = [call for call in calls if str(call.get("name") or "") == "make_chart"]
+    if not _decision_requests_chart(decision) and not chart_calls:
         return calls, validation_errors
     if "make_chart" not in by_name:
         return calls, validation_errors
-    source = next((call for call in calls if str(call.get("name") or "") in _FINANCE_SEMANTIC_TOOLS and str(call.get("name") or "") != "make_chart"), None)
+
+    evidence_calls = [
+        call
+        for call in calls
+        if str(call.get("name") or "") in _FINANCE_SEMANTIC_TOOLS and str(call.get("name") or "") != "make_chart"
+    ]
+    source = next((call for call in evidence_calls if not str(call.get("validation_error") or "").strip()), None)
     if not source:
-        return calls, validation_errors
+        source = _synthesize_chart_source_call(
+            decision=decision,
+            chart_calls=chart_calls,
+            by_name=by_name,
+            source_index=len(evidence_calls) + 1,
+        )
+        if not source or str(source.get("validation_error") or "").strip():
+            return calls, validation_errors
+        evidence_calls = [*evidence_calls, source]
+
     source_id = str(source.get("id") or "selector_call_1")
-    title = "Net worth trend" if source.get("name") == "review_net_worth" else "Chart"
+    title = _chart_title(source=source, chart_calls=chart_calls)
     raw_call = {
         "tool": "make_chart",
-        "view": "line",
+        "view": _chart_view(chart_calls),
         "payload": {"source_step_id": source_id, "title": title},
         "context_action": "new",
         "range_source": "none",
@@ -487,10 +859,11 @@ def append_chart_call_from_structured_intent(
     if validation_error:
         validation_errors.append(validation_error)
         return calls, validation_errors
+    validation_errors = [error for error in validation_errors if "make_chart" not in str(error)]
     return [
-        *calls,
+        *evidence_calls,
         {
-            "id": f"selector_call_{len(calls) + 1}",
+            "id": f"selector_call_{len(evidence_calls) + 1}",
             "name": "make_chart",
             "universal_args": {
                 key: raw_call.get(key)
@@ -501,6 +874,119 @@ def append_chart_call_from_structured_intent(
             "validation_error": "",
         },
     ], validation_errors
+
+
+def _synthesize_chart_source_call(
+    *,
+    decision: dict[str, Any],
+    chart_calls: list[dict[str, Any]],
+    by_name: dict[str, dict[str, Any]],
+    source_index: int,
+) -> dict[str, Any]:
+    signal = _chart_signal(decision=decision, chart_calls=chart_calls)
+    range_value = _chart_range(decision=decision, chart_calls=chart_calls)
+    if "net_worth" in signal or "networth" in signal or "net worth" in signal:
+        raw_call = {
+            "tool": "review_net_worth",
+            "view": "trend",
+            "range": _chart_trend_range(range_value),
+            "context_action": "new",
+            "range_source": "explicit_user" if range_value else "none",
+        }
+        name = "review_net_worth"
+    elif any(token in signal for token in ("expense", "expenses", "spend", "spending")):
+        raw_call = {
+            "tool": "summarize_spending",
+            "view": "trend",
+            "range": _chart_trend_range(range_value),
+            "payload": {"metric": "expenses", "group_by": "month"},
+            "context_action": "new",
+            "range_source": "explicit_user" if range_value else "none",
+        }
+        name = "summarize_spending"
+    else:
+        return {}
+
+    if name not in by_name:
+        return {}
+    args, validation_error = adapt_universal_args(name, raw_call, by_name[name])
+    return {
+        "id": f"selector_call_{source_index}",
+        "name": name,
+        "universal_args": {
+            key: raw_call.get(key)
+            for key in UNIVERSAL_ARG_FIELDS
+            if raw_call.get(key) not in (None, "", [], {})
+        },
+        "args": args,
+        "validation_error": validation_error,
+    }
+
+
+def _chart_trend_range(value: str) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"", "current", "current_month", "this_month", "latest"}:
+        return "last_6_months"
+    if token in {"all", "all_time"}:
+        return "last_6_months"
+    if _is_month_token(token):
+        return "last_6_months"
+    return str(value or "").strip() or "last_6_months"
+
+
+def _chart_signal(*, decision: dict[str, Any], chart_calls: list[dict[str, Any]]) -> str:
+    parts: list[str] = [
+        str(decision.get("intent") or ""),
+        str(decision.get("requested_output") or ""),
+    ]
+    for call in chart_calls:
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
+        for source in (args, universal):
+            parts.append(str(source.get("view") or ""))
+            filters = source.get("filters") if isinstance(source.get("filters"), dict) else {}
+            payload = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+            parts.extend(str(value) for value in filters.values())
+            parts.extend(str(value) for value in payload.values())
+    return " ".join(parts).strip().lower()
+
+
+def _chart_range(*, decision: dict[str, Any], chart_calls: list[dict[str, Any]]) -> str:
+    for source in [decision, *(call.get("args") if isinstance(call.get("args"), dict) else {} for call in chart_calls)]:
+        value = str(source.get("range") or "").strip()
+        if value:
+            return value
+    for call in chart_calls:
+        universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
+        value = str(universal.get("range") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _chart_view(chart_calls: list[dict[str, Any]]) -> str:
+    for call in chart_calls:
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
+        for source in (args, universal):
+            payload = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+            for value in (source.get("view"), payload.get("chart_type"), payload.get("type")):
+                chart_type = str(value or "").strip().lower()
+                if chart_type in {"line", "bar", "donut"}:
+                    return chart_type
+    return "line"
+
+
+def _chart_title(*, source: dict[str, Any], chart_calls: list[dict[str, Any]]) -> str:
+    for call in chart_calls:
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
+        for source_args in (args, universal):
+            payload = source_args.get("payload") if isinstance(source_args.get("payload"), dict) else {}
+            title = str(payload.get("title") or "").strip()
+            if title:
+                return title
+    return "Net worth trend" if source.get("name") == "review_net_worth" else "Spending trend"
 
 
 def _decision_requests_chart(decision: dict[str, Any]) -> bool:
@@ -546,13 +1032,18 @@ def apply_controller_route_permissions(
     ]
     if disallowed:
         validation_errors.append(f"{route} route cannot call: {', '.join(sorted(set(disallowed)))}")
-    if not calls and not decision_has_discourse_frame(decision):
+    if not calls and not decision_has_discourse_frame(decision) and not decision_has_tool_intent_frame(decision):
         validation_errors.append(f"{route} route needs at least one tool call")
     decision["route"] = route
     return calls, validation_errors
 
 
 def canonical_controller_route(decision: dict[str, Any], calls: list[dict[str, Any]]) -> str:
+    frame = decision.get("intent_frame") if isinstance(decision.get("intent_frame"), dict) else {}
+    frame_route = str(frame.get("route") or "").strip().lower()
+    frame_intent = str(frame.get("intent") or "").strip().lower()
+    if frame_route in {"finance", "memory", "write_preview"} and frame_intent and frame_intent != "none":
+        return "finance_tool" if frame_route == "finance" else frame_route
     raw_route = str(decision.get("route") or decision.get("answer_path") or "").strip().lower()
     route = _ROUTE_ALIASES.get(raw_route, raw_route)
     if route:
@@ -585,11 +1076,32 @@ def allowed_tools_for_controller_route(route: str) -> set[str]:
 
 def normalize_frame_patch_decision(decision: dict[str, Any]) -> dict[str, Any]:
     patch = _normalize_frame_patch(decision.get("frame_patch") if isinstance(decision.get("frame_patch"), dict) else {})
+    call_patch = _frame_patch_from_calls(
+        decision.get("calls") if isinstance(decision.get("calls"), list) else [],
+        allow_inherit_action=True,
+    )
+    if patch and call_patch:
+        patch = _merge_frame_patch_with_call_patch(patch, call_patch)
     if not patch:
         patch = _legacy_frame_patch_from_decision(decision)
     if patch:
         return {**decision, "frame_patch": patch}
     return decision
+
+
+def _merge_frame_patch_with_call_patch(patch: dict[str, Any], call_patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(patch)
+    patch_subject = patch.get("subject") if isinstance(patch.get("subject"), dict) else {}
+    call_subject = call_patch.get("subject") if isinstance(call_patch.get("subject"), dict) else {}
+    if not patch_subject.get("raw") and call_subject.get("raw"):
+        out["subject_action"] = "replace"
+        out["subject"] = call_subject
+    if not out.get("range_action") or str(out.get("range_action")) == "inherit":
+        if call_patch.get("range_action") in {"replace", "previous_of_prior", "next_of_prior", "clear"}:
+            out["range_action"] = call_patch.get("range_action")
+            if call_patch.get("range"):
+                out["range"] = call_patch.get("range")
+    return _normalize_frame_patch(out)
 
 
 def _normalize_frame_patch(patch: dict[str, Any]) -> dict[str, Any]:
@@ -634,7 +1146,7 @@ def _normalize_frame_patch(patch: dict[str, Any]) -> dict[str, Any]:
 
 def _is_previous_of_prior_range_token(value: str) -> bool:
     text = str(value or "").strip().lower()
-    return text in {"last_month_before", "month_before_last_month", "previous_of_prior"}
+    return text in {"last_month_before", "last_month_minus_1", "month_before_last_month", "previous_of_prior"}
 
 
 def _legacy_frame_patch_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
@@ -667,25 +1179,33 @@ def _legacy_frame_patch_from_decision(decision: dict[str, Any]) -> dict[str, Any
     })
 
 
-def _frame_patch_from_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _frame_patch_from_calls(calls: list[dict[str, Any]], *, allow_inherit_action: bool = False) -> dict[str, Any]:
     if not calls:
         return {}
     call = calls[0]
     action = _call_context_action(call)
-    if action not in {"followup", "followup_same_subject", "followup_replace_subject", "correction"}:
+    allowed_actions = {"followup", "followup_same_subject", "followup_replace_subject", "correction", "patch_prior"}
+    if allow_inherit_action:
+        allowed_actions.add("inherit")
+    if action not in allowed_actions:
         return {}
-    args = copy_args(call)
+    args = _selector_call_args(call)
     universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
     subject = _subject_from_discourse_call(call)
-    range_source = str(universal.get("range_source") or "").strip().lower()
+    range_source = str(args.get("range_source") or universal.get("range_source") or "").strip().lower()
     range_value = str(args.get("range") or universal.get("range") or "").strip()
     range_action = "inherit"
     if range_source in {"previous_of_prior", "next_of_prior"}:
         range_action = range_source
         range_value = ""
+    elif _is_previous_of_prior_range_token(range_value):
+        range_action = "previous_of_prior"
+        range_value = ""
     elif action == "followup" and range_value:
         range_action = "replace"
     elif action == "followup_same_subject" and range_value:
+        range_action = "replace"
+    elif action in {"patch_prior", "inherit"} and range_value and range_value.lower() not in {"inherited", "same", "prior"}:
         range_action = "replace"
     elif action in {"followup_replace_subject", "correction"}:
         range_action = "inherit"
@@ -723,6 +1243,7 @@ def apply_discourse_frames(
     decision: dict[str, Any],
     history: list[dict[str, Any]] | None,
     tools: list[dict[str, Any]],
+    question: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     route = canonical_controller_route(decision, calls)
     if route != "finance_tool":
@@ -772,6 +1293,7 @@ def apply_discourse_frames(
             "route": "",
             "validation_errors": ["I need prior finance context before applying that follow-up."],
         }
+    patch = _patch_range_from_followup_question(patch=patch, question=question, prior_frame=prior_frame)
     if _frame_patch_is_noop(patch):
         return [], {
             **decision,
@@ -791,10 +1313,34 @@ def apply_discourse_frames(
     call, conversation_frame = compiled
     return [call], {
         **decision,
+        "frame_patch": patch,
         "calls": [call],
         "frame_patch_compiled": True,
         "compiled_conversation_frame": conversation_frame,
     }
+
+
+def _patch_range_from_followup_question(
+    *,
+    patch: dict[str, Any],
+    question: str,
+    prior_frame: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(patch, dict) or str(patch.get("frame_action") or "").strip().lower() != "patch_prior":
+        return patch
+    prior_range = str(prior_frame.get("range") or "").strip()
+    if not prior_range:
+        return patch
+    parsed = resolve_followup_range(str(question or ""), prior_range)
+    if not parsed.explicit:
+        return patch
+    return _normalize_frame_patch(
+        {
+            **patch,
+            "range_action": "replace",
+            "range": parsed.token,
+        }
+    )
 
 
 def latest_conversation_frame(history: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -802,6 +1348,10 @@ def latest_conversation_frame(history: list[dict[str, Any]] | None) -> dict[str,
         if not isinstance(turn, dict):
             continue
         answer_context = turn.get("answer_context") if isinstance(turn.get("answer_context"), dict) else {}
+        mira_frame = answer_context.get("mira_conversation_frame") if isinstance(answer_context.get("mira_conversation_frame"), dict) else {}
+        converted_mira = _conversation_frame_from_mira_frame(mira_frame)
+        if converted_mira:
+            return converted_mira
         frame = answer_context.get("conversation_frame") if isinstance(answer_context.get("conversation_frame"), dict) else {}
         if frame:
             return json.loads(json.dumps(frame, default=str))
@@ -838,6 +1388,96 @@ def _conversation_frame_from_semantic_frame(frame: dict[str, Any]) -> dict[str, 
         "requested_output": output,
         "payload": frame.get("payload") if isinstance(frame.get("payload"), dict) else {},
     }
+
+
+def _conversation_frame_from_mira_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(frame, dict) or not frame:
+        return {}
+    intent = str(frame.get("intent") or "").strip()
+    tool, view = _tool_view_from_mira_intent(intent, frame)
+    if not tool:
+        return {}
+    subject_payload = frame.get("subject") if isinstance(frame.get("subject"), dict) else {}
+    kind = str(subject_payload.get("kind") or "").strip()
+    text = str(subject_payload.get("display_name") or subject_payload.get("canonical_id") or subject_payload.get("text") or "").strip()
+    subject = {"type": kind, "canonical": text, "raw": text} if kind and kind != "none" and text else {}
+    payload = _payload_from_mira_intent(intent)
+    return {
+        "intent": "spend_total" if intent == "spending_total" else intent,
+        "tool": tool,
+        "view": view,
+        "subject": subject,
+        "range": _range_from_mira_frame(frame),
+        "requested_output": _requested_output_from_mira_frame(frame),
+        "source_step_id": str(frame.get("last_evidence_step_id") or ""),
+        "payload": payload,
+    }
+
+
+def _tool_view_from_mira_intent(intent: str, frame: dict[str, Any]) -> tuple[str, str]:
+    subject = frame.get("subject") if isinstance(frame.get("subject"), dict) else {}
+    has_subject = bool(str(subject.get("text") or subject.get("canonical_id") or subject.get("display_name") or "").strip())
+    if intent == "spending_total":
+        return "summarize_spending", "entity_total" if has_subject else "period_total"
+    if intent == "spending_top":
+        return "summarize_spending", "top"
+    if intent == "spending_breakdown":
+        return "summarize_spending", "breakdown"
+    if intent == "spending_trend":
+        return "summarize_spending", "trend"
+    if intent == "spending_compare":
+        return "summarize_spending", "compare"
+    if intent in {"spending_explain", "transaction_lookup"}:
+        return "query_transactions", "list"
+    if intent in {"budget_status", "budget_plan", "savings_capacity"}:
+        return "review_budget", "savings_capacity" if intent == "savings_capacity" else "category_status" if has_subject else "plan"
+    if intent in {"cashflow_forecast", "cashflow_shortfall"}:
+        return "review_cashflow", "shortfall" if intent == "cashflow_shortfall" else "forecast"
+    if intent == "affordability":
+        return "check_affordability", "purchase"
+    if intent in {"recurring_summary", "recurring_changes"}:
+        return "review_recurring", "changes" if intent == "recurring_changes" else "summary"
+    if intent in {"net_worth_balance", "net_worth_trend", "net_worth_delta"}:
+        return "review_net_worth", {"net_worth_balance": "balances", "net_worth_delta": "delta"}.get(intent, "trend")
+    if intent in {"data_health", "enrichment_quality", "low_confidence_transactions", "explain_transaction"}:
+        return "review_data_quality", {
+            "enrichment_quality": "enrichment_summary",
+            "low_confidence_transactions": "low_confidence",
+            "explain_transaction": "explain_transaction",
+        }.get(intent, "health")
+    return "", ""
+
+
+def _range_from_mira_frame(frame: dict[str, Any]) -> str:
+    token = str(frame.get("time") or "").strip()
+    if token == "this_month":
+        return "current_month"
+    if token == "all_time":
+        return "all"
+    if token == "custom":
+        time_a = str(frame.get("time_a") or "").strip()
+        if len(time_a) >= 7:
+            return time_a[:7]
+        return ""
+    return "" if token == "none" else token
+
+
+def _requested_output_from_mira_frame(frame: dict[str, Any]) -> str:
+    output = str(frame.get("output") or "").strip()
+    return {
+        "scalar": "scalar_total",
+        "table": "rows",
+        "list": "rows",
+        "chart": "chart",
+        "comparison": "comparison",
+        "preview": "preview",
+    }.get(output, "summary")
+
+
+def _payload_from_mira_intent(intent: str) -> dict[str, str]:
+    if intent.startswith("spending_"):
+        return {"metric": "expenses"}
+    return {}
 
 
 def _frame_patch_is_noop(patch: dict[str, Any]) -> bool:
@@ -1031,7 +1671,7 @@ def _decision_subject(decision: dict[str, Any]) -> dict[str, str]:
 def _subject_from_value(raw_subject: Any) -> dict[str, str]:
     if isinstance(raw_subject, dict):
         raw = str(raw_subject.get("raw") or raw_subject.get("text") or "").strip()
-        type_hint = str(raw_subject.get("type_hint") or raw_subject.get("type") or "").strip().lower()
+        type_hint = str(raw_subject.get("type_hint") or raw_subject.get("type") or raw_subject.get("kind") or "").strip().lower()
     else:
         raw = str(raw_subject or "").strip()
         type_hint = ""
@@ -1041,27 +1681,42 @@ def _subject_from_value(raw_subject: Any) -> dict[str, str]:
 
 
 def _subject_from_discourse_call(call: dict[str, Any]) -> dict[str, str]:
-    action = _call_context_action(call)
-    if action not in {"followup_replace_subject", "correction"}:
-        return {}
     name = canonical_semantic_tool_name(str(call.get("name") or call.get("tool") or ""))
     if name not in {"summarize_spending", "query_transactions", "review_budget", "check_affordability"}:
         return {}
-    args = copy_args(call)
+    args = _selector_call_args(call)
     filters = args.get("filters") if isinstance(args.get("filters"), dict) else {}
     if filters.get("mention"):
-        return {"raw": str(filters.get("mention") or "").strip(), "type_hint": "unknown"}
+        return {"raw": _selector_scalar_text(filters.get("mention")), "type_hint": "unknown"}
     for key in ("merchant", "category", "account"):
-        value = str(filters.get(key) or "").strip()
+        value = _selector_scalar_text(filters.get(key))
         if value:
-            return {"raw": value, "type_hint": "unknown"}
+            return {"raw": value, "type_hint": key}
     return {}
+
+
+def _selector_scalar_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("canonical", "value", "label", "raw", "text", "name"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    return str(value or "").strip()
 
 
 def _call_context_action(call: dict[str, Any]) -> str:
     args = call.get("args") if isinstance(call.get("args"), dict) else {}
     universal = call.get("universal_args") if isinstance(call.get("universal_args"), dict) else {}
-    return str(args.get("context_action") or universal.get("context_action") or "").strip().lower()
+    return str(args.get("context_action") or universal.get("context_action") or call.get("context_action") or "").strip().lower()
+
+
+def _selector_call_args(call: dict[str, Any]) -> dict[str, Any]:
+    args = copy_args(call)
+    for key in UNIVERSAL_ARG_FIELDS:
+        if key in call and call.get(key) not in (None, "", [], {}):
+            args[key] = call.get(key)
+    return args
 
 
 def _call_from_discourse_frame(
@@ -1248,12 +1903,12 @@ def apply_context_semantics(
     history: list[dict[str, Any]] | None,
     question: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    _ = question
     if decision.get("frame_patch_compiled"):
         return calls, decision
     prior_range = latest_context_range(history)
     if not prior_range:
         return calls, decision
+    question_range = resolve_followup_range(str(question or ""), prior_range)
 
     changed = False
     out_calls: list[dict[str, Any]] = []
@@ -1264,7 +1919,10 @@ def apply_context_semantics(
         action = str(universal.get("context_action") or "").strip().lower()
         range_value = str(universal.get("range") or call_out["args"].get("range") or "").strip().lower()
         resolved = ""
-        if source == "previous_of_prior" or range_value == "previous_of_prior":
+        if question_range.explicit and _call_accepts_single_range(call_out):
+            resolved = question_range.token
+            universal["range_source"] = "explicit_user"
+        elif source == "previous_of_prior" or range_value == "previous_of_prior":
             resolved = resolve_followup_range("month before", prior_range).token
             universal["range_source"] = "previous_of_prior"
         elif _is_previous_of_prior_range_token(range_value) and source not in {"inherited", "inherit"}:
@@ -1330,14 +1988,14 @@ def _override_call(tool_name: str, args: dict[str, Any], tools: list[dict[str, A
 
 
 def latest_context_range(history: list[dict[str, Any]] | None) -> str:
-    prior_frame = latest_prior_frame(history)
-    value = str(prior_frame.get("range") or prior_frame.get("range_b") or prior_frame.get("range_a") or "").strip()
-    if value:
-        return value
     for turn in reversed(history or []):
         if not isinstance(turn, dict):
             continue
         context = turn.get("answer_context") if isinstance(turn.get("answer_context"), dict) else {}
+        mira_frame = context.get("mira_conversation_frame") if isinstance(context.get("mira_conversation_frame"), dict) else {}
+        value = _range_from_mira_frame(mira_frame)
+        if value:
+            return value
         conversation_frame = context.get("conversation_frame") if isinstance(context.get("conversation_frame"), dict) else {}
         value = str(conversation_frame.get("range") or "").strip()
         if value:
@@ -1359,6 +2017,10 @@ def latest_context_range(history: list[dict[str, Any]] | None) -> str:
             value = str(args.get("range") or "").strip()
             if value:
                 return value
+    prior_frame = latest_prior_frame(history)
+    value = str(prior_frame.get("range") or prior_frame.get("range_b") or prior_frame.get("range_a") or "").strip()
+    if value:
+        return value
     return ""
 
 
@@ -1443,10 +2105,10 @@ def selector_needs_repair(decision: dict[str, Any], calls: list[dict[str, Any]])
 def selector_status(decision: dict[str, Any], calls: list[dict[str, Any]]) -> str:
     if calls and not selector_needs_repair(decision, calls):
         return "tool_calls"
+    if decision_has_tool_intent_frame(decision) and not selector_needs_repair(decision, calls):
+        return "tool_calls"
     if decision_requests_general_answer(decision):
         return "general_answer"
-    if decision_needs_family_detail(decision, calls):
-        return "need_detail"
     return "clarify"
 
 
@@ -1458,35 +2120,58 @@ def selector_error(decision: dict[str, Any], calls: list[dict[str, Any]]) -> str
     return "; ".join(errors)
 
 
-def format_recent_context(history: list[dict[str, Any]] | None, *, limit: int = 3, max_chars: int = 120) -> str:
-    lines = []
+def decision_has_tool_intent_frame(decision: dict[str, Any]) -> bool:
+    if not isinstance(decision, dict):
+        return False
+    frame = decision.get("intent_frame") if isinstance(decision.get("intent_frame"), dict) else {}
+    route = str(frame.get("route") or "").strip().lower()
+    intent = str(frame.get("intent") or "").strip().lower()
+    if route in {"finance", "memory", "write_preview"} and intent and intent != "none":
+        return True
+    route = _ROUTE_ALIASES.get(str(decision.get("route") or "").strip().lower(), str(decision.get("route") or "").strip().lower())
+    return route in _TOOL_ROUTES and intent and intent != "none"
+
+
+def format_recent_context(
+    history: list[dict[str, Any]] | None,
+    *,
+    limit: int = 3,
+    max_chars: int = 120,
+    max_context_chars: int = _RECENT_CONTEXT_MAX_CHARS,
+) -> str:
+    structured_lines: list[tuple[int, bool, str]] = []
+    prose_lines: list[tuple[int, bool, str]] = []
+    sequence = 0
     for turn in (history or [])[-limit:]:
         role = str(turn.get("role") or "").strip()
         answer_context = turn.get("answer_context") if isinstance(turn.get("answer_context"), dict) else {}
         if answer_context:
             compact_context = _compact_answer_context(answer_context)
             if compact_context:
-                lines.append(
-                    "ctx: "
-                    + json.dumps(
-                        compact_context,
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                        default=str,
+                structured_lines.append(
+                    (
+                        sequence,
+                        bool(compact_context.get("pending")),
+                        "ctx: " + _compact_json(compact_context),
                     )
                 )
+                sequence += 1
         content = " ".join(str(turn.get("content") or "").split())
         if role not in {"user", "assistant"} or not content:
             continue
         if len(content) > max_chars:
             content = content[:max_chars].rsplit(" ", 1)[0].rstrip() + "..."
-        lines.append(f"{role}: {content}")
-    return "\n".join(lines)
+        prose_lines.append((sequence, False, f"{role}: {content}"))
+        sequence += 1
+    return _bounded_recent_context(structured_lines, prose_lines, max_context_chars=max_context_chars)
 
 
 def _compact_answer_context(answer_context: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    frame = answer_context.get("conversation_frame") if isinstance(answer_context.get("conversation_frame"), dict) else {}
+    mira_frame = answer_context.get("mira_conversation_frame") if isinstance(answer_context.get("mira_conversation_frame"), dict) else {}
+    frame = _conversation_frame_from_mira_frame(mira_frame)
+    if not frame:
+        frame = answer_context.get("conversation_frame") if isinstance(answer_context.get("conversation_frame"), dict) else {}
     if not frame:
         current_frame = answer_context.get("current_frame") if isinstance(answer_context.get("current_frame"), dict) else {}
         frame = _conversation_frame_from_semantic_frame(current_frame)
@@ -1497,11 +2182,11 @@ def _compact_answer_context(answer_context: dict[str, Any]) -> dict[str, Any]:
         subject = str(answer_context.get("subject") or "").strip()
         ranges = answer_context.get("ranges") if isinstance(answer_context.get("ranges"), list) else []
         if subject:
-            out["subject"] = subject
+            out["subject"] = _compact_text(subject)
         if answer_context.get("subject_type"):
-            out["subject_type"] = answer_context.get("subject_type")
+            out["subject_type"] = _compact_text(answer_context.get("subject_type"))
         if ranges:
-            out["range"] = ranges[0]
+            out["range"] = _compact_text(ranges[0])
 
     pending = answer_context.get("pending_clarification") if isinstance(answer_context.get("pending_clarification"), dict) else {}
     compact_pending = _compact_pending_clarification(pending)
@@ -1514,27 +2199,28 @@ def _compact_conversation_frame(frame: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(frame, dict):
         return {}
     subject = frame.get("subject") if isinstance(frame.get("subject"), dict) else {}
-    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    subject_type = subject.get("type") or subject.get("kind")
+    subject_display = (
+        subject.get("display")
+        or subject.get("display_name")
+        or subject.get("canonical")
+        or subject.get("canonical_id")
+        or subject.get("raw")
+        or subject.get("text")
+    )
     compact_subject = {
-        key: subject.get(key)
-        for key in ("type", "canonical", "raw")
-        if subject.get(key) not in (None, "", [], {})
-    }
-    compact_payload = {
-        key: payload.get(key)
-        for key in ("metric", "group_by")
-        if payload.get(key) not in (None, "", [], {})
+        key: _compact_text(value)
+        for key, value in (("type", subject_type), ("display", subject_display))
+        if value not in (None, "", [], {})
     }
     out = {
+        "route": frame.get("route") or ("finance" if frame.get("intent") or frame.get("tool") else None),
         "intent": frame.get("intent"),
-        "tool": frame.get("tool"),
-        "view": frame.get("view"),
         "subject": compact_subject,
         "range": frame.get("range"),
         "output": frame.get("requested_output"),
-        "payload": compact_payload,
     }
-    return {key: value for key, value in out.items() if value not in (None, "", {}, [])}
+    return {key: _compact_text(value) if isinstance(value, str) else value for key, value in out.items() if value not in (None, "", {}, [])}
 
 
 def _compact_pending_clarification(pending: dict[str, Any]) -> dict[str, Any]:
@@ -1542,22 +2228,69 @@ def _compact_pending_clarification(pending: dict[str, Any]) -> dict[str, Any]:
         return {}
     options = []
     raw_options = pending.get("options") if isinstance(pending.get("options"), list) else []
-    for option in raw_options[:4]:
+    for option in raw_options[:3]:
         if not isinstance(option, dict):
             continue
+        label = option.get("label") or option.get("display_name") or option.get("canonical")
         compact = {
-            key: option.get(key)
-            for key in ("id", "type", "canonical", "label")
-            if option.get(key) not in (None, "", [], {})
+            "type": _compact_text(option.get("type"), max_chars=_COMPACT_PENDING_OPTION_MAX_CHARS),
+            "label": _compact_text(label, max_chars=_COMPACT_PENDING_OPTION_MAX_CHARS),
         }
+        compact = {key: value for key, value in compact.items() if value not in (None, "", [], {})}
         if compact:
             options.append(compact)
     out = {
-        "kind": pending.get("kind"),
-        "raw": pending.get("raw"),
+        "kind": _compact_text(pending.get("kind")),
+        "slot": _compact_text(pending.get("slot")),
+        "tool": _compact_text(pending.get("tool")),
+        "raw": _compact_text(pending.get("raw"), max_chars=_COMPACT_PENDING_RAW_MAX_CHARS),
         "options": options,
     }
     return {key: value for key, value in out.items() if value not in (None, "", [], {})}
+
+
+def _bounded_recent_context(
+    structured_lines: list[tuple[int, bool, str]],
+    prose_lines: list[tuple[int, bool, str]],
+    *,
+    max_context_chars: int,
+) -> str:
+    if max_context_chars <= 0:
+        return ""
+    selected: dict[int, str] = {}
+    used = 0
+
+    def try_add(item: tuple[int, bool, str]) -> None:
+        nonlocal used
+        sequence, _, line = item
+        if not line or sequence in selected:
+            return
+        additional = len(line) + (1 if selected else 0)
+        if used + additional > max_context_chars:
+            return
+        selected[sequence] = line
+        used += additional
+
+    pending_structured = [item for item in structured_lines if item[1]]
+    other_structured = [item for item in structured_lines if not item[1]]
+    for group in (pending_structured, other_structured, prose_lines):
+        for item in sorted(group, key=lambda value: value[0], reverse=True):
+            try_add(item)
+    return "\n".join(selected[key] for key in sorted(selected))
+
+
+def _compact_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str)
+
+
+def _compact_text(value: Any, *, max_chars: int = _COMPACT_FIELD_MAX_CHARS) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars].rsplit(" ", 1)[0].rstrip()
+    if not clipped:
+        clipped = text[:max_chars].rstrip()
+    return clipped + "..."
 
 
 def estimate_tokens(text: str) -> int:

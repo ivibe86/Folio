@@ -848,9 +848,9 @@ def _find_duplicate(conn: sqlite3.Connection, profile: str | None, memory_type: 
 def _infer_memory_type(lowered: str) -> str | None:
     if re.search(r"\b(?:don't|dont|do not|never)\s+(?:joke|roast|tease)\b", lowered):
         return "tone_preference"
-    if re.search(r"\b(?:prefer|preference|like)\b.*\b(?:short|concise|brief|serious|tone|answers?|replies|no jokes?)\b", lowered):
+    if re.search(r"\b(?:prefer|prefers|preference|like|likes)\b.*\b(?:short|concise|brief|serious|tone|answers?|replies|no jokes?)\b", lowered):
         return "tone_preference"
-    if re.search(r"\b(?:prefer|preference|like|dislike|hate)\b", lowered):
+    if re.search(r"\b(?:prefer|prefers|preference|like|likes|dislike|dislikes|hate|hates)\b", lowered):
         return "preference"
     if re.search(r"\b(?:anxious|worried|stressed|stress|concerned)\b", lowered):
         return "stressor"

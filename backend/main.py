@@ -71,6 +71,7 @@ from data_manager import (
     rename_merchant_variants, repair_polluted_merchant_categories,
 )
 from categorizer import get_active_categories
+from categorization_backends import resolve_categorization_backend
 from database import init_db, get_db, get_db_session, close_thread_local_connection
 from local_llm import (
     get_catalog_response,
@@ -347,6 +348,27 @@ def _mira_agentic_runtime_payload() -> dict:
     }
 
 
+def _categorization_status_payload(*, preload_distilbert: bool = False) -> dict:
+    backend = resolve_categorization_backend()
+    payload = {
+        "backend": backend,
+        "localLlmCategorization": backend == "local_llm",
+        "distilbertCategorization": backend == "distilbert",
+        "rulesOnlyCategorization": backend == "rules_only",
+    }
+    if backend == "distilbert":
+        try:
+            from distilbert_categorizer import get_runtime_status
+
+            payload["distilbert"] = get_runtime_status(preload=preload_distilbert)
+        except Exception as exc:
+            payload["distilbert"] = {
+                "available": False,
+                "warnings": [str(exc)],
+            }
+    return payload
+
+
 def _app_config_payload(db=None) -> dict:
     payload = {
         "demoMode": DEMO_MODE,
@@ -354,6 +376,7 @@ def _app_config_payload(db=None) -> dict:
         "manualSyncEnabled": not DEMO_MODE,
         "demoPersistence": "ephemeral" if DEMO_MODE else "persistent",
         "receiptIntelligenceEnabled": RECEIPT_INTELLIGENCE_ENABLED,
+        "categorization": _categorization_status_payload(preload_distilbert=False),
         **_mira_agentic_runtime_payload(),
     }
     try:
@@ -492,6 +515,11 @@ def app_config(db=Depends(get_db_session)):
 @app.get("/api/local-llm/catalog")
 def local_llm_catalog(db=Depends(get_db_session)):
     return get_catalog_response(db)
+
+
+@app.get("/api/categorization/status")
+def categorization_status():
+    return _categorization_status_payload(preload_distilbert=False)
 
 
 @app.get("/api/local-llm/status")
